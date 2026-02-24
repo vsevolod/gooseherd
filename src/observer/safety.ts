@@ -171,6 +171,58 @@ export function checkRepoAllowlist(
 }
 
 /**
+ * Check threshold requirements from the trigger rule against event metadata.
+ *
+ * Thresholds gate low-signal events by requiring minimum occurrence counts,
+ * issue age, or affected user count before allowing a trigger.
+ *
+ * Event metadata is extracted from rawPayload (Sentry, GitHub, Slack adapters
+ * populate these fields when available).
+ */
+export function checkThresholds(
+  event: TriggerEvent,
+  rule: TriggerRule
+): SafetyDecision {
+  const payload = event.rawPayload as Record<string, unknown> | undefined;
+
+  if (rule.minOccurrences !== undefined) {
+    const occurrences = Number(payload?.["occurrences"] ?? payload?.["count"] ?? 1);
+    if (occurrences < rule.minOccurrences) {
+      return {
+        action: "deny",
+        reason: `below minimum occurrences: ${String(occurrences)}/${String(rule.minOccurrences)}`
+      };
+    }
+  }
+
+  if (rule.minAgeMinutes !== undefined) {
+    const firstSeen = payload?.["firstSeen"] ?? payload?.["first_seen"] ?? payload?.["created_at"];
+    if (firstSeen && typeof firstSeen === "string") {
+      const ageMs = Date.now() - new Date(firstSeen).getTime();
+      const ageMinutes = ageMs / 60_000;
+      if (ageMinutes < rule.minAgeMinutes) {
+        return {
+          action: "deny",
+          reason: `below minimum age: ${String(Math.round(ageMinutes))}/${String(rule.minAgeMinutes)} minutes`
+        };
+      }
+    }
+  }
+
+  if (rule.minUserCount !== undefined) {
+    const userCount = Number(payload?.["userCount"] ?? payload?.["user_count"] ?? payload?.["users"] ?? 0);
+    if (userCount < rule.minUserCount) {
+      return {
+        action: "deny",
+        reason: `below minimum user count: ${String(userCount)}/${String(rule.minUserCount)}`
+      };
+    }
+  }
+
+  return { action: "allow", reason: "thresholds met" };
+}
+
+/**
  * Run the full safety pipeline for a trigger event.
  *
  * Returns the first denial reason, or "allow" if all checks pass.
@@ -197,27 +249,31 @@ export function runSafetyChecks(
     return { action: "deny", reason: "duplicate event" };
   }
 
-  // 2. Repo allowlist
+  // 2. Thresholds (occurrence count, age, user count)
+  const thresholdResult = checkThresholds(event, rule);
+  if (thresholdResult.action === "deny") return thresholdResult;
+
+  // 3. Repo allowlist
   if (repoSlug) {
     const allowResult = checkRepoAllowlist(repoSlug, opts.repoAllowlist);
     if (allowResult.action === "deny") return allowResult;
   }
 
-  // 3. Rate limit
+  // 4. Rate limit
   const rateResult = checkRateLimit(event.source, opts.rateLimitTimestamps);
   if (rateResult.action === "deny") return rateResult;
 
-  // 4. Global budget
+  // 5. Global budget
   const budgetResult = checkBudget(opts.dailyCount, opts.maxDaily);
   if (budgetResult.action === "deny") return budgetResult;
 
-  // 5. Per-repo budget
+  // 6. Per-repo budget
   if (repoSlug) {
     const repoResult = checkPerRepoBudget(repoSlug, opts.repoCount, opts.maxPerRepo);
     if (repoResult.action === "deny") return repoResult;
   }
 
-  // 6. Cooldown
+  // 7. Cooldown
   const cooldownResult = checkCooldown(
     opts.completedAt,
     rule.cooldownMinutes

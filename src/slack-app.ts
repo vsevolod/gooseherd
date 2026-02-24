@@ -3,6 +3,8 @@ import type { AppConfig } from "./config.js";
 import { parseCommand } from "./command-parser.js";
 import { logInfo } from "./logger.js";
 import { RunManager } from "./run-manager.js";
+import type { ObserverDaemon } from "./observer/index.js";
+import { parseSlackAlert, type SlackChannelAdapterConfig, type SlackMessageEvent } from "./observer/sources/slack-channel-adapter.js";
 
 function isRepoAllowed(repoSlug: string, allowlist: string[]): boolean {
   if (allowlist.length === 0) {
@@ -93,7 +95,7 @@ export function parseFollowUpMessage(text: string): { task: string; baseBranch?:
   };
 }
 
-export async function startSlackApp(config: AppConfig, runManager: RunManager): Promise<void> {
+export async function startSlackApp(config: AppConfig, runManager: RunManager, observer?: ObserverDaemon): Promise<void> {
   const app = new App({
     token: config.slackBotToken,
     appToken: config.slackAppToken,
@@ -280,6 +282,48 @@ export async function startSlackApp(config: AppConfig, runManager: RunManager): 
       text: `Retry queued as ${shortRunId(retried.id)}.`
     });
   });
+
+  // ── Observer: Slack channel alert watcher ──────────────────────
+  if (observer && config.observerSlackWatchedChannels.length > 0) {
+    const adapterConfig: SlackChannelAdapterConfig = {
+      watchedChannels: config.observerSlackWatchedChannels,
+      botAllowlist: config.observerSlackBotAllowlist,
+      repoMap: config.observerRepoMap,
+      alertChannelId: config.observerAlertChannelId
+    };
+
+    app.message(async ({ message }) => {
+      // Only process bot messages (alert bots have bot_id)
+      const msg = message as unknown as Record<string, unknown>;
+      if (!msg.bot_id) return;
+
+      const slackEvent: SlackMessageEvent = {
+        type: (msg.type as string) ?? "message",
+        subtype: msg.subtype as string | undefined,
+        bot_id: msg.bot_id as string,
+        bot_profile: msg.bot_profile as SlackMessageEvent["bot_profile"],
+        text: msg.text as string | undefined,
+        channel: msg.channel as string,
+        ts: msg.ts as string,
+        attachments: msg.attachments as SlackMessageEvent["attachments"],
+        blocks: msg.blocks as SlackMessageEvent["blocks"]
+      };
+
+      const triggerEvent = parseSlackAlert(slackEvent, adapterConfig);
+      if (triggerEvent) {
+        observer.enqueueEvent(triggerEvent);
+        logInfo("Observer: Slack channel alert detected", {
+          channel: slackEvent.channel,
+          botId: slackEvent.bot_id,
+          eventId: triggerEvent.id
+        });
+      }
+    });
+
+    logInfo("Observer: Slack channel watcher registered", {
+      channels: config.observerSlackWatchedChannels.length
+    });
+  }
 
   app.event("app_mention", async ({ event, say }) => {
     const replyThreadTs = event.thread_ts ?? event.ts;

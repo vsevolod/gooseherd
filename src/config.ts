@@ -27,6 +27,7 @@ const envSchema = z.object({
   AGENT_FOLLOW_UP_TEMPLATE: z.string().optional(),
   VALIDATION_COMMAND: z.string().optional(),
   LINT_FIX_COMMAND: z.string().optional(),
+  LOCAL_TEST_COMMAND: z.string().optional(),
   MAX_VALIDATION_ROUNDS: z.string().optional(),
   AGENT_TIMEOUT_SECONDS: z.string().optional(),
   SLACK_PROGRESS_HEARTBEAT_SECONDS: z.string().optional(),
@@ -57,6 +58,8 @@ const envSchema = z.object({
   OBSERVER_COOLDOWN_MINUTES: z.string().optional(),
   OBSERVER_RULES_FILE: z.string().optional(),
   OBSERVER_REPO_MAP: z.string().optional(),
+  OBSERVER_SLACK_WATCHED_CHANNELS: z.string().optional(),
+  OBSERVER_SLACK_BOT_ALLOWLIST: z.string().optional(),
 
   SENTRY_AUTH_TOKEN: z.string().optional(),
   SENTRY_ORG_SLUG: z.string().optional(),
@@ -76,6 +79,7 @@ const envSchema = z.object({
 
   BROWSER_VERIFY_ENABLED: z.string().optional(),
   REVIEW_APP_URL_PATTERN: z.string().optional(),
+  SCREENSHOT_ENABLED: z.string().optional(),
 
   CI_WAIT_ENABLED: z.string().optional(),
   CI_POLL_INTERVAL_SECONDS: z.string().optional(),
@@ -142,6 +146,7 @@ export interface AppConfig {
   agentFollowUpTemplate?: string;
   validationCommand: string;
   lintFixCommand: string;
+  localTestCommand: string;
   maxValidationRounds: number;
   agentTimeoutSeconds: number;
   slackProgressHeartbeatSeconds: number;
@@ -173,6 +178,10 @@ export interface AppConfig {
   observerRulesFile: string;
   /** Sentry project → repo mapping: "proj:owner/repo,proj2:owner/repo2" */
   observerRepoMap: Map<string, string>;
+  /** Slack channels to watch for alert bot messages */
+  observerSlackWatchedChannels: string[];
+  /** Optional: only process messages from these bot IDs */
+  observerSlackBotAllowlist: string[];
 
   sentryAuthToken?: string;
   sentryOrgSlug?: string;
@@ -192,6 +201,7 @@ export interface AppConfig {
 
   browserVerifyEnabled: boolean;
   reviewAppUrlPattern?: string;
+  screenshotEnabled: boolean;
 
   ciWaitEnabled: boolean;
   ciPollIntervalSeconds: number;
@@ -261,6 +271,7 @@ export function loadConfig(): AppConfig {
     agentFollowUpTemplate: parsed.AGENT_FOLLOW_UP_TEMPLATE?.trim() || undefined,
     validationCommand: parsed.VALIDATION_COMMAND ?? "",
     lintFixCommand: parsed.LINT_FIX_COMMAND?.trim() || "",
+    localTestCommand: parsed.LOCAL_TEST_COMMAND?.trim() || "",
     maxValidationRounds: parseInteger(parsed.MAX_VALIDATION_ROUNDS, 2),
     agentTimeoutSeconds: parseInteger(parsed.AGENT_TIMEOUT_SECONDS, 1200),
     slackProgressHeartbeatSeconds: parseInteger(parsed.SLACK_PROGRESS_HEARTBEAT_SECONDS, 20),
@@ -291,6 +302,8 @@ export function loadConfig(): AppConfig {
     observerCooldownMinutes: parseInteger(parsed.OBSERVER_COOLDOWN_MINUTES, 60),
     observerRulesFile: parsed.OBSERVER_RULES_FILE?.trim() || "observer-rules/default.yml",
     observerRepoMap: parseRepoMap(parsed.OBSERVER_REPO_MAP),
+    observerSlackWatchedChannels: parseList(parsed.OBSERVER_SLACK_WATCHED_CHANNELS),
+    observerSlackBotAllowlist: parseList(parsed.OBSERVER_SLACK_BOT_ALLOWLIST),
 
     sentryAuthToken: parsed.SENTRY_AUTH_TOKEN?.trim() || undefined,
     sentryOrgSlug: parsed.SENTRY_ORG_SLUG?.trim() || undefined,
@@ -310,6 +323,7 @@ export function loadConfig(): AppConfig {
 
     browserVerifyEnabled: parseBoolean(parsed.BROWSER_VERIFY_ENABLED, false),
     reviewAppUrlPattern: parsed.REVIEW_APP_URL_PATTERN?.trim() || undefined,
+    screenshotEnabled: parseBoolean(parsed.SCREENSHOT_ENABLED, false),
 
     ciWaitEnabled: parseBoolean(parsed.CI_WAIT_ENABLED, false),
     ciPollIntervalSeconds: parseInteger(parsed.CI_POLL_INTERVAL_SECONDS, 30),

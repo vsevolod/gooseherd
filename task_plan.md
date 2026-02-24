@@ -1,84 +1,149 @@
-# Task Plan — Phase 9: Agent Intelligence + Infrastructure (Tasks 9, 17, 13, 18, 16, 15)
+# Task Plan — Phase 10: Quality Depth + Adoption (Tasks 7, 26, 19, 20, 22, 10)
 
 ## Goal
-Activate CI feedback loop for all users, fix infrastructure gaps, and improve agent intelligence for follow-up runs and memory.
+Deepen pipeline quality (plan-before-code, local tests, threshold safety) and remove adoption friction (Slack manifest, channel observer, visual feedback).
 
-## Implementation Order (per council recommendation)
+## Implementation Order
 ```
-9 → 17 → 13 → 18 → 16 → 15
+7 → 26 → 19 → 20 → 22 → 10
 ```
-Risk-free multipliers first, then context flywheel (18 feeds 16), then UX polish (15).
-Task 7 (Slack channel adapter) and Task 10 (screenshots) deferred to next batch.
+- Task 7: Wiring job (30 lines) — activates complete Slack channel observer input source
+- Task 26: YAML artifact (no code) — removes biggest installation friction
+- Task 19: Plan node — LLM planning step before agent codes
+- Task 20: Local test node — fail fast before push
+- Task 22: Observer thresholds — prevent noise triggers
+- Task 10: Screenshots — most user-visible feature (deferred to end due to dependency on Playwright)
 
-## Phases
+---
 
-### Phase 1: CI Feedback in Default Pipeline (Task 9) — `pending`
-Add `wait_ci`/`fix_ci` loop to `default.yml` so every user gets CI feedback by default.
+## Phase 1: Wire Slack Channel Adapter (Task 7) — `complete`
 
-- File: `pipelines/default.yml` — insert `wait_ci` + `fix_ci` loop after `create_pr`, before `notify`
-- Copy the block verbatim from `with-ci-feedback.yml` (lines 68-75)
-- The node already returns success immediately when `CI_WAIT_ENABLED=false` (default), so this is safe
+**Files to change:**
+- `src/slack-app.ts` — add `app.message()` listener
 
-### Phase 2: CEMS x-team-id Header (Task 17) — `pending`
-Add missing `x-team-id` header to both CEMS API calls.
+**What to do:**
+1. Read `src/observer/sources/slack-channel-adapter.ts` to understand `parseSlackAlert` API
+2. Read `src/slack-app.ts` to find where to add the listener
+3. Add `app.message()` handler in `registerSlackHandlers` that:
+   - Filters: only channels in observer watch config, ignore bot's own messages
+   - Calls `parseSlackAlert(message)` to extract trigger events
+   - Routes matched events through `observerDaemon.processEvent()`
+4. Pass `observerDaemon` reference through to the handler (may need to add to function params)
 
-- File: `src/config.ts` — add `CEMS_TEAM_ID` to env schema + `cemsTeamId?: string` to AppConfig
-- File: `src/memory/cems-provider.ts` — add `teamId?: string` to `CemsProviderConfig`, include `x-team-id` header in both fetch calls
-- File: `src/index.ts` — pass `teamId` when constructing CemsProvider
+**Acceptance:** Alert-bot messages in watched channels produce trigger events in observer log.
 
-### Phase 3: Real Agent Default (Task 13) — `pending`
-Detect `goose` binary on PATH at startup, warn if using dummy agent.
+---
 
-- File: `src/config.ts` — no change (template stays as-is)
-- File: `src/index.ts` — after `loadConfig()`, check if agent command uses dummy-agent.sh + `goose` not on PATH → log warning
-- Use `which goose` via child_process.execSync or import `execSync`
-- Warning only, not blocking — still allow dummy for dev/test
+## Phase 2: Slack App Manifest (Task 26) — `complete`
 
-### Phase 4: Inject Diff in Follow-Up Prompts (Task 18) — `pending`
-Give the agent actual diff content (not just file names) on follow-up runs.
+**Files to create:**
+- `slack-app-manifest.yml` in repo root
 
-- File: `src/pipeline/nodes/hydrate-context.ts` — in the `parentContext` block (lines 81-95):
-  - Run `git show HEAD --stat --unified=3` in repoDir
-  - Truncate to ~3000 chars
-  - Add "### Changes from previous run" section with the diff output
-- Uses `runShellCapture` already imported
+**What to do:**
+1. Read `src/slack-app.ts` to catalog all required scopes, events, interactive components
+2. Create manifest YAML with:
+   - Bot scopes: `chat:write`, `commands`, `app_mentions:read`, `channels:history`, `channels:read`
+   - Event subscriptions: `message.channels`, `app_mention`
+   - Interactive components: approve/reject buttons
+   - Socket Mode enabled
+3. Test by importing into Slack API portal
 
-### Phase 5: Richer Memory Storage (Task 16) — `pending`
-Store structured run data and positive feedback in memory.
+**Acceptance:** New user can import manifest → copy 3 tokens → gooseherd starts.
 
-- File: `src/hooks/run-lifecycle.ts`:
-  - `onRunComplete`: include task type, diff stats, duration, outcome in the summary string
-  - `onFeedback`: store positive feedback too (remove `rating !== "down"` guard), tag appropriately
-- The `MemoryProvider` interface stays unchanged — we enrich the content string, not the API
+---
 
-### Phase 6: User-Friendly Error Messages (Task 15) — `pending`
-Classify errors and show actionable messages in Slack.
+## Phase 3: Plan Task Node (Task 19) — `complete`
 
-- File: `src/run-manager.ts` — add `classifyError(message: string)` function:
-  - Map known patterns: clone failed, lint failed, test failed, agent crashed, push rejected, timeout
-  - Return `{ category, friendlyMessage, suggestion }`
-- Use classifier in `postRunSummary` failure block to show user-friendly text + actionable suggestion
-- Raw error stays in dashboard/logs for debugging
+**Files to create:**
+- `src/pipeline/nodes/plan-task.ts`
 
-### Phase 7: Tests + Validation — `pending`
-- Unit tests for error classifier, diff injection, memory enrichment
-- Run full suite: `node --test --import tsx tests/*.test.ts`
-- TypeScript compile check
-- codex-investigator validation
+**Files to change:**
+- `src/pipeline/pipeline-engine.ts` — register `plan_task` in NODE_HANDLERS
+- `pipelines/full.yml` — add `plan_task` before `implement`
+- `src/config.ts` — add `PLAN_TASK_ENABLED` flag (optional, default false)
 
-## Files Modified
+**What to do:**
+1. Read `src/observer/smart-triage.ts` for LLM call pattern (`callLLMForJSON`)
+2. Read `src/pipeline/nodes/implement.ts` for how prompt is built
+3. Create `plan-task.ts` node that:
+   - Reads task from context bag
+   - Calls LLM to break task into implementation steps
+   - Writes structured plan to context bag (`ctx.set("implementationPlan", plan)`)
+4. Modify `hydrateContextNode` to include plan in prompt file if present
+5. Add to `full.yml` pipeline, optionally to default pipeline behind feature flag
 
-| File | Changes |
-|------|---------|
-| `pipelines/default.yml` | Add wait_ci + fix_ci loop (Task 9) |
-| `src/config.ts` | Add CEMS_TEAM_ID (Task 17) |
-| `src/memory/cems-provider.ts` | Add x-team-id header (Task 17) |
-| `src/index.ts` | Pass teamId to CemsProvider (Task 17), agent detection warning (Task 13) |
-| `src/pipeline/nodes/hydrate-context.ts` | Inject diff in follow-ups (Task 18) |
-| `src/hooks/run-lifecycle.ts` | Richer memory + positive feedback (Task 16) |
-| `src/run-manager.ts` | Error classifier + friendly messages (Task 15) |
+**Acceptance:** When enabled, agent receives a structured plan in its prompt.
 
-## Error Log
+---
+
+## Phase 4: Local Test Node (Task 20) — `complete`
+
+**Files to create:**
+- `src/pipeline/nodes/local-test.ts`
+
+**Files to change:**
+- `src/pipeline/pipeline-engine.ts` — register `local_test` in NODE_HANDLERS
+- `src/config.ts` — add `LOCAL_TEST_COMMAND` env var
+- `pipelines/default.yml` — add `local_test` after `validate`, before `commit`
+
+**What to do:**
+1. Read `src/pipeline/nodes/validate.ts` for the pattern to copy
+2. Create `local-test.ts` that runs `config.localTestCommand` via `runShellCapture`
+3. Return `skipped` if command is empty, `failure` if exit code != 0
+4. Wire into default pipeline with `if: "config.localTestCommand != ''"`
+5. Add `on_failure` loop to `fix_validation` for auto-fix
+
+**Acceptance:** Pipeline runs project tests locally before committing.
+
+---
+
+## Phase 5: Observer Threshold Configuration (Task 22) — `complete`
+
+**Files to change:**
+- `src/observer/types.ts` — add threshold fields to `TriggerRule`
+- `src/observer/trigger-rules.ts` — parse new threshold fields
+- `src/observer/safety.ts` — add `checkThresholds()` safety check
+
+**What to do:**
+1. Read `src/observer/types.ts` for `TriggerRule` interface
+2. Read `src/observer/trigger-rules.ts` for parsing pattern
+3. Read `src/observer/safety.ts` for existing safety check pattern
+4. Add `minOccurrences?`, `minAgeMinutes?`, `minUserCount?` to `TriggerRule`
+5. Parse them in `loadTriggerRules`
+6. Add `checkThresholds(event, rule)` to `runSafetyChecks`
+
+**Acceptance:** Trigger rules with threshold config correctly gate low-signal events.
+
+---
+
+## Phase 6: Screenshot/Visual Preview (Task 10) — `complete`
+
+**Files to change:**
+- `src/pipeline/quality-gates/browser-verify-node.ts` — add screenshot capture after smoke test
+- `src/config.ts` — add `SCREENSHOT_ENABLED`, `PREVIEW_URL_TEMPLATE` env vars
+
+**What to do:**
+1. Read `src/pipeline/quality-gates/browser-verify-node.ts` for current flow
+2. Add Playwright screenshot step (conditionally, when `SCREENSHOT_ENABLED=true`)
+3. Save screenshot to run directory
+4. Post screenshot to Slack thread via `files.uploadV2`
+5. Keep lightweight — opt-in only, skip if no preview URL
+
+**Acceptance:** After PR, screenshot of preview URL appears in Slack thread.
+
+---
+
+## Phase 7: Tests + Validation — `complete`
+
+- Write unit tests for new functionality
+- Run full test suite (346+ tests)
+- TypeScript clean
+- Codex-investigator validation
+- Update progress.md
+
+---
+
+## Errors Encountered
 | Error | Attempt | Resolution |
 |-------|---------|------------|
 | (none yet) | | |

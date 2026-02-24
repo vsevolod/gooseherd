@@ -31,317 +31,35 @@ All 3 critical tasks completed. Agent now has codebase context, task-type-specif
 
 ---
 
-## HIGH — Core Features Are Stubs or Dead Code
+## ~~HIGH — Core Features Are Stubs or Dead Code~~ MOSTLY DONE
 
-These are features that were partially built but never connected, or exist as dead code.
+~~Task 4~~, ~~Task 5~~, ~~Task 6~~, ~~Task 8~~, ~~Task 9~~, ~~Task 11~~ — all completed (Phases 8-9).
 
-### Task 4: Fix Per-Repo Pipeline Override (Dead Code)
-
-**Severity:** HIGH
-**Status:** Dead code — built but not wired
-**Codex verified:** YES — finding #1: `repoConfigPipeline` set in context by clone.ts but never read by pipeline engine
-**Source docs:**
-- `docs/bulletproof_system_architecture_2026-02-21.md` — specifies `gooseherd.yml` per-repo config
-- `docs/installation-tiers-research-2026-02-21.md` — central gooseherd.yml config
-
-**Problem:** clone.ts reads `gooseherd.yml` from the cloned repo and sets `repoConfigPipeline` in the context bag. But RunManager always passes `this.config.pipelineFile` to the engine. The per-repo pipeline override is never used.
-
-**What's needed:**
-- Pipeline engine should check context bag for `repoConfigPipeline` before falling back to config
-- Or: RunManager should read context bag after clone and switch pipeline file
-- Either way: one line of wiring to activate already-built functionality
+~~Remaining HIGH: Task 7 (Slack channel adapter), Task 10 (screenshots).~~ **ALL DONE**
 
 ---
 
-### Task 5: Wire Observer Approval Buttons
-
-**Severity:** HIGH
-**Status:** No-op — explicit TODO in code
-**Codex verified:** YES — finding #2: explicit TODO in daemon.ts:255-257, no `app.action("observer_approve")` handler in slack-app.ts
-**Source docs:**
-- `docs/observer_system_research_2026-02-20.md` — Phase 2 approval flow, Slack interactive buttons
-- `docs/bulletproof_system_architecture_2026-02-21.md` — approval gate backend
-
-**Problem:** Observer posts Slack messages with approve/dismiss buttons but clicking them does nothing. No action handler is registered in slack-app.ts.
-
-**What's needed:**
-- Add `app.action("observer_approve")` and `app.action("observer_dismiss")` handlers in slack-app.ts
-- On approve: call `runManager.enqueueRun()` with the trigger event data
-- On dismiss: log dismissal, optionally snooze the trigger rule
-- Handle timeout (30-minute window from research doc)
+### ~~Task 7: Wire Slack Channel Adapter to Bolt~~ DONE
+### ~~Task 8: Multi-MCP Extension Support~~ DONE
+### ~~Task 9: Enable CI Feedback in Default Pipeline~~ DONE
+### ~~Task 10: Visual Screenshot/Preview Step in Slack~~ DONE
 
 ---
 
-### Task 6: Wire Smart Triage Pipeline Hint
-
-**Severity:** HIGH
-**Status:** Dead field — parsed but unused
-**Codex verified:** YES — finding #3: LLM returns pipeline hint, code parses it, nobody reads it
-**Source docs:**
-- `docs/observer_system_research_2026-02-20.md` — smart triage suggests pipeline complexity
-
-**Problem:** The smart triage LLM returns a `suggestedPipeline` field. The code parses it out of the LLM response. But nothing downstream ever reads this field to select which pipeline YAML to use.
-
-**What's needed:**
-- Pass `suggestedPipeline` from triage result into the trigger event
-- When observer enqueues a run, use the hint to select pipeline file (default, with-quality-gates, with-ci-feedback, full)
-- Fallback to default if hint is absent or invalid
+### ~~Task 11: "Awaiting Instructions" Idle State in Slack~~ DONE
 
 ---
 
-### Task 7: Wire Slack Channel Adapter to Bolt
+## ~~MEDIUM-HIGH — Adoption Blockers and Missing Polish~~ ALL DONE
 
-**Severity:** HIGH
-**Status:** Dead code — exists but not connected
-**Codex verified:** YES (by Explore agent)
-**Source docs:**
-- `docs/observer_system_research_2026-02-20.md` — Phase 2: Slack channel observer
-
-**Problem:** SlackChannelAdapter class exists as a source adapter but is NOT wired to the Slack Bolt app. No message listener feeds events to it. It's completely inert.
-
-**What's needed:**
-- Add a Bolt `app.message()` listener that feeds non-command messages to SlackChannelAdapter
-- Filter: only channels in an observer watch list, ignore bot's own messages
-- Route matched messages through safety pipeline → approval flow
-
----
-
-### Task 8: Multi-MCP Extension Support
-
-**Severity:** HIGH
-**Status:** Single slot only
-**Codex verified:** YES — finding #4: only `cemsMcpCommand` in config, one `--with-extension` flag
-**Source docs:**
-- `docs/minions_v2_deep_research_2026-02-20.md` — Gap 3 (NOT CLOSED): multi-MCP untouched
-- `docs/bulletproof_system_architecture_2026-02-21.md` — specifies array of MCP extensions
-
-**Problem:** Config has a single `cemsMcpCommand` string. implement.ts, fix-validation.ts, and fix-ci-node.ts each pass one `--with-extension` flag. The bulletproof spec calls for an array of extensions per repo.
-
-**What's needed:**
-- Change config from single string to array: `mcpExtensions: string[]`
-- Loop over array when building agent command flags
-- Support per-repo MCP extension lists in gooseherd.yml
-- Backwards-compatible: single string config still works
-
----
-
-### Task 9: Enable CI Feedback in Default Pipeline
-
-**Severity:** HIGH
-**Status:** Exists but not in default pipeline
-**Codex verified:** N/A (pipeline YAML config choice)
-**Source docs:**
-- `docs/bulletproof_system_architecture_2026-02-21.md` — CI as core feature
-- `docs/minions_v2_deep_research_2026-02-20.md` — P1 (CI feedback) done but only in optional pipelines
-
-**Problem:** wait_ci + fix_ci nodes are fully implemented but only available in `with-ci-feedback.yml` and `full.yml`. The default pipeline (`default.yml`) ships without them. Most users will never see CI feedback.
-
-**What's needed:**
-- Decision: should default pipeline include CI feedback? If so, add wait_ci + fix_ci nodes
-- Or: make pipeline selection smarter (auto-detect if repo has CI configured)
-- Or: document clearly which pipeline to use and why
-
----
-
-### Task 10: Visual Screenshot/Preview Step in Slack
-
-**Severity:** HIGH
-**Status:** Not implemented — existing browser-verify is curl+pa11y only
-**Codex verified:** YES — browser-verify-node.ts confirmed: smoke test (curl HTTP status) + accessibility (pa11y). No screenshot capture, no visual preview posted anywhere.
-**Source docs:**
-- `docs/bulletproof_system_architecture_2026-02-21.md` — browser verification step
-- `docs/minions_v2_deep_research_2026-02-20.md` — browser verify node
-**Inspired by:** Devin.ai — posts actual screenshot of deployed result to Slack thread
-
-**Problem:** Our browser-verify node runs `curl` for HTTP status and `pa11y` for accessibility. It never takes a visual screenshot of the deployed page. Users can't see what their changes look like without manually opening the preview URL. Devin posts an actual screenshot embedded in the Slack thread so the user can visually verify the result without leaving Slack.
-
-**What's needed:**
-- Take a screenshot of the review app URL after PR creation (Playwright, Puppeteer, or headless Chrome)
-- Upload screenshot to Slack thread as an image attachment
-- Optional: generate before/after comparison if prior screenshot exists
-- Keep lightweight: screenshot step should be opt-in (not all changes are visual)
-- Consider integration with preview deployment services (Vercel, Netlify, Render) for auto-generated preview URLs
-
----
-
-### Task 11: "Awaiting Instructions" Idle State in Slack
-
-**Severity:** HIGH
-**Status:** Not implemented
-**Codex verified:** N/A
-**Source docs:**
-- `docs/slack-ux-issues.md` — UX polish
-**Inspired by:** Devin.ai — shows "Devin is awaiting instructions" after run completes
-
-**Problem:** After a run completes (success or failure), the bot posts a summary and goes silent. There's no explicit signal that the bot is ready for the next command. Users don't know if they can immediately ask for a follow-up or if something is still processing. Devin shows a clear "awaiting instructions" state that communicates readiness.
-
-**What's needed:**
-- After run completion summary, post a clean "ready for instructions" footer in the thread
-- Show available actions: "Reply in this thread to continue, or start a new task"
-- Distinguish between: idle (ready), processing (busy), waiting for approval (blocked)
-- Update Slack status card to reflect current state (not just run progress)
-- Consider: Slack bot presence/status indicator ("Online — ready" vs "Busy — running task")
-
----
-
-## MEDIUM-HIGH — Adoption Blockers and Missing Polish
-
-### Task 12: Change DRY_RUN Default to False
-
-**Severity:** MEDIUM-HIGH
-**Status:** Not implemented (defaults to true)
-**Codex verified:** N/A (config.ts)
-**Source docs:**
-- `docs/installation-tiers-research-2026-02-21.md` — biggest adoption blocker
-- `docs/bulletproof_system_architecture_2026-02-21.md` — DRY_RUN default to false
-
-**Problem:** First-time users get a system that does nothing visible. DRY_RUN=true means no push, no PR. Confusing first experience.
-
-**What's needed:**
-- Change default in config.ts from `true` to `false`
-- Update .env.example with clear comment explaining DRY_RUN
-- Consider a startup warning if DRY_RUN is true ("Running in dry-run mode — no PRs will be created")
-
----
-
-### Task 13: Ship a Real Agent Default
-
-**Severity:** MEDIUM-HIGH
-**Status:** Not implemented (dummy-agent.sh)
-**Codex verified:** N/A (config)
-**Source docs:**
-- `docs/installation-tiers-research-2026-02-21.md` — no real Goose default
-- `docs/bulletproof_system_architecture_2026-02-21.md` — real Goose agent default
-
-**Problem:** Ships with `scripts/dummy-agent.sh` as default agent. No Goose binary detection, no provider auto-detect. Users must manually configure the agent command.
-
-**What's needed:**
-- Detect if `goose` binary is on PATH; if so, use it as default
-- Provide clear error message if no agent is configured and dummy is still default
-- Document minimum agent requirements (what CLI interface the agent must expose)
-
----
-
-### Task 14: Add Dashboard Public URL Config
-
-**Severity:** MEDIUM-HIGH
-**Status:** Not implemented — localhost only
-**Codex verified:** YES — finding #6: Slack card URL uses `${dashboardHost}:${dashboardPort}`
-**Source docs:**
-- `docs/slack-ux-issues.md` — open issue: dashboard URL localhost
-- `docs/hubble_expansion_research_2026-02-18.md` — deployment gaps
-
-**Problem:** Slack status cards link to `http://localhost:3001/runs/...`. Broken in any non-localhost deployment (Docker, cloud, Tailscale).
-
-**What's needed:**
-- Add `DASHBOARD_PUBLIC_URL` env var (e.g., `https://gooseherd.example.com`)
-- Use it when constructing Slack card URLs
-- Fallback to `${dashboardHost}:${dashboardPort}` for local dev
-
----
-
-### Task 15: User-Friendly Error Messages in Slack
-
-**Severity:** MEDIUM-HIGH
-**Status:** Not implemented
-**Codex verified:** N/A
-**Source docs:**
-- `docs/slack-ux-issues.md` — open issue: raw error messages (Medium)
-
-**Problem:** Pipeline failures show raw stack traces in Slack. Not helpful for non-technical users requesting tasks.
-
-**What's needed:**
-- Classify errors into user-friendly categories (clone failed, lint failed, tests failed, agent crashed, etc.)
-- Show summary in Slack, full details in dashboard
-- Include actionable suggestions ("Try running `npm test` locally to reproduce")
-
----
-
-### Task 16: Richer Memory Storage (Not Flat Text)
-
-**Severity:** MEDIUM-HIGH
-**Status:** Flat text only
-**Codex verified:** YES — finding #5: `onRunComplete` stores one-liner, positive feedback discarded
-**Source docs:**
-- `docs/hubble_expansion_research_2026-02-18.md` — structured memory, feedback loop
-
-**Problem:** `onRunComplete` saves "Completed task on X: [task]. Changed files: [list]". No structured data. Positive feedback from Slack thumbs-up is not stored in memory at all.
-
-**What's needed:**
-- Store structured run data: task type, files changed, diff summary, duration, outcome, error category
-- Save Slack feedback (thumbs up/down) to memory with run context
-- Tag memories with repo, task type, outcome for better retrieval
-- Differentiate memory categories (not just flat `category: "gooseherd"`)
-
----
-
-### Task 17: Fix CEMS x-team-id Header
-
-**Severity:** MEDIUM-HIGH
-**Status:** Not implemented
-**Codex verified:** YES (by Explore agent)
-**Source docs:**
-- `docs/hubble_expansion_research_2026-02-18.md` — x-team-id required for shared memory
-
-**Problem:** CemsProvider never sends the `x-team-id` header. Shared cross-agent memory won't work — all memories are siloed to the individual agent.
-
-**What's needed:**
-- Add `CEMS_TEAM_ID` to config
-- Include `x-team-id` header in all CEMS API calls
-- Ensure shared scope memories are accessible across agents in the same team
-
----
-
-### Task 18: Inject Actual Diff in Follow-Up Prompts
-
-**Severity:** MEDIUM-HIGH
-**Status:** Not implemented
-**Codex verified:** N/A
-**Source docs:**
-- `docs/hubble_expansion_research_2026-02-18.md` — diff-based feedback loop
-
-**Problem:** Follow-up runs get the previous task text and file list but NOT the actual diff content. The agent can't see what was previously changed, only file names.
-
-**What's needed:**
-- On follow-up runs, include the parent run's diff (or a summary of it) in the prompt
-- Truncate large diffs to key sections (keep the diff under token limits)
-- This dramatically improves follow-up quality — agent knows exactly what to build on
+~~Task 12~~ (DRY_RUN default), ~~Task 13~~ (agent default detection), ~~Task 14~~ (dashboard URL), ~~Task 15~~ (error classifier), ~~Task 16~~ (enriched memory), ~~Task 17~~ (CEMS team ID), ~~Task 18~~ (follow-up diffs) — all completed (Phases 8-9).
 
 ---
 
 ## MEDIUM — Missing Features From Vision Docs
 
-### Task 19: Plan Task Node (LLM Planning Before Implementation)
-
-**Severity:** MEDIUM
-**Status:** Not implemented
-**Codex verified:** N/A
-**Source docs:**
-- `docs/bulletproof_system_architecture_2026-02-21.md` — `plan_task` node in pipeline
-
-**Problem:** Bulletproof spec calls for an LLM step that creates an implementation plan before the agent runs. This would catch scope issues early and give better instructions to the agent.
-
-**What's needed:**
-- New pipeline node: `plan_task` — calls LLM to break task into steps
-- Output: structured plan that feeds into implement node's prompt
-- Optional: present plan to user for approval before proceeding
-
----
-
-### Task 20: Local Test Node (Run Tests Before Push)
-
-**Severity:** MEDIUM
-**Status:** Not implemented
-**Codex verified:** N/A
-**Source docs:**
-- `docs/bulletproof_system_architecture_2026-02-21.md` — `local_test` node in pipeline
-
-**Problem:** Currently tests only run through CI after push. No local test execution in the pipeline. Agent changes that break tests are discovered late.
-
-**What's needed:**
-- New pipeline node: `local_test` — runs configured test command in workspace
-- Position: after validate, before commit
-- Fail the pipeline if tests fail (with structured error output for fix_validation)
+### ~~Task 19: Plan Task Node (LLM Planning Before Implementation)~~ DONE
+### ~~Task 20: Local Test Node (Run Tests Before Push)~~ DONE
 
 ---
 
@@ -363,20 +81,7 @@ These are features that were partially built but never connected, or exist as de
 
 ---
 
-### Task 22: Observer Threshold Configuration
-
-**Severity:** MEDIUM
-**Status:** Not implemented
-**Codex verified:** N/A
-**Source docs:**
-- `docs/observer_system_research_2026-02-20.md` — occurrence, age, user-count thresholds
-
-**Problem:** Observer trigger rules lack the threshold configuration described in research: minimum occurrence count, issue age, affected user count before triggering.
-
-**What's needed:**
-- Add threshold fields to trigger rule YAML: `minOccurrences`, `minAge`, `minUserCount`
-- Safety pipeline checks thresholds before allowing trigger
-- Prevents premature triggering on one-off errors
+### ~~Task 22: Observer Threshold Configuration~~ DONE
 
 ---
 
@@ -433,21 +138,7 @@ These are features that were partially built but never connected, or exist as de
 
 ---
 
-### Task 26: Slack App Manifest
-
-**Severity:** MEDIUM
-**Status:** Not implemented
-**Codex verified:** N/A
-**Source docs:**
-- `docs/installation-tiers-research-2026-02-21.md` — one-click Slack setup
-- `docs/bulletproof_system_architecture_2026-02-21.md` — Slack App Manifest
-
-**Problem:** Users must manually create a Slack app, configure scopes, enable socket mode, etc. Tedious and error-prone.
-
-**What's needed:**
-- Create `slack-app-manifest.yml` with all required scopes, events, and interactive components
-- Users can import manifest directly into Slack API portal
-- Document the one-click setup flow
+### ~~Task 26: Slack App Manifest~~ DONE
 
 ---
 
@@ -622,12 +313,13 @@ These are features that were partially built but never connected, or exist as de
 | Severity | Count | Description |
 |----------|-------|-------------|
 | ~~CRITICAL~~ | ~~3~~ | ~~Agent is blind, mute, and generic~~ **DONE** |
-| HIGH | 8 | Dead code, stubs, missing wiring, visual feedback, idle state |
-| MEDIUM-HIGH | 7 | Adoption blockers, missing polish |
-| MEDIUM | 11 | Vision features not yet built |
+| ~~HIGH~~ | ~~8~~ | ~~Dead code, stubs, missing wiring~~ **ALL DONE** |
+| ~~MEDIUM-HIGH~~ | ~~7~~ | ~~Adoption blockers, missing polish~~ **ALL DONE** |
+| MEDIUM | 11 → 7 | Vision features not yet built |
 | LOW | 8 | Nice-to-haves, long-term |
 | Housekeeping | 1 | Doc staleness |
-| **Remaining** | **35** | |
+| **Completed** | **25** | |
+| **Remaining** | **12** | |
 
 ---
 
@@ -635,16 +327,16 @@ These are features that were partially built but never connected, or exist as de
 
 These gaps were confirmed by reading actual source code (not just docs):
 
-| Codex # | Task # | What Was Found |
-|---------|--------|----------------|
-| #1 | Task 4 | Per-repo pipeline override: `repoConfigPipeline` set but never read |
-| #2 | Task 5 | Observer approval buttons: TODO in daemon.ts:255-257, no handler |
-| #3 | Task 6 | Smart triage pipeline hint: parsed by code, read by nobody |
-| #4 | Task 8 | Single MCP slot: one `--with-extension` flag only |
-| #5 | Task 16 | Memory: flat one-liner, feedback discarded |
-| #6 | Task 14 | Dashboard URL: `localhost:port` hardcoded pattern |
-| #7 | Task 29 | Notify node: intentional stub, returns success |
-| #8 | Task 25 | Config: loaded once at startup, no hot-reload |
-| #9 | ~~Task 2~~ | ~~Agent output: unconditional success on exit 0~~ **FIXED** |
-| #10 | N/A | Follow-up template: WORKS CORRECTLY (no gap) |
-| N/A | Task 10 | Browser-verify confirmed: curl+pa11y only, no screenshot capture |
+| Codex # | Task # | What Was Found | Status |
+|---------|--------|----------------|--------|
+| #1 | ~~Task 4~~ | Per-repo pipeline override | **FIXED** |
+| #2 | ~~Task 5~~ | Observer approval buttons | **FIXED** |
+| #3 | ~~Task 6~~ | Smart triage pipeline hint | **FIXED** |
+| #4 | ~~Task 8~~ | Single MCP slot | **FIXED** |
+| #5 | ~~Task 16~~ | Memory: flat one-liner | **FIXED** |
+| #6 | ~~Task 14~~ | Dashboard URL: localhost | **FIXED** |
+| #7 | Task 29 | Notify node: intentional stub | Open |
+| #8 | Task 25 | Config: loaded once at startup | Open |
+| #9 | ~~Task 2~~ | Agent output analysis | **FIXED** |
+| #10 | N/A | Follow-up template | No gap |
+| N/A | ~~Task 10~~ | Browser-verify: no screenshots | **FIXED** |

@@ -18,6 +18,7 @@ import {
   checkPerRepoBudget,
   checkCooldown,
   checkRepoAllowlist,
+  checkThresholds,
   runSafetyChecks
 } from "../src/observer/safety.js";
 
@@ -751,6 +752,134 @@ describe("ObserverStateStore", { concurrency: 1 }, () => {
     assert.ok(entry);
     assert.ok(entry.completedAt);
     assert.ok(entry.completedAt > 0);
+
+    await rm(dir, { recursive: true, force: true });
+  });
+});
+
+// ═══════════════════════════════════════════════════════
+// Threshold Safety Checks
+// ═══════════════════════════════════════════════════════
+
+describe("checkThresholds", () => {
+  test("allows when no thresholds configured", () => {
+    const event = makeSentryEvent();
+    const rule = makeRule();
+    const result = checkThresholds(event, rule);
+    assert.equal(result.action, "allow");
+  });
+
+  test("denies when occurrences below minOccurrences", () => {
+    const event = makeSentryEvent({ rawPayload: { occurrences: 2 } });
+    const rule = makeRule({ minOccurrences: 5 });
+    const result = checkThresholds(event, rule);
+    assert.equal(result.action, "deny");
+    assert.ok(result.reason.includes("minimum occurrences"));
+  });
+
+  test("allows when occurrences meet minOccurrences", () => {
+    const event = makeSentryEvent({ rawPayload: { occurrences: 10 } });
+    const rule = makeRule({ minOccurrences: 5 });
+    const result = checkThresholds(event, rule);
+    assert.equal(result.action, "allow");
+  });
+
+  test("denies when issue too young for minAgeMinutes", () => {
+    const recentDate = new Date(Date.now() - 5 * 60_000).toISOString(); // 5 min ago
+    const event = makeSentryEvent({ rawPayload: { firstSeen: recentDate } });
+    const rule = makeRule({ minAgeMinutes: 30 });
+    const result = checkThresholds(event, rule);
+    assert.equal(result.action, "deny");
+    assert.ok(result.reason.includes("minimum age"));
+  });
+
+  test("allows when issue old enough for minAgeMinutes", () => {
+    const oldDate = new Date(Date.now() - 60 * 60_000).toISOString(); // 60 min ago
+    const event = makeSentryEvent({ rawPayload: { firstSeen: oldDate } });
+    const rule = makeRule({ minAgeMinutes: 30 });
+    const result = checkThresholds(event, rule);
+    assert.equal(result.action, "allow");
+  });
+
+  test("denies when user count below minUserCount", () => {
+    const event = makeSentryEvent({ rawPayload: { userCount: 1 } });
+    const rule = makeRule({ minUserCount: 5 });
+    const result = checkThresholds(event, rule);
+    assert.equal(result.action, "deny");
+    assert.ok(result.reason.includes("minimum user count"));
+  });
+
+  test("allows when user count meets minUserCount", () => {
+    const event = makeSentryEvent({ rawPayload: { userCount: 10 } });
+    const rule = makeRule({ minUserCount: 5 });
+    const result = checkThresholds(event, rule);
+    assert.equal(result.action, "allow");
+  });
+
+  test("runSafetyChecks checks thresholds before rate limits", () => {
+    const event = makeSentryEvent({ rawPayload: { occurrences: 1 } });
+    const rule = makeRule({ minOccurrences: 10 });
+    const result = runSafetyChecks(event, rule, {
+      isDuplicate: false,
+      rateLimitTimestamps: [],
+      dailyCount: 0,
+      repoCount: 0,
+      completedAt: undefined,
+      maxDaily: 50,
+      maxPerRepo: 5,
+      repoAllowlist: []
+    });
+    assert.equal(result.action, "deny");
+    assert.ok(result.reason.includes("minimum occurrences"));
+  });
+});
+
+// ═══════════════════════════════════════════════════════
+// Trigger Rules: threshold field parsing
+// ═══════════════════════════════════════════════════════
+
+describe("loadTriggerRules: threshold fields", () => {
+  test("parses minOccurrences, minAgeMinutes, minUserCount from YAML", async () => {
+    const dir = path.join(tmpdir(), `rules-threshold-${randomUUID().slice(0, 8)}`);
+    await mkdir(dir, { recursive: true });
+    const rulesPath = path.join(dir, "rules.yml");
+
+    await writeFile(rulesPath, `
+trigger_rules:
+  - id: sentry-with-thresholds
+    source: sentry_alert
+    minOccurrences: 5
+    minAgeMinutes: 15
+    minUserCount: 3
+    conditions: []
+`, "utf8");
+
+    const rules = await loadTriggerRules(rulesPath);
+    assert.equal(rules.length, 1);
+    assert.equal(rules[0]!.minOccurrences, 5);
+    assert.equal(rules[0]!.minAgeMinutes, 15);
+    assert.equal(rules[0]!.minUserCount, 3);
+
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  test("threshold fields default to undefined when not set", async () => {
+    const dir = path.join(tmpdir(), `rules-no-threshold-${randomUUID().slice(0, 8)}`);
+    await mkdir(dir, { recursive: true });
+    const rulesPath = path.join(dir, "rules.yml");
+
+    await writeFile(rulesPath, `
+trigger_rules:
+  - id: basic-rule
+    source: sentry_alert
+    conditions: []
+`, "utf8");
+
+    const rules = await loadTriggerRules(rulesPath);
+    assert.equal(rules.length, 1);
+    assert.equal(rules[0]!.minOccurrences, undefined);
+    assert.equal(rules[0]!.minAgeMinutes, undefined);
+    assert.equal(rules[0]!.minUserCount, undefined);
 
     await rm(dir, { recursive: true, force: true });
   });

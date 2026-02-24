@@ -14,6 +14,10 @@ nodes:
     type: deterministic
     action: classify_task
 
+  - id: plan_task
+    type: agentic
+    action: plan_task
+
   - id: hydrate
     type: deterministic
     action: hydrate_context
@@ -36,6 +40,16 @@ nodes:
       agent_node: fix_validation
       max_rounds: 2
       until: "validate.exit_code == 0"
+
+  - id: local_test
+    type: deterministic
+    action: local_test
+    if: "config.localTestCommand != ''"
+    on_failure:
+      action: loop
+      agent_node: fix_validation
+      max_rounds: 2
+      until: "local_test.exit_code == 0"
 
   # Quality gates — run after validation, before commit
   - id: diff_gate

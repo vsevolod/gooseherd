@@ -63,6 +63,12 @@ export interface TriggerRule {
   baseBranch?: string;
   /** Skip smart triage for high-confidence rules (e.g. cron triggers) */
   skipTriage?: boolean;
+  /** Minimum occurrences before triggering (prevents one-off noise) */
+  minOccurrences?: number;
+  /** Minimum age in minutes before triggering (debounce new issues) */
+  minAgeMinutes?: number;
+  /** Minimum affected user count before triggering */
+  minUserCount?: number;
 }
 
 // ── Safety pipeline ──

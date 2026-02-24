@@ -31,6 +31,8 @@ import { commitNode } from "./nodes/commit.js";
 import { pushNode } from "./nodes/push.js";
 import { createPrNode } from "./nodes/create-pr.js";
 import { notifyNode } from "./nodes/notify.js";
+import { planTaskNode } from "./nodes/plan-task.js";
+import { localTestNode } from "./nodes/local-test.js";
 
 // Quality gate node imports
 import { classifyTaskNode } from "./quality-gates/classify-task-node.js";
@@ -64,7 +66,9 @@ const NODE_HANDLERS: Record<string, NodeHandler> = {
   wait_ci: waitCiNode,
   fix_ci: fixCiNode,
   scope_judge: scopeJudgeNode,
-  browser_verify: browserVerifyNode
+  browser_verify: browserVerifyNode,
+  plan_task: planTaskNode,
+  local_test: localTestNode
 };
 
 export type PipelinePhase = "cloning" | "agent" | "validating" | "pushing" | "awaiting_ci" | "ci_fixing";

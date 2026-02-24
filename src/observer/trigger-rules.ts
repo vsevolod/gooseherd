@@ -102,7 +102,11 @@ export async function loadTriggerRules(yamlPath: string): Promise<TriggerRule[]>
       maxRunsPerHour: typeof raw["maxRunsPerHour"] === "number" ? raw["maxRunsPerHour"] : 5,
       repoSlug: typeof raw["repoSlug"] === "string" ? raw["repoSlug"] : undefined,
       task: typeof raw["task"] === "string" ? raw["task"] : undefined,
-      baseBranch: typeof raw["baseBranch"] === "string" ? raw["baseBranch"] : undefined
+      baseBranch: typeof raw["baseBranch"] === "string" ? raw["baseBranch"] : undefined,
+      skipTriage: raw["skipTriage"] === true,
+      minOccurrences: typeof raw["minOccurrences"] === "number" ? raw["minOccurrences"] : undefined,
+      minAgeMinutes: typeof raw["minAgeMinutes"] === "number" ? raw["minAgeMinutes"] : undefined,
+      minUserCount: typeof raw["minUserCount"] === "number" ? raw["minUserCount"] : undefined
     });
   }
 

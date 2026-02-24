@@ -108,6 +108,8 @@ export async function hydrateContextNode(
   }
 
   const taskType = ctx.get<string>("taskType") ?? "chore";
+  const implementationPlan = ctx.get<string>("implementationPlan");
+
   sections.push(
     `Task type: ${taskType}`,
     "",
@@ -116,6 +118,10 @@ export async function hydrateContextNode(
     "",
     ...getExpectedOutput(taskType)
   );
+
+  if (implementationPlan) {
+    sections.push("", "## Implementation Plan", "", implementationPlan);
+  }
 
   await writeFile(promptFile, sections.join("\n"), "utf8");
 

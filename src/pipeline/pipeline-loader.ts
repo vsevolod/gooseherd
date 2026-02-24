@@ -2,14 +2,13 @@ import { readFile } from "node:fs/promises";
 import { parse as parseYaml } from "yaml";
 import type { PipelineConfig, NodeConfig } from "./types.js";
 
-// Only actions with registered handlers are valid. Future actions
-// (plan_task, local_test, diff_quality_gate, etc.) will be added
-// when their handlers are implemented in later phases.
+// Only actions with registered handlers are valid.
 const VALID_ACTIONS = new Set([
   "clone", "hydrate_context", "implement", "lint_fix",
   "validate", "fix_validation", "commit", "push",
   "create_pr", "notify",
-  "classify_task", "diff_gate", "forbidden_files", "security_scan",
+  "classify_task", "plan_task", "local_test",
+  "diff_gate", "forbidden_files", "security_scan",
   "wait_ci", "fix_ci",
   "scope_judge", "browser_verify"
 ]);
@@ -112,19 +111,12 @@ export async function loadPipeline(yamlPath: string): Promise<PipelineConfig> {
   // Validate on_failure agent_node references are registered action names.
   // The engine resolves agent_node via the handler registry (by action name),
   // so only action names are valid here — not node IDs.
-  const IMPLEMENTED_ACTIONS = new Set([
-    "clone", "hydrate_context", "implement", "lint_fix", "validate",
-    "fix_validation", "commit", "push", "create_pr", "notify",
-    "classify_task", "diff_gate", "forbidden_files", "security_scan",
-    "wait_ci", "fix_ci",
-    "scope_judge", "browser_verify"
-  ]);
   for (const node of nodes) {
     const onFailure = (node as Record<string, unknown>)["on_failure"] as Record<string, unknown> | undefined;
     if (onFailure) {
       const agentAction = onFailure["agent_node"] as string;
-      if (!IMPLEMENTED_ACTIONS.has(agentAction)) {
-        throw new PipelineLoadError(`Node '${(node as Record<string, unknown>)["id"]}': on_failure.agent_node '${agentAction}' must be a registered action name. Valid: ${Array.from(IMPLEMENTED_ACTIONS).join(", ")}`);
+      if (!VALID_ACTIONS.has(agentAction)) {
+        throw new PipelineLoadError(`Node '${(node as Record<string, unknown>)["id"]}': on_failure.agent_node '${agentAction}' must be a registered action name. Valid: ${Array.from(VALID_ACTIONS).join(", ")}`);
       }
     }
   }

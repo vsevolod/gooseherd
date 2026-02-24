@@ -8,10 +8,12 @@
  * Skips gracefully if no URL, no pa11y, or node is disabled.
  */
 
+import path from "node:path";
 import type { NodeConfig, NodeResult, NodeDeps } from "../types.js";
 import type { ContextBag } from "../context-bag.js";
 import { runShellCapture, appendLog, shellEscape } from "../shell.js";
 import { appendGateReport } from "./gate-report.js";
+import { logInfo } from "../../logger.js";
 import {
   parsePa11yOutput,
   buildSmokeCheck,
@@ -99,6 +101,20 @@ export async function browserVerifyNode(
     await appendLog(logFile, "[gate:browser_verify] pa11y not available, skipping accessibility check\n");
   }
 
+  // 3. Screenshot capture via Playwright (opt-in)
+  let screenshotPath: string | undefined;
+  if (config.screenshotEnabled && smokeCheck.passed) {
+    screenshotPath = await captureScreenshot(
+      reviewAppUrl,
+      path.join(deps.workRoot, deps.run.id),
+      logFile
+    );
+    if (screenshotPath) {
+      await appendLog(logFile, `[gate:browser_verify] screenshot saved: ${screenshotPath}\n`);
+      logInfo("browser_verify: screenshot captured", { path: screenshotPath });
+    }
+  }
+
   // Aggregate results
   const result = aggregateChecks(checks);
 
@@ -109,14 +125,50 @@ export async function browserVerifyNode(
     return {
       outcome: "soft_fail",
       error: `Browser verification failed:\n${reasons.join("\n")}`,
-      outputs: { browserVerifyResult: result, accessibilityChecked }
+      outputs: { browserVerifyResult: result, accessibilityChecked, screenshotPath }
     };
   }
 
   return {
     outcome: "success",
-    outputs: { browserVerifyResult: result, accessibilityChecked }
+    outputs: { browserVerifyResult: result, accessibilityChecked, screenshotPath }
   };
+}
+
+/**
+ * Capture a screenshot of the review app URL using Playwright.
+ * Returns the screenshot file path, or undefined if Playwright is not available.
+ */
+async function captureScreenshot(
+  url: string,
+  runDir: string,
+  logFile: string
+): Promise<string | undefined> {
+  const screenshotFile = path.join(runDir, "screenshot.png");
+
+  // Use a one-shot Playwright script via npx — no dependency required
+  const script = [
+    "const { chromium } = require('playwright');",
+    "(async () => {",
+    "  const browser = await chromium.launch();",
+    "  const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });",
+    `  await page.goto(${JSON.stringify(url)}, { waitUntil: 'networkidle', timeout: 30000 });`,
+    `  await page.screenshot({ path: ${JSON.stringify(screenshotFile)}, fullPage: false });`,
+    "  await browser.close();",
+    "})();"
+  ].join("\n");
+
+  const result = await runShellCapture(
+    `node -e ${shellEscape(script)}`,
+    { cwd: runDir, logFile, timeoutMs: 60_000 }
+  );
+
+  if (result.code === 0) {
+    return screenshotFile;
+  }
+
+  await appendLog(logFile, `[gate:browser_verify] screenshot failed: ${result.stderr.slice(0, 200)}\n`);
+  return undefined;
 }
 
 async function checkPa11yAvailable(cwd: string, logFile: string): Promise<boolean> {

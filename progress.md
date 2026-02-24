@@ -1,5 +1,25 @@
 # Progress — Gooseherd Pipeline Implementation
 
+## Phase 10: Quality Depth + Adoption (Tasks 7, 26, 19, 20, 22, 10) — COMPLETE
+
+### Session: 2026-02-24
+
+### Implementation
+- [x] Task 7: Wire Slack Channel Adapter — `app.message()` handler, config for watched channels/bot allowlist
+- [x] Task 26: Slack App Manifest — `slack-app-manifest.yml` with all scopes, events, socket mode
+- [x] Task 19: Plan Task Node — LLM planning step (Haiku), registered in pipeline engine, wired into full.yml
+- [x] Task 20: Local Test Node — runs LOCAL_TEST_COMMAND, fail loop to fix_validation, in default.yml + full.yml
+- [x] Task 22: Observer Threshold Config — minOccurrences/minAgeMinutes/minUserCount in trigger rules + safety pipeline
+- [x] Task 10: Screenshot Capture — Playwright screenshot in browser-verify-node, opt-in via SCREENSHOT_ENABLED
+- [x] Tests: 10 new threshold tests, 7 new pipeline node tests, fixed pipeline-loader VALID_ACTIONS
+- [x] Codex validation: all changes verified, eliminated duplicate IMPLEMENTED_ACTIONS set
+
+### Final State
+- TypeScript: 0 errors
+- Tests: 363/363 pass
+
+---
+
 ## Phase 9: Intelligence + UX (Tasks 9, 17, 13, 18, 16, 15) — COMPLETE
 
 ### Session: 2026-02-24

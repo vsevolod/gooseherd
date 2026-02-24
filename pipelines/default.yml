@@ -37,6 +37,16 @@ nodes:
       max_rounds: 2
       until: "validate.exit_code == 0"
 
+  - id: local_test
+    type: deterministic
+    action: local_test
+    if: "config.localTestCommand != ''"
+    on_failure:
+      action: loop
+      agent_node: fix_validation
+      max_rounds: 2
+      until: "local_test.exit_code == 0"
+
   - id: commit
     type: deterministic
     action: commit

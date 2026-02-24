@@ -76,7 +76,7 @@ async function main(): Promise<void> {
     logInfo("Observer system enabled");
   }
 
-  await startSlackApp(config, runManager);
+  await startSlackApp(config, runManager, globalRefs.observer);
 }
 
 main().catch((error) => {
