@@ -1,93 +1,82 @@
-# Task Plan — Wire Dead Code + Quick Wins (Tasks 4, 5, 6, 8, 11, 12, 14)
+# Task Plan — Phase 9: Agent Intelligence + Infrastructure (Tasks 9, 17, 13, 18, 16, 15)
 
 ## Goal
-Activate dead code, wire stubs, and fix adoption blockers across HIGH and MEDIUM-HIGH tasks.
+Activate CI feedback loop for all users, fix infrastructure gaps, and improve agent intelligence for follow-up runs and memory.
+
+## Implementation Order (per council recommendation)
+```
+9 → 17 → 13 → 18 → 16 → 15
+```
+Risk-free multipliers first, then context flywheel (18 feeds 16), then UX polish (15).
+Task 7 (Slack channel adapter) and Task 10 (screenshots) deferred to next batch.
 
 ## Phases
 
-### Phase 1: Quick Wins (Tasks 4, 12, 14) — `pending`
-Three trivial changes with outsized impact.
+### Phase 1: CI Feedback in Default Pipeline (Task 9) — `pending`
+Add `wait_ci`/`fix_ci` loop to `default.yml` so every user gets CI feedback by default.
 
-**1a. Task 4: Per-Repo Pipeline Override**
-- File: `src/pipeline/pipeline-engine.ts`
-- Line 91: `execute()` — check context bag for `repoConfigPipeline` before using `pipelineFile` param
-- Resolve to `pipelines/${hint}.yml` with validation (alphanumeric only, file must exist)
-- Test: unit test that context bag pipeline override takes precedence
+- File: `pipelines/default.yml` — insert `wait_ci` + `fix_ci` loop after `create_pr`, before `notify`
+- Copy the block verbatim from `with-ci-feedback.yml` (lines 68-75)
+- The node already returns success immediately when `CI_WAIT_ENABLED=false` (default), so this is safe
 
-**1b. Task 12: DRY_RUN Default = false**
-- File: `src/config.ts:236`
-- Change: `parseBoolean(parsed.DRY_RUN, true)` → `parseBoolean(parsed.DRY_RUN, false)`
+### Phase 2: CEMS x-team-id Header (Task 17) — `pending`
+Add missing `x-team-id` header to both CEMS API calls.
 
-**1c. Task 14: Dashboard Public URL**
-- File: `src/config.ts` — add `DASHBOARD_PUBLIC_URL` env var + `dashboardPublicUrl?: string` to AppConfig
-- File: `src/run-manager.ts:605` — use `config.dashboardPublicUrl ?? http://...` for dashboard link
-- Test: verify URL construction
+- File: `src/config.ts` — add `CEMS_TEAM_ID` to env schema + `cemsTeamId?: string` to AppConfig
+- File: `src/memory/cems-provider.ts` — add `teamId?: string` to `CemsProviderConfig`, include `x-team-id` header in both fetch calls
+- File: `src/index.ts` — pass `teamId` when constructing CemsProvider
 
-### Phase 2: Observer Approval Buttons (Task 5) — `pending`
-Wire the approve/reject Slack buttons that are currently no-ops.
+### Phase 3: Real Agent Default (Task 13) — `pending`
+Detect `goose` binary on PATH at startup, warn if using dummy agent.
 
-- File: `src/slack-app.ts`
-- Add `app.action("observer_approve")` handler:
-  - Parse JSON value from button
-  - Call `runManager.enqueueRun()` with extracted data
-  - Post confirmation message in thread
-  - Post ephemeral to approver
-- Add `app.action("observer_reject")` handler:
-  - Acknowledge rejection
-  - Post ephemeral to rejector
-- Remove TODO comment from daemon.ts:255-257
+- File: `src/config.ts` — no change (template stays as-is)
+- File: `src/index.ts` — after `loadConfig()`, check if agent command uses dummy-agent.sh + `goose` not on PATH → log warning
+- Use `which goose` via child_process.execSync or import `execSync`
+- Warning only, not blocking — still allow dummy for dev/test
 
-### Phase 3: Wire Smart Triage Pipeline Hint (Task 6) — `pending`
-Connect the pipeline suggestion from smart triage all the way through to pipeline selection.
+### Phase 4: Inject Diff in Follow-Up Prompts (Task 18) — `pending`
+Give the agent actual diff content (not just file names) on follow-up runs.
 
-- File: `src/observer/daemon.ts` — set `event.pipelineHint = triageDecision.pipeline`
-- File: `src/observer/run-composer.ts` — pass pipelineHint to NewRunInput
-- File: `src/types.ts` — add `pipelineHint?: string` to NewRunInput
-- File: `src/run-manager.ts` — pass pipelineHint from input to engine.execute()
-- File: `src/pipeline/pipeline-engine.ts` — use run.pipelineHint to select pipeline YAML
-- Validation: only allow known pipeline names (match against pipelines/ directory)
+- File: `src/pipeline/nodes/hydrate-context.ts` — in the `parentContext` block (lines 81-95):
+  - Run `git show HEAD --stat --unified=3` in repoDir
+  - Truncate to ~3000 chars
+  - Add "### Changes from previous run" section with the diff output
+- Uses `runShellCapture` already imported
 
-### Phase 4: Multi-MCP Extension Support (Task 8) — `pending`
-Support multiple MCP extensions instead of just one.
+### Phase 5: Richer Memory Storage (Task 16) — `pending`
+Store structured run data and positive feedback in memory.
 
-- File: `src/config.ts`:
-  - Add `MCP_EXTENSIONS` env var (comma-separated)
-  - Add `mcpExtensions: string[]` to AppConfig
-  - Merge `cemsMcpCommand` into extensions array for backwards compat
-- File: `src/pipeline/shell.ts` — add helper `buildMcpFlags(extensions: string[]): string`
-- File: `src/pipeline/nodes/implement.ts` — use helper
-- File: `src/pipeline/nodes/fix-validation.ts` — use helper
-- File: `src/pipeline/ci/fix-ci-node.ts` — use helper
-- File: `src/pipeline/repo-config.ts` — support `mcp_extensions` in .gooseherd.yml
+- File: `src/hooks/run-lifecycle.ts`:
+  - `onRunComplete`: include task type, diff stats, duration, outcome in the summary string
+  - `onFeedback`: store positive feedback too (remove `rating !== "down"` guard), tag appropriately
+- The `MemoryProvider` interface stays unchanged — we enrich the content string, not the API
 
-### Phase 5: "Awaiting Instructions" Idle State (Task 11) — `pending`
-Enhance the post-run summary to clearly signal the bot is ready.
+### Phase 6: User-Friendly Error Messages (Task 15) — `pending`
+Classify errors and show actionable messages in Slack.
 
-- File: `src/run-manager.ts` — enhance `postRunSummary()`
-- Add visual "ready" indicator at the end of the summary
+- File: `src/run-manager.ts` — add `classifyError(message: string)` function:
+  - Map known patterns: clone failed, lint failed, test failed, agent crashed, push rejected, timeout
+  - Return `{ category, friendlyMessage, suggestion }`
+- Use classifier in `postRunSummary` failure block to show user-friendly text + actionable suggestion
+- Raw error stays in dashboard/logs for debugging
 
-### Phase 6: Tests + Validation — `pending`
-- Write unit tests for each change
-- Run full test suite: `node --test --import tsx tests/*.test.ts`
+### Phase 7: Tests + Validation — `pending`
+- Unit tests for error classifier, diff injection, memory enrichment
+- Run full suite: `node --test --import tsx tests/*.test.ts`
 - TypeScript compile check
-- Launch codex-investigator for validation
+- codex-investigator validation
 
-## Files Modified (complete list)
+## Files Modified
 
 | File | Changes |
 |------|---------|
-| `src/pipeline/pipeline-engine.ts` | Check ctx for pipeline override (Task 4) + use pipelineHint (Task 6) |
-| `src/config.ts` | DRY_RUN default (Task 12), dashboard URL (Task 14), MCP extensions (Task 8) |
-| `src/run-manager.ts` | Dashboard URL (Task 14), idle state (Task 11), pipeline hint passthrough (Task 6) |
-| `src/slack-app.ts` | Observer approval handlers (Task 5) |
-| `src/observer/daemon.ts` | Wire pipeline hint (Task 6), remove TODO (Task 5) |
-| `src/observer/run-composer.ts` | Pass pipeline hint (Task 6) |
-| `src/types.ts` | Add pipelineHint to NewRunInput (Task 6) |
-| `src/pipeline/shell.ts` | MCP extension helper (Task 8) |
-| `src/pipeline/nodes/implement.ts` | Use MCP helper (Task 8) |
-| `src/pipeline/nodes/fix-validation.ts` | Use MCP helper (Task 8) |
-| `src/pipeline/ci/fix-ci-node.ts` | Use MCP helper (Task 8) |
-| `src/pipeline/repo-config.ts` | MCP extensions support (Task 8) |
+| `pipelines/default.yml` | Add wait_ci + fix_ci loop (Task 9) |
+| `src/config.ts` | Add CEMS_TEAM_ID (Task 17) |
+| `src/memory/cems-provider.ts` | Add x-team-id header (Task 17) |
+| `src/index.ts` | Pass teamId to CemsProvider (Task 17), agent detection warning (Task 13) |
+| `src/pipeline/nodes/hydrate-context.ts` | Inject diff in follow-ups (Task 18) |
+| `src/hooks/run-lifecycle.ts` | Richer memory + positive feedback (Task 16) |
+| `src/run-manager.ts` | Error classifier + friendly messages (Task 15) |
 
 ## Error Log
 | Error | Attempt | Resolution |

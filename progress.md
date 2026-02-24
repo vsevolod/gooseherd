@@ -1,5 +1,25 @@
 # Progress — Gooseherd Pipeline Implementation
 
+## Phase 9: Intelligence + UX (Tasks 9, 17, 13, 18, 16, 15) — COMPLETE
+
+### Session: 2026-02-24
+
+### Implementation
+- [x] Task 9: CI feedback loop in default pipeline (wait_ci + fix_ci after create_pr)
+- [x] Task 17: CEMS team ID header (CEMS_TEAM_ID env → x-team-id header for cross-agent memory)
+- [x] Task 13: Agent default detection (warn if using dummy-agent but goose is on PATH)
+- [x] Task 18: Follow-up diff injection (inject actual git diff into follow-up prompts, 3KB cap)
+- [x] Task 16: Enriched memory hooks (duration, file count, follow-up status, positive feedback)
+- [x] Task 15: Error classifier (7 regex patterns → friendly error + suggestion in Slack failure summary)
+- [x] Tests: 10 new classifyError tests + integration test for classified failure summary
+- [x] Codex validation: all changes verified, clone regex expanded per recommendation
+
+### Final State
+- TypeScript: 0 errors
+- Tests: 344/344 pass
+
+---
+
 ## Phase 8: Wire Dead Code + Quick Wins (Tasks 4, 5, 6, 8, 11, 12, 14) — COMPLETE
 
 ### Session: 2026-02-24
