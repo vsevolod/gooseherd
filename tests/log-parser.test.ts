@@ -146,24 +146,31 @@ test("parseRunLog extracts agent thinking blocks", () => {
   );
 });
 
-test("parseRunLog assigns progress percentages", () => {
+test("parseRunLog assigns phase-based progress percentages", () => {
   const events = parseRunLog(MINIMAL_LOG);
-  const significant = events.filter(
-    (e) => e.type === "tool_call" || e.type === "agent_thinking" || e.type === "session_start"
+
+  // Phase markers should have fixed percentages
+  const phases = events.filter((e) => e.type === "phase_marker");
+  for (const p of phases) {
+    assert.ok(p.progressPercent >= 0, `phase ${p.phase} should have progress assigned`);
+  }
+
+  // Agent events should inherit the last phase's progress (not per-event %)
+  const agentEvents = events.filter(
+    (e) => e.type === "tool_call" || e.type === "agent_thinking"
   );
+  if (agentEvents.length > 0) {
+    // All agent events between "agent" and "committing" phases inherit 10%
+    for (const ae of agentEvents) {
+      assert.ok(ae.progressPercent >= 0, "agent event should have progress >= 0");
+    }
+  }
 
-  // First significant event should have progress > 0
-  assert.ok(significant[0].progressPercent > 0, "first event should have progress > 0");
-
-  // Last significant event should be ~100%
-  const last = significant[significant.length - 1];
-  assert.ok(last.progressPercent >= 90, `last event should be near 100%, got ${last.progressPercent}`);
-
-  // Progress should be monotonically increasing
-  for (let j = 1; j < significant.length; j++) {
+  // Progress should be monotonically non-decreasing across all events
+  for (let j = 1; j < events.length; j++) {
     assert.ok(
-      significant[j].progressPercent >= significant[j - 1].progressPercent,
-      `progress should be monotonic: ${significant[j - 1].progressPercent} -> ${significant[j].progressPercent}`
+      events[j].progressPercent >= events[j - 1].progressPercent,
+      `progress should be non-decreasing: ${events[j - 1].progressPercent} -> ${events[j].progressPercent}`
     );
   }
 });

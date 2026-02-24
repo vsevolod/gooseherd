@@ -330,11 +330,12 @@ src/
 ├── index.ts                  # Startup: wires everything together
 ├── config.ts                 # All env vars → AppConfig
 ├── run-manager.ts            # Queue, concurrency, lifecycle
-├── executor.ts               # Legacy executor (pre-pipeline)
+├── command-parser.ts         # Slack command parsing (natural + explicit formats)
 ├── slack-app.ts              # Slack bot (@mention handler)
 ├── github.ts                 # GitHub API service
 ├── store.ts                  # File-based run state persistence
-├── dashboard-server.ts       # Web dashboard
+├── log-parser.ts             # Goose log → structured events for dashboard
+├── dashboard-server.ts       # Web dashboard + activity stream
 ├── workspace-cleaner.ts      # Auto-cleanup old workspaces
 │
 ├── pipeline/
@@ -409,12 +410,13 @@ tests/
 ├── ci-monitor.test.ts        # CI feedback pure function tests
 ├── observer.test.ts          # Observer/trigger system tests
 ├── phase5.test.ts            # Scope judge, triage, browser verify, repo config
+├── command-parser.test.ts    # Slack command parser (19 tests, all formats)
 └── snapshot.test.ts          # Log inspector snapshot tests
 ```
 
 ## Test Coverage
 
-201 tests across 6 test suites:
+220 tests across 7 test suites:
 
 | Suite | Tests | What it covers |
 |-------|-------|---------------|
@@ -423,4 +425,5 @@ tests/
 | ci-monitor.test.ts | 22 | CI aggregation, filtering, prompts, abort logic |
 | observer.test.ts | 55 | Safety pipeline, trigger rules, adapters, daemon |
 | phase5.test.ts | 49 | Scope judge, smart triage, browser verify, repo config |
+| command-parser.test.ts | 19 | Natural/explicit format parsing, mentions, branches |
 | snapshot.test.ts | 1 | Log inspector output format |

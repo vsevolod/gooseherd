@@ -440,31 +440,25 @@ export function parseRunLog(rawLog: string): RunEvent[] {
   // Flush any remaining thinking text
   flushThinking();
 
-  // Assign indices and progress percentages
-  const significantEvents = events.filter(
-    (e) => e.type === "tool_call" || e.type === "agent_thinking" || e.type === "session_start"
-  );
-  const totalSignificant = significantEvents.length;
-
+  // Assign indices
   for (let idx = 0; idx < events.length; idx++) {
     events[idx].index = idx;
   }
 
-  // Calculate progress: infrastructure events get fixed %, agent events get proportional %
-  let significantIndex = 0;
+  // Pipeline-level progress: events inherit the phase they belong to.
+  // Phase markers get fixed percentages; events between phases inherit
+  // the last phase's value. This is stable regardless of event count.
+  let currentPhasePercent = 0;
   for (const event of events) {
-    if (event.type === "tool_call" || event.type === "agent_thinking" || event.type === "session_start") {
-      event.progressPercent =
-        totalSignificant > 0
-          ? Math.round(((significantIndex + 1) / totalSignificant) * 1000) / 10
-          : 0;
-      significantIndex++;
-    } else if (event.type === "phase_marker") {
-      if (event.phase === "cloning") event.progressPercent = 5;
-      else if (event.phase === "agent") event.progressPercent = 10;
-      else if (event.phase === "committing") event.progressPercent = 88;
-      else if (event.phase === "pushing") event.progressPercent = 95;
-      else event.progressPercent = 0;
+    if (event.type === "phase_marker") {
+      if (event.phase === "cloning") currentPhasePercent = 5;
+      else if (event.phase === "agent") currentPhasePercent = 10;
+      else if (event.phase === "committing") currentPhasePercent = 85;
+      else if (event.phase === "pushing") currentPhasePercent = 92;
+      else currentPhasePercent = 0;
+      event.progressPercent = currentPhasePercent;
+    } else {
+      event.progressPercent = currentPhasePercent;
     }
   }
 

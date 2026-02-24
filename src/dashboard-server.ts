@@ -810,6 +810,39 @@ function dashboardHtml(config: AppConfig): string {
       letter-spacing: 0.06em;
       color: color-mix(in srgb, var(--warn) 85%, var(--text));
       margin-right: 8px;
+    }
+    .act-thinking .md-heading {
+      font-size: 12px;
+      font-weight: 700;
+      margin: 6px 0 2px;
+      color: var(--text);
+    }
+    .act-thinking .md-list {
+      margin: 2px 0 2px 16px;
+      padding: 0;
+      list-style: disc;
+    }
+    .act-thinking .md-list li {
+      margin: 1px 0;
+    }
+    .act-thinking .md-inline-code {
+      background: color-mix(in srgb, var(--panel) 60%, transparent);
+      padding: 1px 4px;
+      border-radius: 3px;
+      font-family: var(--font-mono);
+      font-size: 11px;
+    }
+    .act-thinking .md-code-block {
+      background: color-mix(in srgb, var(--panel) 60%, transparent);
+      padding: 6px 8px;
+      border-radius: 4px;
+      font-family: var(--font-mono);
+      font-size: 11px;
+      margin: 4px 0;
+      overflow-x: auto;
+    }
+    .act-thinking .md-line {
+      display: block;
       vertical-align: middle;
     }
     .act-tool {
@@ -1583,6 +1616,86 @@ function dashboardHtml(config: AppConfig): string {
       }
     }
 
+    /**
+     * Minimal markdown → HTML for agent thinking blocks.
+     * Handles: headers, bold, inline code, code blocks, lists.
+     * No external dependencies.
+     */
+    /**
+     * Minimal markdown to HTML for agent thinking blocks.
+     * Uses RegExp constructors to avoid regex-in-template-literal TS parse issues.
+     */
+    var mdPatterns = {
+      amp: new RegExp('&', 'g'),
+      lt: new RegExp('<', 'g'),
+      gt: new RegExp('>', 'g'),
+      fence: new RegExp('\x60\x60\x60([\\\\s\\\\S]*?)\x60\x60\x60', 'g'),
+      header: new RegExp('^(#{1,4})\\\\s+(.+)$'),
+      ul: new RegExp('^\\\\s*[-*]\\\\s+(.+)$'),
+      ol: new RegExp('^\\\\s*\\\\d+\\\\.\\\\s+(.+)$'),
+      bold: new RegExp('\\\\*\\\\*(.+?)\\\\*\\\\*', 'g'),
+      code: new RegExp('\x60([^\x60]+)\x60', 'g'),
+    };
+
+    function miniMarkdown(text) {
+      var escaped = text
+        .replace(mdPatterns.amp, '&amp;')
+        .replace(mdPatterns.lt, '&lt;')
+        .replace(mdPatterns.gt, '&gt;');
+
+      escaped = escaped.replace(mdPatterns.fence, function(_, code) {
+        return '<pre class="md-code-block">' + code.trim() + '</pre>';
+      });
+
+      var lines = escaped.split('\\n');
+      var result = [];
+      var inList = false;
+
+      for (var li = 0; li < lines.length; li++) {
+        var line = lines[li];
+
+        var headerMatch = line.match(mdPatterns.header);
+        if (headerMatch) {
+          if (inList) { result.push('</ul>'); inList = false; }
+          var level = Math.min(headerMatch[1].length + 2, 6);
+          result.push('<h' + level + ' class="md-heading">' + inlineFormat(headerMatch[2]) + '</h' + level + '>');
+          continue;
+        }
+
+        var listMatch = line.match(mdPatterns.ul);
+        if (listMatch) {
+          if (!inList) { result.push('<ul class="md-list">'); inList = true; }
+          result.push('<li>' + inlineFormat(listMatch[1]) + '</li>');
+          continue;
+        }
+
+        var numMatch = line.match(mdPatterns.ol);
+        if (numMatch) {
+          if (!inList) { result.push('<ul class="md-list">'); inList = true; }
+          result.push('<li>' + inlineFormat(numMatch[1]) + '</li>');
+          continue;
+        }
+
+        if (inList) { result.push('</ul>'); inList = false; }
+
+        if (!line.trim()) {
+          result.push('<br>');
+          continue;
+        }
+
+        result.push('<span class="md-line">' + inlineFormat(line) + '</span>');
+      }
+
+      if (inList) result.push('</ul>');
+      return result.join('');
+    }
+
+    function inlineFormat(text) {
+      text = text.replace(mdPatterns.bold, '<strong>$1</strong>');
+      text = text.replace(mdPatterns.code, '<code class="md-inline-code">$1</code>');
+      return text;
+    }
+
     function toolIcon(toolName) {
       var icons = {
         text_editor: 'edit_note',
@@ -1627,13 +1740,7 @@ function dashboardHtml(config: AppConfig): string {
 
         if (ev.type === 'agent_thinking') {
           node.classList.add('act-thinking');
-          node.textContent = ev.content;
-          if (ev.progressPercent > 0) {
-            var badge = document.createElement('span');
-            badge.className = 'act-badge';
-            badge.textContent = ev.progressPercent + '%';
-            node.appendChild(badge);
-          }
+          node.innerHTML = miniMarkdown(ev.content);
         } else if (ev.type === 'tool_call') {
           node.classList.add('act-tool');
 
@@ -1718,13 +1825,6 @@ function dashboardHtml(config: AppConfig): string {
 
           node.appendChild(header);
           node.appendChild(body);
-
-          if (ev.progressPercent > 0) {
-            var tbadge = document.createElement('span');
-            tbadge.className = 'act-badge';
-            tbadge.textContent = ev.progressPercent + '%';
-            node.appendChild(tbadge);
-          }
         } else if (ev.type === 'phase_marker') {
           node.classList.add('act-phase');
           var phaseIcon = document.createElement('span');
@@ -1741,6 +1841,12 @@ function dashboardHtml(config: AppConfig): string {
           var phaseLabel = phaseLabels[ev.phase] || ev.phase || 'phase';
           var phaseText = document.createTextNode(phaseLabel);
           node.appendChild(phaseText);
+          if (ev.progressPercent > 0) {
+            var phaseBadge = document.createElement('span');
+            phaseBadge.className = 'act-badge';
+            phaseBadge.textContent = ev.progressPercent + '%';
+            node.appendChild(phaseBadge);
+          }
         } else if (ev.type === 'session_start') {
           node.classList.add('act-session');
           var sessIcon = document.createElement('span');

@@ -173,19 +173,24 @@ test("simple-run: text_editor params extracted", () => {
   assert.ok(edit.params?.new_str, "Should have new_str param");
 });
 
-test("simple-run: progress percentages assigned", () => {
+test("simple-run: phase-based progress percentages assigned", () => {
   const events = parseRunLog(loadFixture("simple-run.log"));
   const withProgress = events.filter((e) => e.progressPercent > 0);
 
   assert.ok(withProgress.length > 0, "Some events should have progress > 0");
 
-  // Last significant event should be near 100%
-  const significant = events.filter(
-    (e) => e.type === "tool_call" || e.type === "agent_thinking" || e.type === "session_start"
-  );
-  if (significant.length > 0) {
-    const last = significant[significant.length - 1]!;
-    assert.equal(last.progressPercent, 100, "Last significant event should be 100%");
+  // Phase markers should have fixed percentages
+  const phases = events.filter((e) => e.type === "phase_marker");
+  for (const p of phases) {
+    assert.ok(p.progressPercent > 0, `phase ${p.phase ?? "unknown"} should have progress > 0`);
+  }
+
+  // Progress should be monotonically non-decreasing
+  for (let j = 1; j < events.length; j++) {
+    assert.ok(
+      events[j].progressPercent >= events[j - 1].progressPercent,
+      `progress should be non-decreasing at index ${j}`
+    );
   }
 });
 
