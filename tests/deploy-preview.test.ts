@@ -143,7 +143,7 @@ test("deploy_preview: soft_fail when URL never becomes ready", async () => {
   );
 
   assert.equal(result.outcome, "soft_fail");
-  assert.ok(result.error?.includes("never became ready"));
+  assert.ok(result.error?.includes("not ready after"));
 });
 
 // ── github_deployment_api strategy ──

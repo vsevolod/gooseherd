@@ -14,6 +14,11 @@ nodes:
     type: deterministic
     action: classify_task
 
+  - id: generate_title
+    type: deterministic
+    action: generate_title
+    on_soft_fail: warn
+
   - id: hydrate
     type: deterministic
     action: hydrate_context
@@ -59,6 +64,12 @@ nodes:
     type: deterministic
     action: create_pr
 
+  # Summarize what the agent changed for richer browser_verify context
+  - id: summarize_changes
+    type: deterministic
+    action: summarize_changes
+    on_soft_fail: warn
+
   # Deploy and screenshot the preview
   - id: deploy_preview
     type: deterministic
@@ -68,15 +79,23 @@ nodes:
       strategy: url_pattern
       url_pattern: "https://{{prNumber}}.stg.epicpxls.com"
       readiness_timeout_seconds: 300
-      readiness_poll_interval_seconds: 15
+      max_timeout_seconds: 1800
+      readiness_poll_interval_seconds: 5
 
   - id: browser_verify
     type: deterministic
     action: browser_verify
     enabled: true
-    on_soft_fail: warn
+    config:
+      test_email: "admin@admin.com"
+      test_password: "password"
+    on_failure:
+      action: loop
+      agent_node: fix_browser
+      max_rounds: 2
+      on_exhausted: complete_with_warning
 
-  # CI feedback loop
+  # CI feedback loop — runs before screenshot upload to avoid stale commitSha
   - id: wait_ci
     type: async
     action: wait_ci
@@ -85,6 +104,12 @@ nodes:
       agent_node: fix_ci
       max_rounds: 2
       on_exhausted: complete_with_warning
+
+  # Upload screenshot to PR (runs after wait_ci to avoid push conflicts)
+  - id: upload_screenshot
+    type: deterministic
+    action: upload_screenshot
+    on_soft_fail: warn
 
   - id: notify
     type: deterministic

@@ -67,6 +67,58 @@ test("buildPrBody: includes What changed section with agent analysis", () => {
   assert.ok(body.includes("`tests/settings.test.ts`"));
 });
 
+test("buildPrBody: details table has proper Field/Value headers", () => {
+  const body = buildPrBody(BASE_RUN, "main", "Gooseherd", false);
+  assert.ok(body.includes("| Field | Value |"));
+  assert.ok(body.includes("|-------|-------|"));
+});
+
+test("buildPrBody: formats numbered requirements as a list", () => {
+  const run = {
+    ...BASE_RUN,
+    task: "Add a stats section. Requirements: 1. Create a partial. 2. Add SCSS. 3. Make responsive."
+  };
+  const body = buildPrBody(run, "main", "Gooseherd", false);
+  // Each item should appear on its own line
+  const lines = body.split("\n");
+  assert.ok(lines.some(l => l.trim() === "1. Create a partial"), "Item 1 should be on its own line");
+  assert.ok(lines.some(l => l.trim() === "2. Add SCSS"), "Item 2 should be on its own line");
+  assert.ok(lines.some(l => l.trim() === "3. Make responsive"), "Item 3 should be on its own line");
+});
+
+test("buildPrBody: formats requirements starting with 1.", () => {
+  const run = {
+    ...BASE_RUN,
+    task: "1. Add tests. 2. Fix lint. 3. Update docs."
+  };
+  const body = buildPrBody(run, "main", "Gooseherd", false);
+  const lines = body.split("\n");
+  assert.ok(lines.some(l => l.trim() === "1. Add tests"), "Item 1 should be on its own line");
+  assert.ok(lines.some(l => l.trim() === "2. Fix lint"), "Item 2 should be on its own line");
+});
+
+test("buildPrBody: does not format single numbers in prose", () => {
+  const run = {
+    ...BASE_RUN,
+    task: "Fix error 500. Retry the connection."
+  };
+  const body = buildPrBody(run, "main", "Gooseherd", false);
+  assert.ok(body.includes("Fix error 500. Retry the connection."), "Should keep prose unchanged");
+});
+
+test("buildPrBody: filters out timeout signals (various forms)", () => {
+  const analysis: AgentAnalysis = {
+    verdict: "clean",
+    filesChanged: ["src/index.ts"],
+    diffSummary: "1 file changed",
+    diffStats: { added: 10, removed: 0, filesCount: 1 },
+    signals: ['error signal: "timeout"', 'error: timeout occurred', 'warning signal: "deprecated"']
+  };
+  const body = buildPrBody(BASE_RUN, "main", "Gooseherd", false, undefined, analysis);
+  assert.ok(body.includes("deprecated"), "Should keep meaningful signals");
+  assert.ok(!body.includes("timeout"), "Should filter all timeout signals");
+});
+
 test("buildPrBody: collapses individual files when more than 30", () => {
   const files = Array.from({ length: 35 }, (_, i) => `src/file${String(i)}.ts`);
   const analysis: AgentAnalysis = {
@@ -136,19 +188,27 @@ test("buildPrBody: shows all gates including passes for a convincing report", ()
   assert.ok(body.includes("Security Scan"));
 });
 
-// ── Screenshot ──
+// ── Visual Evidence ──
 
 test("buildPrBody: includes screenshot when URL provided", () => {
   const body = buildPrBody(BASE_RUN, "main", "Gooseherd", false, undefined, undefined, undefined, undefined,
     "https://dashboard.example.com/api/runs/run-abc12345/artifacts/screenshot.png");
-  assert.ok(body.includes("## Screenshot"));
+  assert.ok(body.includes("## Visual Evidence"));
   assert.ok(body.includes("![Screenshot]"));
   assert.ok(body.includes("dashboard.example.com"));
 });
 
-test("buildPrBody: no screenshot section without URL", () => {
+test("buildPrBody: no visual evidence section without URL", () => {
   const body = buildPrBody(BASE_RUN, "main", "Gooseherd", false);
-  assert.ok(!body.includes("## Screenshot"));
+  assert.ok(!body.includes("## Visual Evidence"));
+});
+
+test("buildPrBody: screenshot-only visual evidence", () => {
+  const body = buildPrBody(BASE_RUN, "main", "Gooseherd", false, undefined, undefined, undefined, undefined,
+    "https://example.com/screenshot.png");
+  assert.ok(body.includes("## Visual Evidence"));
+  assert.ok(body.includes("![Screenshot]"));
+  assert.ok(body.includes("screenshot.png"));
 });
 
 // ── Commit and changed files from context ──

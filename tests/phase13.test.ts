@@ -629,6 +629,7 @@ function makeMinimalConfig(overrides: Record<string, unknown> = {}): import("../
     browserVerifyEnabled: false,
     reviewAppUrlPattern: "",
     screenshotEnabled: false,
+    browserVerifyModel: "anthropic/claude-haiku-4-5",
     observerSlackWatchedChannels: [],
     observerSlackBotAllowlist: [],
     workspaceCleanupEnabled: false,

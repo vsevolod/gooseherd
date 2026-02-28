@@ -167,6 +167,7 @@ export class RunStore {
         | "parentBranchName"
         | "feedbackNote"
         | "tokenUsage"
+        | "title"
       >
     >
   ): Promise<RunRecord> {

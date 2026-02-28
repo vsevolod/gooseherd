@@ -59,6 +59,7 @@ function makeConfig(overrides?: Partial<AppConfig>): AppConfig {
     observerSmartTriageModel: "claude-haiku-4-5-20251001",
     observerSmartTriageTimeoutMs: 10000,
     browserVerifyEnabled: false,
+    browserVerifyModel: "anthropic/claude-haiku-4-5",
     ciWaitEnabled: false,
     ciPollIntervalSeconds: 30,
     ciPatienceTimeoutSeconds: 300,

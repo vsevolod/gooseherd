@@ -20,18 +20,18 @@ export async function createPrNode(
     return { outcome: "success" };
   }
 
-  const prTitle = `${config.appSlug}: ${run.task.slice(0, 80)}`;
+  const titleText = run.title ?? ctx.get<string>("generatedTitle") ?? run.task.slice(0, 80);
+  const prTitle = `${config.appSlug}: ${titleText}`;
   const gateReport = ctx.get<Array<{ gate: string; verdict: string; reasons: string[] }>>("gateReport");
   const agentAnalysis = ctx.get<AgentAnalysis>("agentAnalysis");
   const commitSha = ctx.get<string>("commitSha");
   const changedFiles = ctx.get<string[]>("changedFiles");
-  const screenshotUrl = config.dashboardPublicUrl
-    ? `${config.dashboardPublicUrl}/api/runs/${run.id}/artifacts/screenshot.png`
-    : undefined;
 
+  // Screenshot URL is not available at PR creation time — it gets added
+  // later by upload_screenshot node after browser_verify captures it.
   const prBody = buildPrBody(
     run, resolvedBaseBranch, config.appName, isFollowUp,
-    gateReport, agentAnalysis, commitSha, changedFiles, screenshotUrl
+    gateReport, agentAnalysis, commitSha, changedFiles
   );
 
   const prResult = isFollowUp
@@ -73,7 +73,7 @@ export function buildPrBody(
   const lines: string[] = [];
 
   // ── Task description ──
-  lines.push("## Task", "", run.task, "");
+  lines.push("## Task", "", formatTaskDescription(run.task), "");
 
   // ── Follow-up context ──
   if (isFollowUp && run.parentRunId) {
@@ -115,11 +115,14 @@ export function buildPrBody(
   }
 
   if (agentAnalysis?.signals && agentAnalysis.signals.length > 0) {
-    lines.push("**Signals detected:**", "");
-    for (const signal of agentAnalysis.signals) {
-      lines.push(`- ${signal}`);
+    const meaningful = agentAnalysis.signals.filter(s => !/timeout/i.test(s));
+    if (meaningful.length > 0) {
+      lines.push("**Signals detected:**", "");
+      for (const signal of meaningful) {
+        lines.push(`- ${signal}`);
+      }
+      lines.push("");
     }
-    lines.push("");
   }
 
   // ── Quality gates (always show all, not just warnings) ──
@@ -137,21 +140,17 @@ export function buildPrBody(
     lines.push("");
   }
 
-  // ── Screenshot ──
+  // ── Visual Evidence ──
   if (screenshotUrl) {
-    lines.push(
-      "## Screenshot",
-      "",
-      `![Screenshot](${screenshotUrl})`,
-      ""
-    );
+    lines.push("## Visual Evidence", "");
+    lines.push(`![Screenshot](${screenshotUrl})`, "");
   }
 
   // ── Run metadata ──
   lines.push("## Details", "");
   lines.push(
-    `| | |`,
-    `|---|---|`,
+    `| Field | Value |`,
+    `|-------|-------|`,
     `| **Base branch** | \`${resolvedBaseBranch}\` |`,
     `| **Requested by** | ${run.requestedBy} |`,
     `| **Run ID** | \`${run.id.slice(0, 8)}\` |`
@@ -170,6 +169,37 @@ export function buildPrBody(
     `*Automated by [${appName}](https://goose-herd.com)*`
   );
 
+  return lines.join("\n");
+}
+
+/**
+ * Format task description for PR body.
+ * Detects numbered requirements (e.g. "1. Do X 2. Do Y") and formats them as a list.
+ */
+function formatTaskDescription(task: string): string {
+  // Find the position of "1." — requires at least 2 numbered items to trigger formatting
+  const firstItemMatch = /(?:^|\s)1\.\s/.exec(task);
+  if (!firstItemMatch) return task;
+
+  // Check there's at least a "2." following
+  const afterFirst = task.slice(firstItemMatch.index);
+  if (!/\s2\.\s/.test(afterFirst)) return task;
+
+  // Extract preamble (everything before "1.")
+  const preamble = task.slice(0, firstItemMatch.index).replace(/\s+$/, "");
+
+  // Extract all numbered items using a global regex
+  const itemRegex = /(\d+)\.\s+((?:(?!\s\d+\.\s).)*)/g;
+  const items: string[] = [];
+  let match: RegExpExecArray | null;
+  while ((match = itemRegex.exec(afterFirst)) !== null) {
+    const text = match[2]!.replace(/\.\s*$/, "").trim();
+    items.push(`${match[1]}. ${text}`);
+  }
+
+  if (items.length < 2) return task;
+
+  const lines = preamble ? [preamble, "", ...items] : items;
   return lines.join("\n");
 }
 

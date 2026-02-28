@@ -432,6 +432,7 @@ export class RunManager {
         changedFiles: result.changedFiles,
         prUrl: result.prUrl,
         tokenUsage: result.tokenUsage,
+        title: result.title,
         error: undefined
       });
       currentPhase = "completed";

@@ -109,10 +109,12 @@ test("E2E: full default pipeline with epiccoders/pxls (dummy agent, dry-run)", a
     assert.ok(promptContent.includes("Repository Context"), "Prompt should have repo context section");
     assert.ok(promptContent.includes("Task:"), "Prompt should have task section");
 
-    // ── Assert .goosehints was written ──
+    // ── Assert .goosehints exists but is NOT in the commit ──
     const goosehints = await readFile(path.join(repoDir, ".goosehints"), "utf8");
     assert.ok(goosehints.includes("Gooseherd Run Context"), ".goosehints should have run context");
     assert.ok(goosehints.includes(run.id), ".goosehints should include run ID");
+    // Verify it was excluded from the commit
+    assert.ok(!result.changedFiles.includes(".goosehints"), ".goosehints should not be in committed files");
 
     // ── Assert dry-run skipped push (no prUrl) ──
     assert.equal(result.prUrl, undefined, "Dry-run should not produce a PR URL");

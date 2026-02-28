@@ -25,8 +25,9 @@ export async function commitNode(
     };
   }
 
-  // Stage all changes
+  // Stage all changes, excluding runtime artifacts
   await runShell("git add -A", { cwd: repoDir, logFile });
+  await runShellCapture("git reset HEAD -- .goosehints", { cwd: repoDir, logFile });
 
   // Build commit message
   const taskSummary = (isFollowUp ? run.feedbackNote ?? run.task : run.task).slice(0, 72);

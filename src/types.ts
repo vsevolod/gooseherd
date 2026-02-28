@@ -72,6 +72,8 @@ export interface RunRecord {
   ciConclusion?: string;
   /** PR number from GitHub */
   prNumber?: number;
+  /** Short LLM-generated title (5-8 words) for dashboard display */
+  title?: string;
   /** Token usage from LLM-calling nodes */
   tokenUsage?: TokenUsage;
   /** Team identifier derived from channel mapping */
@@ -102,6 +104,7 @@ export interface ExecutionResult {
   changedFiles: string[];
   prUrl?: string;
   tokenUsage?: TokenUsage;
+  title?: string;
 }
 
 export interface CommandRunRequest {

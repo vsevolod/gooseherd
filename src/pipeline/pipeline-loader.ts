@@ -9,8 +9,9 @@ const VALID_ACTIONS = new Set([
   "create_pr", "notify",
   "classify_task", "plan_task", "local_test",
   "diff_gate", "forbidden_files", "security_scan",
-  "wait_ci", "fix_ci",
-  "scope_judge", "deploy_preview", "browser_verify"
+  "wait_ci", "fix_ci", "fix_browser",
+  "scope_judge", "deploy_preview", "browser_verify",
+  "generate_title", "upload_screenshot", "summarize_changes"
 ]);
 
 const VALID_TYPES = new Set(["deterministic", "agentic", "conditional", "async"]);

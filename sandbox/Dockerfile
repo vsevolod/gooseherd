@@ -21,6 +21,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     findutils \
     sed \
     coreutils \
+    ffmpeg \
   && rm -rf /var/lib/apt/lists/*
 
 # Goose CLI (AI coding agent by Block)
@@ -35,11 +36,17 @@ RUN ARCH=$(dpkg --print-architecture) && \
     | tar xz -C /usr/local/bin gitleaks \
   && gitleaks version || true
 
-# Playwright for screenshots (uses system chromium, skip bundled browser download)
+# All browser tools use system chromium — skip bundled browser downloads
 ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 ENV PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium
+ENV PUPPETEER_SKIP_DOWNLOAD=true
+ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
 ENV NODE_PATH=/usr/local/lib/node_modules
-RUN npm install -g playwright@latest
+RUN npm install -g playwright@latest pa11y@latest @browserbasehq/stagehand@latest deepmerge@latest \
+  && npx playwright install ffmpeg
+
+# Pa11y config — run Chromium with --no-sandbox (required when running as root)
+RUN printf '{"chromeLaunchConfig":{"executablePath":"/usr/bin/chromium","args":["--no-sandbox","--disable-setuid-sandbox"]}}\n' > /etc/pa11y.json
 
 # CEMS MCP (memory tools for Goose agent)
 # Install uv (Python package manager), then install cems package which provides cems-mcp binary

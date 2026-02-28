@@ -75,6 +75,8 @@ const envSchema = z.object({
   OBSERVER_GITHUB_WATCHED_REPOS: z.string().optional(),
 
   OPENROUTER_API_KEY: z.string().optional(),
+  ANTHROPIC_API_KEY: z.string().optional(),
+  OPENAI_API_KEY: z.string().optional(),
   PLAN_TASK_MODEL: z.string().optional(),
   SCOPE_JUDGE_ENABLED: z.string().optional(),
   SCOPE_JUDGE_MODEL: z.string().optional(),
@@ -87,6 +89,8 @@ const envSchema = z.object({
   BROWSER_VERIFY_ENABLED: z.string().optional(),
   REVIEW_APP_URL_PATTERN: z.string().optional(),
   SCREENSHOT_ENABLED: z.string().optional(),
+  BROWSER_VERIFY_MODEL: z.string().optional(),
+  BROWSER_VERIFY_EXECUTION_MODEL: z.string().optional(),
 
 
   CI_WAIT_ENABLED: z.string().optional(),
@@ -216,6 +220,8 @@ export interface AppConfig {
   observerGithubWatchedRepos: string[];
 
   openrouterApiKey?: string;
+  anthropicApiKey?: string;
+  openaiApiKey?: string;
   planTaskModel: string;
   scopeJudgeEnabled: boolean;
   scopeJudgeModel: string;
@@ -228,7 +234,8 @@ export interface AppConfig {
   browserVerifyEnabled: boolean;
   reviewAppUrlPattern?: string;
   screenshotEnabled: boolean;
-
+  browserVerifyModel: string;
+  browserVerifyExecutionModel?: string;
 
   ciWaitEnabled: boolean;
   ciPollIntervalSeconds: number;
@@ -396,19 +403,22 @@ export function loadConfig(): AppConfig {
     observerGithubWatchedRepos: parseList(parsed.OBSERVER_GITHUB_WATCHED_REPOS),
 
     openrouterApiKey: parsed.OPENROUTER_API_KEY?.trim() || undefined,
-    planTaskModel: parsed.PLAN_TASK_MODEL?.trim() || "anthropic/claude-haiku-4-5",
+    anthropicApiKey: parsed.ANTHROPIC_API_KEY?.trim() || undefined,
+    openaiApiKey: parsed.OPENAI_API_KEY?.trim() || undefined,
+    planTaskModel: parsed.PLAN_TASK_MODEL?.trim() || "anthropic/claude-sonnet-4-6",
     scopeJudgeEnabled: parseBoolean(parsed.SCOPE_JUDGE_ENABLED, false),
-    scopeJudgeModel: parsed.SCOPE_JUDGE_MODEL?.trim() || "anthropic/claude-haiku-4-5",
+    scopeJudgeModel: parsed.SCOPE_JUDGE_MODEL?.trim() || "anthropic/claude-sonnet-4-6",
     scopeJudgeMinPassScore: parseInteger(parsed.SCOPE_JUDGE_MIN_PASS_SCORE, 60),
 
     observerSmartTriageEnabled: parseBoolean(parsed.OBSERVER_SMART_TRIAGE_ENABLED, false),
-    observerSmartTriageModel: parsed.OBSERVER_SMART_TRIAGE_MODEL?.trim() || "anthropic/claude-haiku-4-5",
+    observerSmartTriageModel: parsed.OBSERVER_SMART_TRIAGE_MODEL?.trim() || "anthropic/claude-sonnet-4-6",
     observerSmartTriageTimeoutMs: parseInteger(parsed.OBSERVER_SMART_TRIAGE_TIMEOUT_MS, 10_000),
 
     browserVerifyEnabled: parseBoolean(parsed.BROWSER_VERIFY_ENABLED, false),
     reviewAppUrlPattern: parsed.REVIEW_APP_URL_PATTERN?.trim() || undefined,
     screenshotEnabled: parseBoolean(parsed.SCREENSHOT_ENABLED, false),
-
+    browserVerifyModel: parsed.BROWSER_VERIFY_MODEL?.trim() || "anthropic/claude-sonnet-4-6",
+    browserVerifyExecutionModel: parsed.BROWSER_VERIFY_EXECUTION_MODEL?.trim() || undefined,
 
     ciWaitEnabled: parseBoolean(parsed.CI_WAIT_ENABLED, false),
     ciPollIntervalSeconds: parseInteger(parsed.CI_POLL_INTERVAL_SECONDS, 30),

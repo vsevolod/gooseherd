@@ -36,6 +36,9 @@ import { createPrNode } from "./nodes/create-pr.js";
 import { notifyNode } from "./nodes/notify.js";
 import { planTaskNode } from "./nodes/plan-task.js";
 import { localTestNode } from "./nodes/local-test.js";
+import { uploadScreenshotNode } from "./nodes/upload-screenshot.js";
+import { generateTitleNode } from "./nodes/generate-title.js";
+import { summarizeChangesNode } from "./nodes/summarize-changes.js";
 
 // Quality gate node imports
 import { classifyTaskNode } from "./quality-gates/classify-task-node.js";
@@ -49,6 +52,7 @@ import { browserVerifyNode } from "./quality-gates/browser-verify-node.js";
 import { deployPreviewNode } from "./nodes/deploy-preview.js";
 import { waitCiNode } from "./ci/wait-ci-node.js";
 import { fixCiNode } from "./ci/fix-ci-node.js";
+import { fixBrowserNode } from "./nodes/fix-browser.js";
 
 // ── Node handler registry ──
 
@@ -69,11 +73,15 @@ const NODE_HANDLERS: Record<string, NodeHandler> = {
   security_scan: securityScanNode,
   wait_ci: waitCiNode,
   fix_ci: fixCiNode,
+  fix_browser: fixBrowserNode,
   scope_judge: scopeJudgeNode,
   deploy_preview: deployPreviewNode,
   browser_verify: browserVerifyNode,
   plan_task: planTaskNode,
-  local_test: localTestNode
+  local_test: localTestNode,
+  upload_screenshot: uploadScreenshotNode,
+  generate_title: generateTitleNode,
+  summarize_changes: summarizeChangesNode
 };
 
 export type PipelinePhase = "cloning" | "agent" | "validating" | "pushing" | "awaiting_ci" | "ci_fixing";
@@ -245,7 +253,8 @@ export class PipelineEngine {
       commitSha,
       changedFiles,
       prUrl,
-      tokenUsage: tokenUsage ?? undefined
+      tokenUsage: tokenUsage ?? undefined,
+      title: ctx.get<string>("generatedTitle")
     };
   }
 
@@ -266,6 +275,7 @@ export class PipelineEngine {
       // Check enabled flag
       if (node.enabled === false) {
         steps.push({ nodeId: node.id, outcome: "skipped", durationMs: 0 });
+        await eventLogger?.emit("node_end", { nodeId: node.id, outcome: "skipped", durationMs: 0 });
         continue;
       }
 
@@ -277,6 +287,7 @@ export class PipelineEngine {
         });
         if (!shouldRun) {
           steps.push({ nodeId: node.id, outcome: "skipped", durationMs: 0 });
+          await eventLogger?.emit("node_end", { nodeId: node.id, outcome: "skipped", durationMs: 0 });
           await appendLog(deps.logFile, `\n[pipeline] ${node.id}: skipped (condition: ${node.if})\n`);
           continue;
         }
@@ -436,8 +447,8 @@ export class PipelineEngine {
       }
 
       // Run lint fix after agent fix (lint only runs after agent changes)
-      // Skip for fix_ci which already commits+pushes internally
-      if (loopConfig.agent_node !== "fix_ci") {
+      // Skip for fix_ci and fix_browser which already commit+push internally
+      if (loopConfig.agent_node !== "fix_ci" && loopConfig.agent_node !== "fix_browser") {
         const lintHandler = NODE_HANDLERS["lint_fix"];
         if (lintHandler && deps.config.lintFixCommand) {
           const lintNode: NodeConfig = { id: "lint_fix_post", type: "deterministic", action: "lint_fix" };
@@ -463,7 +474,10 @@ export class PipelineEngine {
         return { outcome: "success", steps: [], warnings };
       }
 
-      // Store updated failure output for next fix attempt
+      // Merge retry outputs so next fix attempt sees updated failure context
+      if (retryResult.outputs) {
+        ctx.mergeOutputs(retryResult.outputs);
+      }
       if (retryResult.rawOutput) {
         ctx.set("lastFailureRawOutput", retryResult.rawOutput);
         lastRawOutput = retryResult.rawOutput;

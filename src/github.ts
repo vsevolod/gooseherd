@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import { Octokit } from "@octokit/rest";
 import { createAppAuth } from "@octokit/auth-app";
 import type { AppConfig } from "./config.js";
@@ -204,5 +205,70 @@ export class GitHubService {
       state: s.state,
       environment_url: s.environment_url || undefined
     }));
+  }
+
+  /**
+   * Upload a file to the repo via Contents API (creates a commit on the branch).
+   * Returns the raw.githubusercontent.com URL for the file.
+   */
+  async uploadFileToRepo(params: {
+    repoSlug: string;
+    branch: string;
+    filePath: string;
+    localPath: string;
+    commitMessage: string;
+  }): Promise<{ url: string; commitSha: string }> {
+    const { owner, repo } = parseRepoSlug(params.repoSlug);
+    const content = await readFile(params.localPath);
+    const base64Content = content.toString("base64");
+
+    // Check if file already exists (need its SHA to update)
+    let existingSha: string | undefined;
+    try {
+      const existing = await this.octokit.repos.getContent({
+        owner,
+        repo,
+        path: params.filePath,
+        ref: params.branch
+      });
+      if (!Array.isArray(existing.data) && "sha" in existing.data) {
+        existingSha = existing.data.sha;
+      }
+    } catch {
+      // File doesn't exist yet — that's fine
+    }
+
+    const result = await this.octokit.repos.createOrUpdateFileContents({
+      owner,
+      repo,
+      path: params.filePath,
+      message: params.commitMessage,
+      content: base64Content,
+      branch: params.branch,
+      sha: existingSha
+    });
+
+    // Use github.com/raw/ format — GitHub's camo proxy handles auth for private repos,
+    // unlike raw.githubusercontent.com which requires browser cookies.
+    const url = `https://github.com/${owner}/${repo}/raw/${params.branch}/${params.filePath}`;
+    const commitSha = (result.data.commit as { sha?: string })?.sha ?? "";
+    return { url, commitSha };
+  }
+
+  /**
+   * Update the body of an existing pull request.
+   */
+  async updatePullRequestBody(params: {
+    repoSlug: string;
+    prNumber: number;
+    body: string;
+  }): Promise<void> {
+    const { owner, repo } = parseRepoSlug(params.repoSlug);
+    await this.octokit.pulls.update({
+      owner,
+      repo,
+      pull_number: params.prNumber,
+      body: params.body
+    });
   }
 }

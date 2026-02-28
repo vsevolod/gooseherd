@@ -14,6 +14,11 @@ nodes:
     type: deterministic
     action: classify_task
 
+  - id: generate_title
+    type: deterministic
+    action: generate_title
+    on_soft_fail: warn
+
   - id: plan_task
     type: agentic
     action: plan_task
@@ -112,6 +117,12 @@ nodes:
     type: agentic
     action: browser_verify
     enabled: false
+    on_soft_fail: warn
+
+  # Upload screenshot to PR (runs after browser_verify captures it)
+  - id: upload_screenshot
+    type: deterministic
+    action: upload_screenshot
     on_soft_fail: warn
 
   - id: notify

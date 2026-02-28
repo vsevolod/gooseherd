@@ -34,8 +34,12 @@ interface DeployPreviewConfig {
   url_extract_pattern?: string;
   url_extract_strategy?: "last" | "first";
 
-  // shared
+  // shared — timeout config
+  /** Expected build time in seconds (default 300). Polling continues beyond this if the server signals activity (503). */
   readiness_timeout_seconds?: number;
+  /** Absolute maximum wait in seconds (default 1800 = 30 min). Hard cutoff regardless of signals. */
+  max_timeout_seconds?: number;
+  /** Initial poll interval in seconds (default 5). Increases via exponential backoff up to 30s. */
   readiness_poll_interval_seconds?: number;
 }
 
@@ -54,8 +58,9 @@ export async function deployPreviewNode(
     };
   }
 
-  const readinessTimeout = (nc.readiness_timeout_seconds ?? 300) * 1000;
-  const readinessInterval = Math.max((nc.readiness_poll_interval_seconds ?? 10), 1) * 1000;
+  const expectedTimeoutMs = (nc.readiness_timeout_seconds ?? 300) * 1000;
+  const maxTimeoutMs = (nc.max_timeout_seconds ?? 1800) * 1000;
+  const initialIntervalMs = Math.max((nc.readiness_poll_interval_seconds ?? 5), 1) * 1000;
 
   let previewUrl: string | undefined;
 
@@ -65,7 +70,7 @@ export async function deployPreviewNode(
       break;
 
     case "github_deployment_api":
-      previewUrl = await resolveGithubDeployment(nc, ctx, deps, readinessTimeout, logFile);
+      previewUrl = await resolveGithubDeployment(nc, ctx, deps, maxTimeoutMs, logFile);
       break;
 
     case "command":
@@ -92,14 +97,14 @@ export async function deployPreviewNode(
   ctx.set("reviewAppUrl", previewUrl);
 
   // Wait for URL to be reachable (skip when timeout is 0)
-  if (readinessTimeout > 0) {
-    await appendLog(logFile, `[deploy_preview] waiting for ${previewUrl} to be ready...\n`);
-    const ready = await waitForUrlReady(previewUrl, readinessTimeout, readinessInterval, logFile);
+  if (expectedTimeoutMs > 0) {
+    await appendLog(logFile, `[deploy_preview] waiting for ${previewUrl} (expected: ${String(Math.floor(expectedTimeoutMs / 1000))}s, max: ${String(Math.floor(maxTimeoutMs / 1000))}s)\n`);
+    const result = await waitForUrlReady(previewUrl, expectedTimeoutMs, maxTimeoutMs, initialIntervalMs, logFile);
 
-    if (!ready) {
+    if (!result.ready) {
       return {
         outcome: "soft_fail",
-        error: `Preview URL never became ready within ${String(Math.floor(readinessTimeout / 1000))}s: ${previewUrl}`
+        error: `Preview URL not ready after ${String(Math.floor(result.elapsedMs / 1000))}s (last: ${result.lastStatus}): ${previewUrl}`
       };
     }
   }
@@ -287,31 +292,89 @@ function extractUrlFromOutput(
   return undefined;
 }
 
+interface ReadinessResult {
+  ready: boolean;
+  elapsedMs: number;
+  lastStatus: string;
+}
+
+/**
+ * Wait for a URL to become reachable with smart timeout behavior:
+ * - Exponential backoff: starts at initialIntervalMs, doubles up to 30s
+ * - 503 awareness: if the proxy returns 503 (e.g. Traefik waiting for backend),
+ *   the system knows the domain is configured — keeps waiting beyond expectedTimeoutMs
+ * - Dual timeout: expectedTimeoutMs is the normal cutoff; maxTimeoutMs is the hard limit.
+ *   Polling continues past expectedTimeoutMs only if we've seen signs of activity (503, DNS resolves).
+ */
 async function waitForUrlReady(
   url: string,
-  timeoutMs: number,
-  intervalMs: number,
+  expectedTimeoutMs: number,
+  maxTimeoutMs: number,
+  initialIntervalMs: number,
   logFile: string
-): Promise<boolean> {
-  const deadline = Date.now() + timeoutMs;
+): Promise<ReadinessResult> {
+  const startTime = Date.now();
+  const expectedDeadline = startTime + expectedTimeoutMs;
+  const hardDeadline = startTime + maxTimeoutMs;
+  let intervalMs = initialIntervalMs;
+  const maxIntervalMs = 30_000;
 
-  while (Date.now() < deadline) {
+  let sawActivitySignal = false;
+  let lastStatus = "no response";
+  let pollCount = 0;
+
+  while (Date.now() < hardDeadline) {
+    pollCount++;
+    const elapsed = Date.now() - startTime;
+
+    // Past expected timeout — only continue if we saw activity signals
+    if (Date.now() > expectedDeadline && !sawActivitySignal) {
+      await appendLog(logFile, `[deploy_preview] expected timeout reached (${String(Math.floor(elapsed / 1000))}s), no activity signals — giving up\n`);
+      return { ready: false, elapsedMs: elapsed, lastStatus };
+    }
+
     try {
       const response = await fetch(url, {
         method: "GET",
         signal: AbortSignal.timeout(10_000),
         redirect: "follow"
       });
-      await appendLog(logFile, `[deploy_preview] URL ready: HTTP ${String(response.status)}\n`);
-      return true;
+
+      const status = response.status;
+      lastStatus = `HTTP ${String(status)}`;
+
+      // Drain response body to free the underlying socket
+      await response.body?.cancel();
+
+      // 503 = proxy knows the domain but backend isn't ready yet (Traefik, nginx, etc.)
+      // This is a strong signal that a build is in progress
+      if (status === 503 || status === 502) {
+        sawActivitySignal = true;
+        if (pollCount % 4 === 0) {
+          await appendLog(logFile, `[deploy_preview] ${lastStatus} — backend still building (${String(Math.floor(elapsed / 1000))}s elapsed)\n`);
+        }
+      } else if (status >= 200 && status < 500) {
+        // Any non-5xx success means the app is up
+        await appendLog(logFile, `[deploy_preview] URL ready: ${lastStatus} after ${String(Math.floor(elapsed / 1000))}s\n`);
+        return { ready: true, elapsedMs: elapsed, lastStatus };
+      } else {
+        // Other 5xx errors — still a sign the proxy/server exists
+        sawActivitySignal = true;
+        if (pollCount % 4 === 0) {
+          await appendLog(logFile, `[deploy_preview] ${lastStatus} — server error, retrying (${String(Math.floor(elapsed / 1000))}s)\n`);
+        }
+      }
     } catch {
-      // Network error or timeout — URL not yet reachable
+      // Network error / DNS failure / timeout — no activity signal
+      lastStatus = "network error";
     }
 
     await sleep(intervalMs);
+    // Exponential backoff: double interval, cap at maxIntervalMs
+    intervalMs = Math.min(intervalMs * 2, maxIntervalMs);
   }
 
-  return false;
+  return { ready: false, elapsedMs: Date.now() - startTime, lastStatus };
 }
 
 function sleep(ms: number): Promise<void> {

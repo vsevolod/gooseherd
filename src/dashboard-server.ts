@@ -55,6 +55,28 @@ async function readLogTail(logPath: string, lineCount: number): Promise<string> 
   return lines.slice(-Math.max(1, lineCount)).join("\n");
 }
 
+/** Read log from a byte offset. Returns new content and the new offset. */
+async function readLogFromOffset(logPath: string, offset: number): Promise<{ content: string; newOffset: number }> {
+  const { open } = await import("node:fs/promises");
+  const { stat } = await import("node:fs/promises");
+  const fileStats = await stat(logPath);
+  const fileSize = fileStats.size;
+
+  if (offset >= fileSize) {
+    return { content: "", newOffset: fileSize };
+  }
+
+  const fh = await open(logPath, "r");
+  try {
+    const readSize = fileSize - offset;
+    const buffer = Buffer.alloc(readSize);
+    await fh.read(buffer, 0, readSize, offset);
+    return { content: buffer.toString("utf8"), newOffset: fileSize };
+  } finally {
+    await fh.close();
+  }
+}
+
 // ── Authentication helpers ──
 
 /** Hash a token for session cookies (SHA-256, hex). */
@@ -642,6 +664,63 @@ function dashboardHtml(config: AppConfig): string {
       border-color: color-mix(in srgb, var(--running) 40%, var(--border));
       color: color-mix(in srgb, var(--running) 80%, var(--text));
     }
+    .status-pill.running::before,
+    .status-pill.validating::before,
+    .status-pill.pushing::before,
+    .status-pill.queued::before {
+      content: '';
+      display: inline-block;
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: currentColor;
+      margin-right: 4px;
+      vertical-align: middle;
+      animation: pulse-dot 1.4s ease-in-out infinite;
+    }
+    @keyframes pulse-dot {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.4; transform: scale(0.7); }
+    }
+    .live-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      font-size: 11px;
+      font-weight: 700;
+      color: var(--running);
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+    }
+    .live-badge::before {
+      content: '';
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--running);
+      animation: pulse-dot 1.4s ease-in-out infinite;
+    }
+    .phase-progress {
+      display: flex;
+      gap: 3px;
+      margin-top: 8px;
+      align-items: center;
+    }
+    .phase-step {
+      flex: 1;
+      height: 4px;
+      border-radius: 2px;
+      background: var(--border);
+      transition: background 300ms ease;
+    }
+    .phase-step.done { background: var(--ok); }
+    .phase-step.active { background: var(--running); animation: pulse-bar 1.4s ease-in-out infinite; }
+    .phase-step.warn { background: #f59e0b; }
+    .phase-step.fail { background: var(--err); }
+    @keyframes pulse-bar {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.5; }
+    }
     .card {
       border: 1px solid var(--border);
       background: color-mix(in srgb, var(--panel) 92%, transparent);
@@ -942,6 +1021,21 @@ function dashboardHtml(config: AppConfig): string {
       flex-shrink: 0;
     }
     /* ── Activity stream ────────────────────────── */
+    .log-viewer {
+      max-height: 500px;
+      overflow-y: auto;
+      scroll-behavior: smooth;
+      background: var(--panel-3);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 10px 12px;
+      font-size: 11px;
+      line-height: 1.5;
+      white-space: pre-wrap;
+      word-break: break-all;
+      color: var(--muted);
+      margin: 0;
+    }
     .activity-stream {
       max-height: 600px;
       overflow-y: auto;
@@ -1331,12 +1425,15 @@ function dashboardHtml(config: AppConfig): string {
           <div class="card-title" style="margin-bottom: 8px;">Changed files</div>
           <div class="file-list" id="files">-</div>
         </div>
-        <div class="card" id="screenshot-card" style="display: none;">
-          <div class="card-title" style="margin-bottom: 8px;">Screenshot</div>
-          <div id="screenshot-container" style="text-align: center;">
-            <a id="screenshot-link" href="#" target="_blank" rel="noreferrer noopener">
-              <img id="screenshot-img" src="" alt="Run screenshot" style="max-width: 100%; border-radius: 6px; border: 1px solid var(--border); cursor: zoom-in;" />
-            </a>
+        <div class="card" id="media-card" style="display: none;">
+          <div class="card-title" style="margin-bottom: 8px;">Visual evidence</div>
+          <div id="media-video" style="display: none; margin-bottom: 12px;">
+            <video id="media-video-player" controls style="max-width: 100%; border-radius: 6px; border: 1px solid var(--border); background: #000;">
+              Your browser does not support the video tag.
+            </video>
+          </div>
+          <div id="media-screenshots" style="display: none;">
+            <div id="media-screenshots-grid" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 8px;"></div>
           </div>
         </div>
         <div class="card" id="pipeline-timeline-card" style="display: none;">
@@ -1357,6 +1454,20 @@ function dashboardHtml(config: AppConfig): string {
               Auto-scroll
             </label>
             <span id="act-count" class="meta"></span>
+          </div>
+        </div>
+        <div class="card" id="log-viewer-card" style="display: none;">
+          <div class="toolbar">
+            <div class="card-title">Run log</div>
+            <div id="log-stats" class="meta"></div>
+          </div>
+          <pre class="log-viewer" id="log-viewer"></pre>
+          <div class="act-footer">
+            <label>
+              <input type="checkbox" id="log-auto-scroll" checked />
+              Auto-scroll
+            </label>
+            <span id="log-size" class="meta"></span>
           </div>
         </div>
         <div class="card" id="observer-card" style="display: none;">
@@ -1416,6 +1527,8 @@ function dashboardHtml(config: AppConfig): string {
       themePreference: 'system',
     };
 
+    var logStreamState = { runId: null, offset: 0 };
+
     const el = {
       meta: document.getElementById('meta'),
       topMeta: document.getElementById('top-meta'),
@@ -1427,15 +1540,22 @@ function dashboardHtml(config: AppConfig): string {
       openPr: document.getElementById('open-pr'),
       openCommit: document.getElementById('open-commit'),
       files: document.getElementById('files'),
-      screenshotCard: document.getElementById('screenshot-card'),
-      screenshotImg: document.getElementById('screenshot-img'),
-      screenshotLink: document.getElementById('screenshot-link'),
+      mediaCard: document.getElementById('media-card'),
+      mediaVideo: document.getElementById('media-video'),
+      mediaVideoPlayer: document.getElementById('media-video-player'),
+      mediaScreenshots: document.getElementById('media-screenshots'),
+      mediaScreenshotsGrid: document.getElementById('media-screenshots-grid'),
       pipelineTimelineCard: document.getElementById('pipeline-timeline-card'),
       pipelineTimeline: document.getElementById('pipeline-timeline'),
       activityStream: document.getElementById('activity-stream'),
       actStats: document.getElementById('act-stats'),
       actCount: document.getElementById('act-count'),
       autoScroll: document.getElementById('auto-scroll'),
+      logViewerCard: document.getElementById('log-viewer-card'),
+      logViewer: document.getElementById('log-viewer'),
+      logAutoScroll: document.getElementById('log-auto-scroll'),
+      logSize: document.getElementById('log-size'),
+      logStats: document.getElementById('log-stats'),
       feedbackToast: document.getElementById('feedback-toast'),
       feedbackUp: document.getElementById('feedback-up'),
       feedbackDown: document.getElementById('feedback-down'),
@@ -1638,7 +1758,7 @@ function dashboardHtml(config: AppConfig): string {
 
       var titleNode = document.createElement('div');
       titleNode.className = 'summary-title';
-      titleNode.textContent = truncateTask(run.task, 120);
+      titleNode.textContent = run.title || truncateTask(run.task, 120);
       titleNode.title = run.task || '';
 
       var statusNode = document.createElement('span');
@@ -1750,21 +1870,53 @@ function dashboardHtml(config: AppConfig): string {
       }
     }
 
-    function loadScreenshot(runId) {
+    async function loadMedia(runId) {
       if (!runId) {
-        el.screenshotCard.style.display = 'none';
+        el.mediaCard.style.display = 'none';
         return;
       }
-      var url = '/api/runs/' + encodeURIComponent(runId) + '/artifacts/screenshot.png';
-      // Load the image directly — use onload/onerror to show/hide the card
-      el.screenshotImg.onload = function() {
-        el.screenshotLink.href = url;
-        el.screenshotCard.style.display = '';
-      };
-      el.screenshotImg.onerror = function() {
-        el.screenshotCard.style.display = 'none';
-      };
-      el.screenshotImg.src = url;
+      try {
+        var data = await fetchJson('/api/runs/' + encodeURIComponent(runId) + '/media');
+        var hasContent = false;
+        var baseUrl = '/api/runs/' + encodeURIComponent(runId) + '/artifacts/';
+
+        // Video
+        if (data.video) {
+          el.mediaVideoPlayer.src = baseUrl + data.video.path;
+          el.mediaVideo.style.display = '';
+          hasContent = true;
+        } else {
+          el.mediaVideo.style.display = 'none';
+          el.mediaVideoPlayer.src = '';
+        }
+
+        // Screenshots
+        el.mediaScreenshotsGrid.innerHTML = '';
+        if (data.screenshots && data.screenshots.length > 0) {
+          for (var i = 0; i < data.screenshots.length; i++) {
+            var ss = data.screenshots[i];
+            var link = document.createElement('a');
+            link.href = baseUrl + ss.path;
+            link.target = '_blank';
+            link.rel = 'noreferrer noopener';
+            link.title = ss.name + ' (' + Math.round(ss.size / 1024) + ' KB)';
+            var img = document.createElement('img');
+            img.src = baseUrl + ss.path;
+            img.alt = ss.name;
+            img.style.cssText = 'width: 100%; border-radius: 6px; border: 1px solid var(--border); cursor: zoom-in;';
+            link.appendChild(img);
+            el.mediaScreenshotsGrid.appendChild(link);
+          }
+          el.mediaScreenshots.style.display = '';
+          hasContent = true;
+        } else {
+          el.mediaScreenshots.style.display = 'none';
+        }
+
+        el.mediaCard.style.display = hasContent ? '' : 'none';
+      } catch {
+        el.mediaCard.style.display = 'none';
+      }
     }
 
     function renderFiles(files, detailed) {
@@ -1824,7 +1976,7 @@ function dashboardHtml(config: AppConfig): string {
 
         var taskNode = document.createElement('div');
         taskNode.className = 'run-item-task';
-        taskNode.textContent = truncateTask(run.task, 80);
+        taskNode.textContent = run.title || truncateTask(run.task, 80);
         taskNode.title = run.task || '';
 
         var statusNode = document.createElement('span');
@@ -1951,35 +2103,73 @@ function dashboardHtml(config: AppConfig): string {
       return icons[toolName] || 'build';
     }
 
-    function renderPipelineTimeline(events) {
+    function renderPipelineTimeline(events, isActive) {
       if (!events || events.length === 0) {
         el.pipelineTimelineCard.style.display = 'none';
         return;
       }
       el.pipelineTimelineCard.style.display = '';
-      var lines = [];
+
+      // Build progress bar from node events
+      var nodeStates = {};
+      var nodeOrder = [];
       for (var i = 0; i < events.length; i++) {
         var ev = events[i];
-        var ts = ev.timestamp ? ev.timestamp.split('T')[1].split('.')[0] : '';
-        if (ev.type === 'node_start') {
-          lines.push(ts + '  \u25B6 ' + (ev.nodeId || ''));
-        } else if (ev.type === 'node_end') {
-          var dur = ev.durationMs ? ' (' + (ev.durationMs / 1000).toFixed(1) + 's)' : '';
-          var icon = ev.outcome === 'success' ? '\u2705' : ev.outcome === 'skipped' ? '\u23ED' : '\u274C';
-          lines.push(ts + '  ' + icon + ' ' + (ev.nodeId || '') + dur + (ev.error ? ' — ' + ev.error.slice(0, 80) : ''));
-        } else if (ev.type === 'phase_change') {
-          lines.push(ts + '  \u{1F504} phase → ' + (ev.phase || ''));
-        } else if (ev.type === 'error') {
-          lines.push(ts + '  \u274C ' + (ev.error || ''));
+        if (ev.type === 'node_start' && ev.nodeId) {
+          if (!nodeStates[ev.nodeId]) nodeOrder.push(ev.nodeId);
+          nodeStates[ev.nodeId] = 'active';
+        } else if (ev.type === 'node_end' && ev.nodeId) {
+          if (!nodeStates[ev.nodeId]) nodeOrder.push(ev.nodeId);
+          if (ev.outcome === 'success' || ev.outcome === 'skipped') {
+            nodeStates[ev.nodeId] = 'done';
+          } else if (ev.outcome === 'soft_fail') {
+            nodeStates[ev.nodeId] = 'warn';
+          } else {
+            nodeStates[ev.nodeId] = 'fail';
+          }
         }
       }
-      el.pipelineTimeline.textContent = lines.join('\\n');
+
+      // Render progress bar
+      var progressBar = document.createElement('div');
+      progressBar.className = 'phase-progress';
+      for (var pi = 0; pi < nodeOrder.length; pi++) {
+        var step = document.createElement('div');
+        step.className = 'phase-step ' + (nodeStates[nodeOrder[pi]] || '');
+        step.title = nodeOrder[pi];
+        progressBar.appendChild(step);
+      }
+
+      // Render text log
+      var lines = [];
+      for (var j = 0; j < events.length; j++) {
+        var evt = events[j];
+        var ts = evt.timestamp ? evt.timestamp.split('T')[1].split('.')[0] : '';
+        if (evt.type === 'node_start') {
+          lines.push(ts + '  \u25B6 ' + (evt.nodeId || ''));
+        } else if (evt.type === 'node_end') {
+          var dur = evt.durationMs ? ' (' + (evt.durationMs / 1000).toFixed(1) + 's)' : '';
+          var icon = evt.outcome === 'success' ? '\u2705' : evt.outcome === 'skipped' ? '\u23ED' : evt.outcome === 'soft_fail' ? '\u26A0\uFE0F' : '\u274C';
+          lines.push(ts + '  ' + icon + ' ' + (evt.nodeId || '') + dur + (evt.error ? ' \u2014 ' + evt.error.slice(0, 80) : ''));
+        } else if (evt.type === 'phase_change') {
+          lines.push(ts + '  \u{1F504} phase \u2192 ' + (evt.phase || ''));
+        } else if (evt.type === 'error') {
+          lines.push(ts + '  \u274C ' + (evt.error || ''));
+        }
+      }
+
+      el.pipelineTimeline.innerHTML = '';
+      el.pipelineTimeline.appendChild(progressBar);
+      var pre = document.createElement('pre');
+      pre.style.cssText = 'margin: 8px 0 0; white-space: pre-wrap; font-size: 11px;';
+      pre.textContent = lines.join('\\n');
+      el.pipelineTimeline.appendChild(pre);
     }
 
-    function renderActivityStream(events, stats) {
+    function renderActivityStream(events, stats, isActive) {
       if (!events || events.length === 0) {
         el.activityStream.innerHTML = '<div class="act-info">No activity events parsed.</div>';
-        el.actStats.innerHTML = '';
+        el.actStats.innerHTML = isActive ? '<span class="live-badge">Live</span>' : '';
         el.actCount.textContent = '';
         return;
       }
@@ -2167,6 +2357,12 @@ function dashboardHtml(config: AppConfig): string {
 
       if (stats) {
         el.actStats.innerHTML = '';
+        if (isActive) {
+          var liveBadge = document.createElement('span');
+          liveBadge.className = 'live-badge';
+          liveBadge.textContent = 'Live';
+          el.actStats.appendChild(liveBadge);
+        }
         var statItems = [
           { label: 'tools', value: stats.toolCalls },
           { label: 'thinking', value: stats.thinkingBlocks },
@@ -2211,7 +2407,12 @@ function dashboardHtml(config: AppConfig): string {
       if (!state.selectedId) {
         el.retryRun.disabled = true;
         renderSummary(null);
-        renderActivityStream(null, null);
+        renderActivityStream(null, null, false);
+        renderPipelineTimeline(null, false);
+        el.logViewerCard.style.display = 'none';
+        el.logViewer.textContent = '';
+        logStreamState.runId = null;
+        logStreamState.offset = 0;
         el.feedbackToast.classList.remove('visible');
         return;
       }
@@ -2230,11 +2431,12 @@ function dashboardHtml(config: AppConfig): string {
       const detailed = (changesData.detailed || []).slice();
       renderFiles(files, detailed);
 
-      renderActivityStream(eventsData.events || [], eventsData.stats || null);
-      renderPipelineTimeline(pipelineEventsData.events || []);
+      var isActive = run && (run.status !== 'completed' && run.status !== 'failed');
+      renderActivityStream(eventsData.events || [], eventsData.stats || null, isActive);
+      renderPipelineTimeline(pipelineEventsData.events || [], isActive);
 
-      // Load screenshot if available
-      loadScreenshot(state.selectedId);
+      // Load media (screenshots + video) if available
+      loadMedia(state.selectedId);
 
       // Show feedback toast for completed/failed runs without existing feedback
       var showToast = run && (run.status === 'completed' || run.status === 'failed') && !run.feedback;
@@ -2243,6 +2445,59 @@ function dashboardHtml(config: AppConfig): string {
       el.feedbackDown.classList.toggle('selected', run.feedback && run.feedback.rating === 'down');
 
       await loadChatHistory();
+
+      // Log streaming for active runs
+      if (isActive) {
+        el.logViewerCard.style.display = '';
+        await pollLogStream();
+      } else if (run) {
+        // Show final log for completed/failed runs too
+        el.logViewerCard.style.display = '';
+        await pollLogStream();
+      } else {
+        el.logViewerCard.style.display = 'none';
+        el.logViewer.textContent = '';
+      }
+    }
+
+    // ── Log streaming ──
+
+    function stripAnsi(str) {
+      return str.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '');
+    }
+
+    async function pollLogStream() {
+      if (!state.selectedId) return;
+
+      // Reset offset when switching runs
+      if (logStreamState.runId !== state.selectedId) {
+        logStreamState.runId = state.selectedId;
+        logStreamState.offset = 0;
+        el.logViewer.textContent = '';
+      }
+
+      try {
+        var data = await fetchJson(
+          '/api/runs/' + encodeURIComponent(state.selectedId) + '/log?offset=' + logStreamState.offset
+        );
+
+        if (data.content && data.content.length > 0) {
+          var cleaned = stripAnsi(data.content);
+          el.logViewer.textContent += cleaned;
+          logStreamState.offset = data.offset;
+
+          // Auto-scroll
+          if (el.logAutoScroll.checked) {
+            el.logViewer.scrollTop = el.logViewer.scrollHeight;
+          }
+        }
+
+        // Update size indicator
+        var kb = (logStreamState.offset / 1024).toFixed(1);
+        el.logSize.textContent = kb + ' KB';
+      } catch (err) {
+        // Silently ignore — log might not exist yet
+      }
     }
 
     async function saveFeedback(rating) {
@@ -2589,13 +2844,27 @@ export function startDashboardServer(
         }
 
         if (parts.length === 4 && parts[3] === "log" && req.method === "GET") {
-          const lineCount = parseLimit(requestUrl.searchParams.get("lines"));
           const logsPath = run.logsPath ?? path.resolve(config.workRoot, run.id, "run.log");
-          try {
-            const log = await readLogTail(logsPath, lineCount);
-            sendJson(res, 200, { runId: run.id, lines: lineCount, log });
-          } catch {
-            sendJson(res, 200, { runId: run.id, lines: lineCount, log: "" });
+          const offsetParam = requestUrl.searchParams.get("offset");
+
+          if (offsetParam !== null) {
+            // Incremental mode: return content from byte offset
+            const byteOffset = Math.max(0, Number.parseInt(offsetParam, 10) || 0);
+            try {
+              const result = await readLogFromOffset(logsPath, byteOffset);
+              sendJson(res, 200, { runId: run.id, content: result.content, offset: result.newOffset });
+            } catch {
+              sendJson(res, 200, { runId: run.id, content: "", offset: byteOffset });
+            }
+          } else {
+            // Legacy mode: return last N lines
+            const lineCount = parseLimit(requestUrl.searchParams.get("lines"));
+            try {
+              const log = await readLogTail(logsPath, lineCount);
+              sendJson(res, 200, { runId: run.id, lines: lineCount, log });
+            } catch {
+              sendJson(res, 200, { runId: run.id, lines: lineCount, log: "" });
+            }
           }
           return;
         }
@@ -2634,18 +2903,19 @@ export function startDashboardServer(
           return;
         }
 
-        // GET /api/runs/:id/artifacts/:filename — serve run artifacts (screenshots, etc.)
-        if (parts.length === 5 && parts[3] === "artifacts" && req.method === "GET") {
-          const filename = parts[4]!;
+        // GET /api/runs/:id/artifacts/... — serve run artifacts (screenshots, videos, etc.)
+        // Supports subdirectory paths like screenshots/final.png
+        if (parts.length >= 5 && parts[3] === "artifacts" && req.method === "GET") {
+          const filename = parts.slice(4).join("/");
 
           // Path traversal protection
-          if (filename.includes("/") || filename.includes("\\") || filename.includes("..") || filename.startsWith(".")) {
+          if (filename.includes("\\") || filename.includes("..") || filename.startsWith(".") || filename.startsWith("/")) {
             sendJson(res, 400, { error: "Invalid filename" });
             return;
           }
 
           // Allowlist of safe extensions
-          const ALLOWED_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".json", ".txt", ".log", ".zip", ".html"]);
+          const ALLOWED_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".json", ".txt", ".log", ".zip", ".html", ".mp4", ".webm"]);
           const ext = path.extname(filename).toLowerCase();
           if (!ALLOWED_EXTENSIONS.has(ext)) {
             sendJson(res, 400, { error: `File type not allowed: ${ext}` });
@@ -2656,7 +2926,7 @@ export function startDashboardServer(
 
           // Verify the resolved path stays within the run directory
           const runDir = path.resolve(config.workRoot, run.id);
-          if (!filePath.startsWith(runDir)) {
+          if (!filePath.startsWith(runDir + path.sep) && filePath !== runDir) {
             sendJson(res, 400, { error: "Invalid filename" });
             return;
           }
@@ -2676,7 +2946,9 @@ export function startDashboardServer(
             ".txt": "text/plain",
             ".log": "text/plain",
             ".zip": "application/zip",
-            ".html": "text/html"
+            ".html": "text/html",
+            ".mp4": "video/mp4",
+            ".webm": "video/webm"
           };
 
           const contentType = CONTENT_TYPES[ext] ?? "application/octet-stream";
@@ -2687,6 +2959,51 @@ export function startDashboardServer(
             "Cache-Control": "public, max-age=3600"
           });
           res.end(fileData);
+          return;
+        }
+
+        // GET /api/runs/:id/media — list available screenshots and video for a run
+        if (parts.length === 4 && parts[3] === "media" && req.method === "GET") {
+          const { readdir, stat } = await import("node:fs/promises");
+          const runDir = path.resolve(config.workRoot, run.id);
+          const screenshots: Array<{ name: string; path: string; size: number }> = [];
+          let video: { name: string; path: string; size: number } | undefined;
+
+          // Scan screenshots directory
+          try {
+            const screenshotsDir = path.join(runDir, "screenshots");
+            const files = await readdir(screenshotsDir);
+            for (const file of files) {
+              if (!file.endsWith(".png") && !file.endsWith(".jpg")) continue;
+              const s = await stat(path.join(screenshotsDir, file));
+              if (s.size > 1_000) {
+                screenshots.push({
+                  name: file,
+                  path: `screenshots/${file}`,
+                  size: s.size
+                });
+              }
+            }
+            screenshots.sort((a, b) => a.name.localeCompare(b.name));
+          } catch {
+            // No screenshots dir
+          }
+
+          // Scan for video files (.mp4 preferred, .webm fallback)
+          try {
+            const rootFiles = await readdir(runDir);
+            const videoFile = rootFiles.find(f => f.endsWith(".mp4")) ?? rootFiles.find(f => f.endsWith(".webm"));
+            if (videoFile) {
+              const s = await stat(path.join(runDir, videoFile));
+              if (s.size > 1_000) {
+                video = { name: videoFile, path: videoFile, size: s.size };
+              }
+            }
+          } catch {
+            // Scan failed
+          }
+
+          sendJson(res, 200, { runId: run.id, screenshots, video });
           return;
         }
 

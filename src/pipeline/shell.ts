@@ -40,6 +40,11 @@ function resolveSandbox(optionSandboxId?: string): string | undefined {
   return optionSandboxId ?? sandboxStorage.getStore()?.containerId;
 }
 
+/** Returns true when running inside a sandbox context (commands route through Docker). */
+export function isInSandbox(): boolean {
+  return resolveSandbox() !== undefined;
+}
+
 /**
  * Map a process-visible path to the container-side path.
  *

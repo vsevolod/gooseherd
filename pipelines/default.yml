@@ -14,6 +14,11 @@ nodes:
     type: deterministic
     action: classify_task
 
+  - id: generate_title
+    type: deterministic
+    action: generate_title
+    on_soft_fail: warn
+
   - id: hydrate
     type: deterministic
     action: hydrate_context
