@@ -7,7 +7,7 @@
  */
 
 import path from "node:path";
-import { mkdir } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { z } from "zod";
 import { Stagehand, AISdkClient } from "@browserbasehq/stagehand";
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
@@ -15,6 +15,8 @@ import { extractJSON, type LLMCallerConfig } from "../../llm/caller.js";
 import { verifyFeatureVisually, type VisualVerifyResult } from "./browser-verify.js";
 import { appendLog } from "../shell.js";
 import { CdpScreencast } from "./cdp-screencast.js";
+import { CdpConsoleCapture } from "./cdp-console-capture.js";
+import { CdpNetworkCapture } from "./cdp-network-capture.js";
 
 // ── Verdict Schema ──
 
@@ -109,6 +111,9 @@ export function buildInstruction(
 export interface StagehandVerifyResult {
   screenshotPath?: string;
   videoPath?: string;
+  consolePath?: string;
+  networkPath?: string;
+  actionsPath?: string;
   verifyResult?: VisualVerifyResult;
   planTokens?: { input: number; output: number };
   domFindings?: string[];
@@ -165,6 +170,8 @@ export async function runStagehandVerification(
   });
 
   let screencast: CdpScreencast | undefined;
+  let consoleCapture: CdpConsoleCapture | undefined;
+  let networkCapture: CdpNetworkCapture | undefined;
 
   try {
     await stagehand.init();
@@ -194,18 +201,21 @@ export async function runStagehandVerification(
     }
     const page = pages[0];
 
-    // Start CDP screencast BEFORE navigation to capture initial page load
-    try {
-      // Use public API: getSessionForFrame(mainFrameId()) returns a CDPSessionLike with send/on/off
-      const cdpSession = (page as any).getSessionForFrame?.((page as any).mainFrameId?.());
-      if (cdpSession?.send && cdpSession?.on) {
-        screencast = new CdpScreencast(cdpSession, runDir);
-        await screencast.start();
-        await appendLog(logFile, "[gate:browser_verify] screencast: recording started\n");
-      }
-    } catch {
-      await appendLog(logFile, "[gate:browser_verify] screencast: failed to start (non-fatal)\n");
-      screencast = undefined;
+    // Start CDP captures BEFORE navigation to capture initial page load.
+    // Each capture starts independently — partial failure doesn't null already-started ones.
+    const cdpSession = (() => {
+      try {
+        const s = (page as any).getSessionForFrame?.((page as any).mainFrameId?.());
+        return s?.send && s?.on ? s : undefined;
+      } catch { return undefined; }
+    })();
+
+    if (cdpSession) {
+      try { screencast = new CdpScreencast(cdpSession, runDir); await screencast.start(); } catch { screencast = undefined; }
+      try { consoleCapture = new CdpConsoleCapture(cdpSession, runDir); await consoleCapture.start(); } catch { consoleCapture = undefined; }
+      try { networkCapture = new CdpNetworkCapture(cdpSession, runDir); await networkCapture.start(); } catch { networkCapture = undefined; }
+      const started = [screencast && "screencast", consoleCapture && "console", networkCapture && "network"].filter(Boolean).join(" + ");
+      await appendLog(logFile, `[gate:browser_verify] cdp: ${started || "none"} started\n`);
     }
 
     // Navigate to the URL
@@ -326,8 +336,11 @@ export async function runStagehandVerification(
       }
     }
 
-    // Stop screencast and encode to mp4 BEFORE closing Stagehand (close kills CDP connection)
+    // Stop CDP captures and save BEFORE closing Stagehand (close kills CDP connection)
     let videoPath: string | undefined;
+    let consolePath: string | undefined;
+    let networkPath: string | undefined;
+
     if (screencast) {
       try {
         await screencast.stop();
@@ -339,16 +352,63 @@ export async function runStagehandVerification(
       }
     }
 
+    if (consoleCapture) {
+      try {
+        await consoleCapture.stop();
+        consolePath = await consoleCapture.save();
+        await appendLog(logFile, `[gate:browser_verify] console: ${consolePath ? `saved ${consoleCapture.count} entries` : "no logs"}\n`);
+      } catch {
+        await appendLog(logFile, "[gate:browser_verify] console: save failed (non-fatal)\n");
+      }
+    }
+
+    if (networkCapture) {
+      try {
+        await networkCapture.stop();
+        networkPath = await networkCapture.save();
+        await appendLog(logFile, `[gate:browser_verify] network: ${networkPath ? `saved ${networkCapture.count} requests` : "no requests"}\n`);
+      } catch {
+        await appendLog(logFile, "[gate:browser_verify] network: save failed (non-fatal)\n");
+      }
+    }
+
+    // Save agent actions to JSON (best-effort)
+    let actionsPath: string | undefined;
+    if (result.actions.length > 0) {
+      try {
+        const actionEntries = result.actions.map((a) => ({
+          type: a.type as string,
+          reasoning: a.reasoning as string | undefined,
+          pageUrl: a.pageUrl as string | undefined,
+          timestamp: a.timestamp as number | undefined,
+          action: a.action as string | undefined,
+          url: a.url as string | undefined,
+          taskCompleted: a.taskCompleted as boolean | undefined
+        }));
+        actionsPath = path.join(runDir, "agent-actions.json");
+        await writeFile(actionsPath, JSON.stringify(actionEntries, null, 2));
+        await appendLog(logFile, `[gate:browser_verify] actions: saved ${actionEntries.length} steps\n`);
+      } catch {
+        actionsPath = undefined;
+        await appendLog(logFile, "[gate:browser_verify] actions: save failed (non-fatal)\n");
+      }
+    }
+
     return {
       screenshotPath: finalScreenshot,
       videoPath,
+      consolePath,
+      networkPath,
+      actionsPath,
       verifyResult,
       planTokens,
       domFindings: domFindings.length > 0 ? domFindings : undefined
     };
   } finally {
-    // Stop screencast safety net (idempotent via stopped flag)
+    // Safety net stops (all idempotent via stopped flags)
     await screencast?.stop().catch(() => {});
+    await consoleCapture?.stop().catch(() => {});
+    await networkCapture?.stop().catch(() => {});
     await stagehand.close().catch(() => {});
     await appendLog(logFile, "[gate:browser_verify] stagehand: closed\n");
     // Clean up temporary frame files

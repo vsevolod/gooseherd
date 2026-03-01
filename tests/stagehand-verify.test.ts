@@ -85,12 +85,14 @@ describe("stagehand-verify module", () => {
     // This is enforced by TypeScript, but we verify at runtime too
     const mockResult = {
       screenshotPath: "/tmp/screenshot.png",
+      actionsPath: "/tmp/agent-actions.json",
       verifyResult: { passed: true, confidence: "high" as const, reasoning: "OK", inputTokens: 100, outputTokens: 20 },
       planTokens: { input: 100, output: 20 },
       domFindings: ["Found heading element"]
     };
 
     assert.ok("screenshotPath" in mockResult);
+    assert.ok("actionsPath" in mockResult);
     assert.ok("verifyResult" in mockResult);
     assert.ok("planTokens" in mockResult);
     assert.ok("domFindings" in mockResult);

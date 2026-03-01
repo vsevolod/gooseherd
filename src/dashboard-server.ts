@@ -762,6 +762,163 @@ function dashboardHtml(config: AppConfig): string {
       color: var(--muted);
       font-size: 12px;
     }
+    /* Session viewer tabs */
+    .session-tabs {
+      display: flex;
+      gap: 0;
+      border-bottom: 1px solid var(--border);
+      margin: 10px -12px 0;
+      padding: 0 12px;
+    }
+    .session-tab {
+      padding: 8px 14px;
+      font-size: 12px;
+      font-weight: 600;
+      font-family: var(--font-ui);
+      color: var(--muted);
+      background: none;
+      border: none;
+      border-bottom: 2px solid transparent;
+      cursor: pointer;
+      transition: color 120ms, border-color 120ms;
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+    }
+    .session-tab:hover { color: var(--text); }
+    .session-tab.active {
+      color: var(--text);
+      border-bottom-color: var(--ring);
+    }
+    .tab-count {
+      font-size: 10px;
+      font-weight: 600;
+      color: var(--muted);
+      background: var(--panel-3);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 1px 5px;
+      min-width: 16px;
+      text-align: center;
+    }
+    .session-tab.active .tab-count { color: var(--text); }
+    .session-panel {
+      display: none;
+      padding-top: 12px;
+    }
+    .session-panel.active { display: block; }
+    .session-empty {
+      color: var(--muted);
+      font-size: 12px;
+      text-align: center;
+      padding: 24px 12px;
+    }
+    .console-filter-btn {
+      font-size: 11px;
+      padding: 3px 10px;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+      background: var(--panel-3);
+      color: var(--muted);
+      cursor: pointer;
+      font-family: var(--font-ui);
+      font-weight: 600;
+      margin-right: 4px;
+      transition: background 80ms, color 80ms;
+    }
+    .console-filter-btn:hover { background: var(--panel-2); color: var(--text); }
+    .console-filter-btn.active { background: var(--panel-2); color: var(--text); border-color: var(--ring); }
+    .console-entry {
+      padding: 4px 8px;
+      border-bottom: 1px solid color-mix(in srgb, var(--border) 50%, transparent);
+      display: flex;
+      gap: 8px;
+      align-items: flex-start;
+      line-height: 1.4;
+    }
+    .console-entry:last-child { border-bottom: none; }
+    .console-entry .level {
+      font-size: 10px;
+      font-weight: 700;
+      text-transform: uppercase;
+      min-width: 44px;
+      flex-shrink: 0;
+      padding-top: 1px;
+    }
+    .console-entry.error { color: #e53e3e; }
+    .console-entry.warning { color: #d69e2e; }
+    .console-entry.info { color: #3182ce; }
+    .console-entry.log { color: var(--text); }
+    .actions-table {
+      width: 100%;
+      border-collapse: collapse;
+    }
+    .actions-table th {
+      text-align: left;
+      padding: 6px 10px;
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--muted);
+      border-bottom: 2px solid var(--border);
+      position: sticky;
+      top: 0;
+      background: var(--panel);
+    }
+    .actions-table td {
+      padding: 6px 10px;
+      border-bottom: 1px solid color-mix(in srgb, var(--border) 50%, transparent);
+      vertical-align: top;
+    }
+    .actions-table tr:last-child td { border-bottom: none; }
+    .action-type-pill {
+      font-size: 10px;
+      font-weight: 700;
+      border-radius: 4px;
+      padding: 2px 6px;
+      background: var(--badge-bg);
+      color: var(--badge-text);
+      text-transform: lowercase;
+      white-space: nowrap;
+    }
+    .action-type-pill.act { background: color-mix(in srgb, #3b82f6 18%, transparent); color: #60a5fa; }
+    .action-type-pill.goto { background: color-mix(in srgb, #8b5cf6 18%, transparent); color: #a78bfa; }
+    .action-type-pill.done { background: color-mix(in srgb, var(--ok) 18%, transparent); color: var(--ok); }
+    .action-type-pill.screenshot { background: color-mix(in srgb, #ec4899 18%, transparent); color: #f472b6; }
+    .action-type-pill.extract { background: color-mix(in srgb, #f59e0b 18%, transparent); color: #fbbf24; }
+    .network-table {
+      width: 100%;
+      border-collapse: collapse;
+    }
+    .network-table th {
+      text-align: left;
+      padding: 6px 10px;
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--muted);
+      border-bottom: 2px solid var(--border);
+      position: sticky;
+      top: 0;
+      background: var(--panel);
+    }
+    .network-table td {
+      padding: 5px 10px;
+      border-bottom: 1px solid color-mix(in srgb, var(--border) 50%, transparent);
+      white-space: nowrap;
+    }
+    .network-table tr:last-child td { border-bottom: none; }
+    .network-table .status-ok { color: var(--ok); }
+    .network-table .status-err { color: var(--err); }
+    .network-table .status-slow { color: var(--warn); }
+    .network-table .url-cell {
+      max-width: 340px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
     .mono {
       white-space: pre-wrap;
       font-size: 12px;
@@ -1426,14 +1583,41 @@ function dashboardHtml(config: AppConfig): string {
           <div class="file-list" id="files">-</div>
         </div>
         <div class="card" id="media-card" style="display: none;">
-          <div class="card-title" style="margin-bottom: 8px;">Visual evidence</div>
-          <div id="media-video" style="display: none; margin-bottom: 12px;">
-            <video id="media-video-player" controls style="max-width: 100%; border-radius: 6px; border: 1px solid var(--border); background: #000;">
-              Your browser does not support the video tag.
-            </video>
+          <div class="card-title" style="margin-bottom: 0;">Browser session</div>
+          <div class="session-tabs" id="session-tabs">
+            <button class="session-tab active" data-tab="replay">Replay</button>
+            <button class="session-tab" data-tab="actions">Actions <span id="tab-actions-count" class="tab-count"></span></button>
+            <button class="session-tab" data-tab="console">Console <span id="tab-console-count" class="tab-count"></span></button>
+            <button class="session-tab" data-tab="network">Network <span id="tab-network-count" class="tab-count"></span></button>
           </div>
-          <div id="media-screenshots" style="display: none;">
-            <div id="media-screenshots-grid" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 8px;"></div>
+          <div class="session-panel active" id="panel-replay">
+            <div id="media-video" style="display: none; margin-bottom: 12px;">
+              <video id="media-video-player" controls style="width: 100%; border-radius: 6px; border: 1px solid var(--border); background: #000;">
+                Your browser does not support the video tag.
+              </video>
+            </div>
+            <div id="media-screenshots" style="display: none;">
+              <div style="font-size: 12px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 8px;">Screenshots</div>
+              <div id="media-screenshots-grid" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 8px;"></div>
+            </div>
+            <div id="panel-replay-empty" class="session-empty">No video or screenshots available.</div>
+          </div>
+          <div class="session-panel" id="panel-actions">
+            <div id="media-actions-table" style="font-size: 12px; overflow-x: auto;"></div>
+            <div id="panel-actions-empty" class="session-empty">No agent actions recorded.</div>
+          </div>
+          <div class="session-panel" id="panel-console">
+            <div id="media-console-filters" style="display: none; margin-bottom: 8px;">
+              <button class="console-filter-btn active" data-level="all">All</button>
+              <button class="console-filter-btn" data-level="error">Errors</button>
+              <button class="console-filter-btn" data-level="warning">Warnings</button>
+            </div>
+            <div id="media-console-entries" style="max-height: 400px; overflow-y: auto; font-family: var(--font-mono); font-size: 11px;"></div>
+            <div id="panel-console-empty" class="session-empty">No console logs captured.</div>
+          </div>
+          <div class="session-panel" id="panel-network">
+            <div id="media-network-table" style="max-height: 400px; overflow-y: auto; font-size: 12px; overflow-x: auto;"></div>
+            <div id="panel-network-empty" class="session-empty">No network requests captured.</div>
           </div>
         </div>
         <div class="card" id="pipeline-timeline-card" style="display: none;">
@@ -1541,10 +1725,22 @@ function dashboardHtml(config: AppConfig): string {
       openCommit: document.getElementById('open-commit'),
       files: document.getElementById('files'),
       mediaCard: document.getElementById('media-card'),
+      sessionTabs: document.getElementById('session-tabs'),
       mediaVideo: document.getElementById('media-video'),
       mediaVideoPlayer: document.getElementById('media-video-player'),
       mediaScreenshots: document.getElementById('media-screenshots'),
       mediaScreenshotsGrid: document.getElementById('media-screenshots-grid'),
+      panelReplayEmpty: document.getElementById('panel-replay-empty'),
+      panelActionsEmpty: document.getElementById('panel-actions-empty'),
+      mediaActionsTable: document.getElementById('media-actions-table'),
+      tabActionsCount: document.getElementById('tab-actions-count'),
+      panelConsoleEmpty: document.getElementById('panel-console-empty'),
+      mediaConsoleFilters: document.getElementById('media-console-filters'),
+      mediaConsoleEntries: document.getElementById('media-console-entries'),
+      tabConsoleCount: document.getElementById('tab-console-count'),
+      panelNetworkEmpty: document.getElementById('panel-network-empty'),
+      mediaNetworkTable: document.getElementById('media-network-table'),
+      tabNetworkCount: document.getElementById('tab-network-count'),
       pipelineTimelineCard: document.getElementById('pipeline-timeline-card'),
       pipelineTimeline: document.getElementById('pipeline-timeline'),
       activityStream: document.getElementById('activity-stream'),
@@ -1569,6 +1765,18 @@ function dashboardHtml(config: AppConfig): string {
       reportBtn: document.getElementById('report-btn'),
       logoutBtn: document.getElementById('logout-btn'),
     };
+
+    // Session tab switching
+    el.sessionTabs.addEventListener('click', function(e) {
+      var btn = e.target.closest('.session-tab');
+      if (!btn) return;
+      var tabName = btn.getAttribute('data-tab');
+      el.sessionTabs.querySelectorAll('.session-tab').forEach(function(t) { t.classList.remove('active'); });
+      btn.classList.add('active');
+      document.querySelectorAll('.session-panel').forEach(function(p) { p.classList.remove('active'); });
+      var panel = document.getElementById('panel-' + tabName);
+      if (panel) panel.classList.add('active');
+    });
 
     async function fetchJson(url, options) {
       const response = await fetch(url, options);
@@ -1870,6 +2078,8 @@ function dashboardHtml(config: AppConfig): string {
       }
     }
 
+    var consoleFilter = 'all';
+
     async function loadMedia(runId) {
       if (!runId) {
         el.mediaCard.style.display = 'none';
@@ -1880,17 +2090,20 @@ function dashboardHtml(config: AppConfig): string {
         var hasContent = false;
         var baseUrl = '/api/runs/' + encodeURIComponent(runId) + '/artifacts/';
 
-        // Video
+        // ── Replay tab: Video + Screenshots ──
+        var hasReplay = false;
         if (data.video) {
-          el.mediaVideoPlayer.src = baseUrl + data.video.path;
+          var newSrc = baseUrl + data.video.path;
+          if (el.mediaVideoPlayer.src !== newSrc && !el.mediaVideoPlayer.src.endsWith(newSrc)) {
+            el.mediaVideoPlayer.src = newSrc;
+          }
           el.mediaVideo.style.display = '';
-          hasContent = true;
+          hasReplay = true;
         } else {
           el.mediaVideo.style.display = 'none';
           el.mediaVideoPlayer.src = '';
         }
 
-        // Screenshots
         el.mediaScreenshotsGrid.innerHTML = '';
         if (data.screenshots && data.screenshots.length > 0) {
           for (var i = 0; i < data.screenshots.length; i++) {
@@ -1908,9 +2121,129 @@ function dashboardHtml(config: AppConfig): string {
             el.mediaScreenshotsGrid.appendChild(link);
           }
           el.mediaScreenshots.style.display = '';
-          hasContent = true;
+          hasReplay = true;
         } else {
           el.mediaScreenshots.style.display = 'none';
+        }
+        el.panelReplayEmpty.style.display = hasReplay ? 'none' : '';
+        if (hasReplay) hasContent = true;
+
+        // ── Actions tab ──
+        if (data.agentActions && data.agentActions.length > 0) {
+          el.tabActionsCount.textContent = data.agentActions.length;
+          var actHtml = '<table class="actions-table"><thead><tr>';
+          actHtml += '<th style="width: 40px;">#</th>';
+          actHtml += '<th style="width: 80px;">Type</th>';
+          actHtml += '<th>Detail</th>';
+          actHtml += '<th style="width: 60px;">Page</th>';
+          actHtml += '</tr></thead><tbody>';
+          for (var ai = 0; ai < data.agentActions.length; ai++) {
+            var act = data.agentActions[ai];
+            var typeClass = sanitizeCssClass((act.type || '').toLowerCase());
+            var detail = act.reasoning || act.action || act.url || '';
+            if (detail.length > 200) detail = detail.slice(0, 200) + '…';
+            var pageLink = '';
+            if (act.pageUrl) {
+              var safeHref = sanitizeUrlHref(act.pageUrl);
+              if (safeHref) { pageLink = '<a href="' + safeHref + '" target="_blank" rel="noreferrer" style="color: var(--ring); text-decoration: none;" title="' + escapeHtml(act.pageUrl) + '">↗</a>'; }
+            }
+            actHtml += '<tr>';
+            actHtml += '<td style="color: var(--muted);">' + (ai + 1) + '</td>';
+            actHtml += '<td><span class="action-type-pill ' + typeClass + '">' + escapeHtml(act.type || '?') + '</span></td>';
+            actHtml += '<td style="white-space: pre-wrap; word-break: break-word; max-width: 500px;">' + escapeHtml(detail) + '</td>';
+            actHtml += '<td style="text-align: center;">' + pageLink + '</td>';
+            actHtml += '</tr>';
+          }
+          actHtml += '</tbody></table>';
+          el.mediaActionsTable.innerHTML = actHtml;
+          el.panelActionsEmpty.style.display = 'none';
+          hasContent = true;
+        } else {
+          el.tabActionsCount.textContent = '';
+          el.mediaActionsTable.innerHTML = '';
+          el.panelActionsEmpty.style.display = '';
+        }
+
+        // ── Console tab ──
+        if (data.consoleLogs && data.consoleLogs.length > 0) {
+          el.tabConsoleCount.textContent = data.consoleLogs.length;
+          el.mediaConsoleEntries.innerHTML = '';
+
+          function renderConsoleLogs() {
+            el.mediaConsoleEntries.innerHTML = '';
+            for (var ci = 0; ci < data.consoleLogs.length; ci++) {
+              var entry = data.consoleLogs[ci];
+              if (consoleFilter !== 'all' && entry.level !== consoleFilter) continue;
+              var line = document.createElement('div');
+              var levelClass = KNOWN_CONSOLE_LEVELS[entry.level] ? entry.level : 'log';
+              line.className = 'console-entry ' + levelClass;
+              var levelSpan = document.createElement('span');
+              levelSpan.className = 'level';
+              levelSpan.textContent = entry.level || 'log';
+              line.appendChild(levelSpan);
+              var msgSpan = document.createElement('span');
+              msgSpan.textContent = entry.message;
+              line.appendChild(msgSpan);
+              el.mediaConsoleEntries.appendChild(line);
+            }
+          }
+
+          renderConsoleLogs();
+
+          var filterBtns = document.querySelectorAll('.console-filter-btn');
+          for (var fi = 0; fi < filterBtns.length; fi++) {
+            filterBtns[fi].onclick = function(e) {
+              consoleFilter = e.target.getAttribute('data-level');
+              filterBtns.forEach(function(b) { b.classList.remove('active'); });
+              e.target.classList.add('active');
+              renderConsoleLogs();
+            };
+          }
+
+          el.mediaConsoleFilters.style.display = '';
+          el.panelConsoleEmpty.style.display = 'none';
+          hasContent = true;
+        } else {
+          el.tabConsoleCount.textContent = '';
+          el.mediaConsoleEntries.innerHTML = '';
+          el.mediaConsoleFilters.style.display = 'none';
+          el.panelConsoleEmpty.style.display = '';
+        }
+
+        // ── Network tab ──
+        if (data.networkLog && data.networkLog.length > 0) {
+          el.tabNetworkCount.textContent = data.networkLog.length;
+          var netHtml = '<table class="network-table"><thead><tr>';
+          netHtml += '<th>URL</th>';
+          netHtml += '<th>Method</th>';
+          netHtml += '<th>Status</th>';
+          netHtml += '<th>Duration</th>';
+          netHtml += '<th>Size</th>';
+          netHtml += '</tr></thead><tbody>';
+          for (var ni = 0; ni < data.networkLog.length; ni++) {
+            var req = data.networkLog[ni];
+            var statusClass = '';
+            if (req.error || req.status >= 400) statusClass = 'status-err';
+            else if (req.durationMs > 2000) statusClass = 'status-slow';
+            else if (req.status >= 200 && req.status < 300) statusClass = 'status-ok';
+            var shortUrl = req.url;
+            try { shortUrl = new URL(req.url).pathname; } catch {}
+            netHtml += '<tr class="' + statusClass + '">';
+            netHtml += '<td class="url-cell" title="' + escapeHtml(req.url || '') + '">' + escapeHtml(shortUrl) + '</td>';
+            netHtml += '<td>' + escapeHtml(req.method || '') + '</td>';
+            netHtml += '<td>' + (req.error ? escapeHtml(req.error) : escapeHtml(String(req.status || '\u2014'))) + '</td>';
+            netHtml += '<td>' + (req.durationMs !== undefined ? req.durationMs + 'ms' : '\u2014') + '</td>';
+            netHtml += '<td>' + (req.encodedDataLength !== undefined ? Math.round(req.encodedDataLength / 1024) + ' KB' : '\u2014') + '</td>';
+            netHtml += '</tr>';
+          }
+          netHtml += '</tbody></table>';
+          el.mediaNetworkTable.innerHTML = netHtml;
+          el.panelNetworkEmpty.style.display = 'none';
+          hasContent = true;
+        } else {
+          el.tabNetworkCount.textContent = '';
+          el.mediaNetworkTable.innerHTML = '';
+          el.panelNetworkEmpty.style.display = '';
         }
 
         el.mediaCard.style.display = hasContent ? '' : 'none';
@@ -1918,6 +2251,27 @@ function dashboardHtml(config: AppConfig): string {
         el.mediaCard.style.display = 'none';
       }
     }
+
+    function escapeHtml(str) {
+      if (!str) return '';
+      return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    }
+
+    function sanitizeUrlHref(url) {
+      if (!url) return '';
+      try {
+        var parsed = new URL(url);
+        if (parsed.protocol === 'http:' || parsed.protocol === 'https:') return escapeHtml(url);
+      } catch {}
+      return '';
+    }
+
+    function sanitizeCssClass(str) {
+      if (!str) return '';
+      return str.replace(/[^a-z0-9_-]/g, '');
+    }
+
+    var KNOWN_CONSOLE_LEVELS = { log: true, info: true, warn: true, warning: true, error: true, debug: true, trace: true };
 
     function renderFiles(files, detailed) {
       if ((!files || files.length === 0) && (!detailed || detailed.length === 0)) {
@@ -3003,7 +3357,33 @@ export function startDashboardServer(
             // Scan failed
           }
 
-          sendJson(res, 200, { runId: run.id, screenshots, video });
+          // Scan for console-logs.json, network-log.json, agent-actions.json
+          let consoleLogs: unknown[] | undefined;
+          let networkLog: unknown[] | undefined;
+          let agentActions: unknown[] | undefined;
+          try {
+            const consoleFile = path.join(runDir, "console-logs.json");
+            const consoleData = await (await import("node:fs/promises")).readFile(consoleFile, "utf-8");
+            consoleLogs = JSON.parse(consoleData);
+          } catch {
+            // No console logs
+          }
+          try {
+            const networkFile = path.join(runDir, "network-log.json");
+            const networkData = await (await import("node:fs/promises")).readFile(networkFile, "utf-8");
+            networkLog = JSON.parse(networkData);
+          } catch {
+            // No network log
+          }
+          try {
+            const actionsFile = path.join(runDir, "agent-actions.json");
+            const actionsData = await (await import("node:fs/promises")).readFile(actionsFile, "utf-8");
+            agentActions = JSON.parse(actionsData);
+          } catch {
+            // No agent actions
+          }
+
+          sendJson(res, 200, { runId: run.id, screenshots, video, consoleLogs, networkLog, agentActions });
           return;
         }
 

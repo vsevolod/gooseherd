@@ -25,14 +25,18 @@ export class CdpScreencast {
   private stopped = false;
   private frameHandler: ((params: Record<string, unknown>) => void) | undefined;
   private pendingWrites = new Set<Promise<void>>();
+  private lastFrameTime = 0;
+  private gapFillTimer: ReturnType<typeof setInterval> | undefined;
+  private gapFillInFlight = false;
 
   constructor(session: CdpSession, runDir: string) {
     this.session = session;
     this.framesDir = path.join(runDir, "screencast-frames");
   }
 
-  /** Start capturing screencast frames. Call BEFORE page.goto() to capture initial load. */
-  async start(opts?: { quality?: number; maxWidth?: number; maxHeight?: number }): Promise<void> {
+  /** Start capturing screencast frames. Call BEFORE page.goto() to capture initial load.
+   *  Set gapFill: false to disable periodic screenshot capture (useful in headed mode to avoid flicker). */
+  async start(opts?: { quality?: number; maxWidth?: number; maxHeight?: number; gapFill?: boolean; everyNthFrame?: number }): Promise<void> {
     await mkdir(this.framesDir, { recursive: true });
 
     this.frameHandler = (params: Record<string, unknown>) => {
@@ -42,29 +46,70 @@ export class CdpScreencast {
       // ACK immediately to prevent Chrome from throttling frame delivery
       this.session.send("Page.screencastFrameAck", { sessionId }).catch(() => {});
 
+      this.lastFrameTime = Date.now();
+
       // Write frame to disk asynchronously, track promise for drain on stop
-      this.frameCount++;
-      const framePath = path.join(this.framesDir, `frame-${String(this.frameCount).padStart(6, "0")}.jpg`);
-      const writeTask = writeFile(framePath, Buffer.from(data, "base64")).catch(() => {});
-      this.pendingWrites.add(writeTask);
-      writeTask.finally(() => this.pendingWrites.delete(writeTask));
+      this.writeFrame(data);
     };
 
     this.session.on("Page.screencastFrame", this.frameHandler);
 
-    await this.session.send("Page.startScreencast", {
+    const screencastParams: Record<string, unknown> = {
       format: "jpeg",
       quality: opts?.quality ?? 60,
-      maxWidth: opts?.maxWidth ?? 1280,
-      maxHeight: opts?.maxHeight ?? 800,
-      everyNthFrame: 1
-    });
+      everyNthFrame: opts?.everyNthFrame ?? 1
+    };
+    const mw = opts?.maxWidth ?? 1280;
+    const mh = opts?.maxHeight ?? 800;
+    if (mw > 0) screencastParams.maxWidth = mw;
+    if (mh > 0) screencastParams.maxHeight = mh;
+    await this.session.send("Page.startScreencast", screencastParams);
+
+    this.lastFrameTime = Date.now();
+
+    if (opts?.gapFill === false) return;
+
+    // Gap-fill: capture a screenshot when CDP hasn't sent a frame in 400ms.
+    // CDP screencastFrame is compositor-driven — no pixel changes = no frames.
+    // This fills idle gaps (e.g. while LLM thinks) with fresh screenshots.
+    this.gapFillTimer = setInterval(() => {
+      if (this.stopped || this.gapFillInFlight) return;
+      if (Date.now() - this.lastFrameTime < 400) return;
+
+      this.gapFillInFlight = true;
+      this.session.send("Page.captureScreenshot", { format: "jpeg", quality: 60 })
+        .then((result) => {
+          if (this.stopped) return;
+          const data = (result as { data: string }).data;
+          if (data) {
+            this.lastFrameTime = Date.now();
+            this.writeFrame(data);
+          }
+        })
+        .catch(() => {})
+        .finally(() => { this.gapFillInFlight = false; });
+    }, 500);
+  }
+
+  /** Write a base64-encoded JPEG frame to disk. Shared by screencast events and gap-fill. */
+  private writeFrame(data: string): void {
+    this.frameCount++;
+    const framePath = path.join(this.framesDir, `frame-${String(this.frameCount).padStart(6, "0")}.jpg`);
+    const writeTask = writeFile(framePath, Buffer.from(data, "base64")).catch(() => {});
+    this.pendingWrites.add(writeTask);
+    writeTask.finally(() => this.pendingWrites.delete(writeTask));
   }
 
   /** Stop capturing and drain pending writes. Idempotent — safe to call multiple times. */
   async stop(): Promise<void> {
     if (this.stopped) return;
     this.stopped = true;
+
+    // Stop gap-fill timer first to prevent new captures during teardown
+    if (this.gapFillTimer) {
+      clearInterval(this.gapFillTimer);
+      this.gapFillTimer = undefined;
+    }
 
     try {
       await this.session.send("Page.stopScreencast");
@@ -93,7 +138,7 @@ export class CdpScreencast {
       execFile("ffmpeg", [
         "-y",
         "-start_number", "1",
-        "-framerate", "4",
+        "-framerate", "2",
         "-i", inputPattern,
         // libx264 requires even width+height; pad odd dimensions with 1px black border
         "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2",

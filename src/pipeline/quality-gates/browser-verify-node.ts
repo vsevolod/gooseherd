@@ -178,6 +178,15 @@ export async function browserVerifyNode(
         ctx.set("videoPath", result.videoPath);
         logInfo("browser_verify: video recorded", { path: result.videoPath });
       }
+      if (result.consolePath) {
+        ctx.set("consolePath", result.consolePath);
+      }
+      if (result.networkPath) {
+        ctx.set("networkPath", result.networkPath);
+      }
+      if (result.actionsPath) {
+        ctx.set("actionsPath", result.actionsPath);
+      }
     } catch (error) {
       // Stagehand failed — fall back to screenshot + vision
       const msg = error instanceof Error ? error.message : "Unknown error";
