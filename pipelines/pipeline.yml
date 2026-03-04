@@ -1,6 +1,6 @@
 version: 1
-name: "with-preview"
-description: "Default pipeline + deploy preview + visual verification with screenshots"
+name: "pipeline"
+description: "Unified pipeline — all nodes, orchestrator controls via skipNodes/enableNodes"
 
 context:
   max_validation_rounds: 2
@@ -18,6 +18,11 @@ nodes:
     type: deterministic
     action: generate_title
     on_soft_fail: warn
+
+  - id: plan_task
+    type: agentic
+    action: plan_task
+    enabled: false
 
   - id: hydrate
     type: deterministic
@@ -52,6 +57,27 @@ nodes:
       max_rounds: 2
       until: "local_test.exit_code == 0"
 
+  # Quality gates — run after validation, before commit
+  - id: diff_gate
+    type: conditional
+    action: diff_gate
+    on_soft_fail: warn
+
+  - id: forbidden_files
+    type: conditional
+    action: forbidden_files
+    on_soft_fail: warn
+
+  - id: security_scan
+    type: deterministic
+    action: security_scan
+
+  - id: scope_judge
+    type: agentic
+    action: scope_judge
+    enabled: false
+    on_soft_fail: warn
+
   - id: commit
     type: deterministic
     action: commit
@@ -68,16 +94,18 @@ nodes:
   - id: summarize_changes
     type: deterministic
     action: summarize_changes
+    enabled: false
     on_soft_fail: warn
 
   # Deploy and screenshot the preview
+  # Configure REVIEW_APP_URL_PATTERN env var for url_pattern strategy.
   - id: deploy_preview
     type: deterministic
     action: deploy_preview
+    enabled: false
     on_soft_fail: warn
     config:
       strategy: url_pattern
-      url_pattern: "https://{{prNumber}}.stg.epicpxls.com"
       readiness_timeout_seconds: 300
       max_timeout_seconds: 1800
       readiness_poll_interval_seconds: 5
@@ -85,15 +113,30 @@ nodes:
   - id: browser_verify
     type: deterministic
     action: browser_verify
-    enabled: true
-    config:
-      test_email: "admin@admin.com"
-      test_password: "password"
+    enabled: false
     on_failure:
       action: loop
       agent_node: fix_browser
       max_rounds: 2
       on_exhausted: complete_with_warning
+
+  # Mid-pipeline intelligence: decide whether to skip remaining nodes based on state
+  - id: decide_recovery
+    type: conditional
+    action: decide_next_step
+    enabled: false
+    if: "ctx.browserVerifyVerdictReason != ''"
+    config:
+      model: openai/gpt-4.1-mini
+      context_keys:
+        - browserVerifyVerdictReason
+        - browserVerifyDomFindings
+        - browserVerifyFailureHistory
+        - changedFiles
+      available_actions:
+        - fix_browser
+        - browser_verify
+        - implement
 
   # CI feedback loop — runs before screenshot upload to avoid stale commitSha
   - id: wait_ci
@@ -109,6 +152,7 @@ nodes:
   - id: upload_screenshot
     type: deterministic
     action: upload_screenshot
+    enabled: false
     on_soft_fail: warn
 
   - id: notify

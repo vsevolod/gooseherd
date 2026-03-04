@@ -2,7 +2,7 @@ import { writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { NodeConfig, NodeResult, NodeDeps } from "../types.js";
 import type { ContextBag } from "../context-bag.js";
-import { runShell, shellEscape, renderTemplate, appendLog, buildMcpFlags, mapToContainerPath } from "../shell.js";
+import { runShell, renderTemplate, appendLog, mapToContainerPath, buildMcpFlags, buildPiExtensionFlags } from "../shell.js";
 import { parseErrors } from "../error-parser.js";
 
 /**
@@ -53,15 +53,12 @@ export async function fixValidationNode(
     run_id: run.id,
     repo_slug: run.repoSlug,
     parent_run_id: run.parentRunId ?? ""
+  }, {
+    mcp_flags: buildMcpFlags(config.mcpExtensions),
+    pi_extensions: buildPiExtensionFlags(config.piAgentExtensions)
   });
 
-  let cmd = agentCommand;
-  const mcpFlags = buildMcpFlags(config.mcpExtensions);
-  if (mcpFlags) {
-    cmd = `${cmd} ${mcpFlags}`;
-  }
-
-  await runShell(cmd, {
+  await runShell(agentCommand, {
     cwd: path.resolve("."),
     logFile,
     timeoutMs: config.agentTimeoutSeconds * 1000

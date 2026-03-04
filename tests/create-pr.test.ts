@@ -211,6 +211,27 @@ test("buildPrBody: screenshot-only visual evidence", () => {
   assert.ok(body.includes("screenshot.png"));
 });
 
+test("buildPrBody: includes embedded video and clickable link when provided", () => {
+  const body = buildPrBody(
+    BASE_RUN,
+    "main",
+    "Gooseherd",
+    false,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    "https://example.com/screenshot.png",
+    "https://github.com/org/repo/blob/abc123/.gooseherd/videos/run-abc12345.mp4",
+    "https://github.com/org/repo/raw/abc123/.gooseherd/videos/run-abc12345.mp4"
+  );
+  assert.ok(body.includes("### Verification Video"));
+  assert.ok(body.includes("<video"));
+  assert.ok(body.includes("View verification video"));
+  assert.ok(body.includes("/blob/abc123/"));
+  assert.ok(body.includes("/raw/abc123/"));
+});
+
 // ── Commit and changed files from context ──
 
 test("buildPrBody: includes commit SHA in details table", () => {

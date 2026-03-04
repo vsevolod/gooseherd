@@ -15,18 +15,14 @@ FROM node:22-bookworm-slim
 
 # System deps:
 #   git            – pipeline git operations (clone, push, etc.)
-#   curl           – download goose binary
-#   bzip2          – decompress goose .tar.bz2 archive
+#   curl           – health checks, API calls
 #   ca-certificates – HTTPS for git + API calls
-#   libxcb1        – runtime dependency of the goose Rust binary
 #   chromium       – headless browser for Stagehand (runs in main process)
 #   ffmpeg         – encode CDP screencast frames → mp4
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     curl \
-    bzip2 \
     ca-certificates \
-    libxcb1 \
     chromium \
     ffmpeg \
   && rm -rf /var/lib/apt/lists/*
@@ -35,11 +31,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 ENV PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium
 
-# Install Goose CLI (AI coding agent by Block)
-# CONFIGURE=false skips interactive setup; GOOSE_BIN_DIR puts it on PATH
-RUN curl -fsSL https://github.com/block/goose/releases/download/stable/download_cli.sh \
-    | CONFIGURE=false GOOSE_BIN_DIR=/usr/local/bin bash \
-  && goose --version
+# Install pi-agent (AI coding agent)
+RUN npm install -g @mariozechner/pi-coding-agent \
+  && pi --version
 
 WORKDIR /app
 
@@ -48,11 +42,11 @@ RUN npm ci --omit=dev
 
 COPY --from=builder /app/dist/ dist/
 COPY scripts/ scripts/
+COPY pipelines/ pipelines/
+COPY extensions/ extensions/
 
 RUN mkdir -p .work data
 
-# Goose requires this in headless/container environments (no system keyring)
-ENV GOOSE_DISABLE_KEYRING=1
 # Dashboard must bind to all interfaces inside a container
 ENV DASHBOARD_HOST=0.0.0.0
 

@@ -12,7 +12,7 @@ import type { ExecutionResult, NewRunInput, RunRecord } from "./types.js";
 
 const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
-interface ClassifiedError {
+export interface ClassifiedError {
   category: string;
   friendly: string;
   suggestion: string;
@@ -24,11 +24,11 @@ const ERROR_PATTERNS: Array<{ test: RegExp; result: ClassifiedError }> = [
     result: { category: "clone", friendly: "Failed to clone repository", suggestion: "Check that the repo exists and your GitHub credentials (GITHUB_TOKEN or GitHub App) have access." }
   },
   {
-    test: /exceeded \d+s.*terminating|\[timeout\]/i,
+    test: /timed out|timeout:|exceeded \d+s.*terminating|\[timeout[^\]]*\]/i,
     result: { category: "timeout", friendly: "Agent timed out", suggestion: "The task may be too complex. Try breaking it into smaller steps or increase AGENT_TIMEOUT_SECONDS." }
   },
   {
-    test: /no meaningful changes|whitespace-only|mass deletion detected/i,
+    test: /no meaningful changes|no file changes|whitespace-only|mass deletion detected/i,
     result: { category: "no_changes", friendly: "Agent produced no useful changes", suggestion: "Try rephrasing the task with more specific instructions." }
   },
   {
@@ -199,7 +199,9 @@ export class RunManager {
       baseBranch: original.baseBranch,
       requestedBy,
       channelId: original.channelId,
-      threadTs: original.threadTs
+      threadTs: original.threadTs,
+      skipNodes: original.skipNodes,
+      enableNodes: original.enableNodes
     });
   }
 
@@ -243,6 +245,10 @@ export class RunManager {
 
   async getRunChain(channelId: string, threadTs: string): Promise<RunRecord[]> {
     return this.store.getRunChain(channelId, threadTs);
+  }
+
+  async getRecentRuns(repoSlug?: string): Promise<RunRecord[]> {
+    return this.store.getRecentRuns(repoSlug);
   }
 
   async saveFeedbackFromSlackAction(params: {
@@ -417,10 +423,8 @@ export class RunManager {
         await upsertRunCard();
       };
 
-      const pipelineFile = run.pipelineHint && /^[a-zA-Z0-9_-]+$/.test(run.pipelineHint)
-        ? `pipelines/${run.pipelineHint}.yml`
-        : this.config.pipelineFile;
-      const result = await this.pipelineEngine.execute(run, phaseCallback, pipelineFile, onDetail);
+      const pipelineFile = this.config.pipelineFile;
+      const result = await this.pipelineEngine.execute(run, phaseCallback, pipelineFile, onDetail, run.skipNodes, run.enableNodes);
       stopHeartbeat();
 
       run = await this.store.updateRun(stableRunId, {

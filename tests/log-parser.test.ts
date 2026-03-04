@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { parseRunLog, getEventStats, type RunEvent } from "../src/log-parser.js";
+import { parseRunLog, getEventStats, isPiAgentJsonl, parsePiAgentJsonl, type RunEvent } from "../src/log-parser.js";
 
 // ── Minimal synthetic log ─────────────────────────────────
 
@@ -399,4 +399,200 @@ Great, I see the files. Let me continue.
       "thinking should not contain annotations: None"
     );
   }
+});
+
+// ══════════════════════════════════════════════════════════
+// ── pi-agent JSONL parser tests ─────────────────────────
+// ══════════════════════════════════════════════════════════
+
+const PI_AGENT_SIMPLE_LOG = `Huble run test-pi-001
+
+$ git clone 'https://x-access-token:***@github.com/org/repo.git' '/work/repo'
+Cloning into '/work/repo'...
+
+$ git checkout 'main'
+Already on 'main'
+
+$ git checkout -b 'huble/test-pi-001'
+Switched to a new branch 'huble/test-pi-001'
+
+[pipeline] clone: success (1000ms)
+
+[pipeline] implement: starting
+
+$ cd '/work/repo' && pi -p @'/work/task.md' --model openrouter/z-ai/glm-5 --no-session --mode json --tools read,write,edit,bash
+{"type":"session","version":3,"id":"test-session","timestamp":"2026-03-01T10:00:00.000Z","cwd":"/work/repo"}
+{"type":"agent_start"}
+{"type":"turn_start"}
+{"type":"message_start","message":{"role":"user","content":[{"type":"text","text":"Fix the bug"}],"timestamp":1772464800000}}
+{"type":"message_end","message":{"role":"user","content":[{"type":"text","text":"Fix the bug"}],"timestamp":1772464800000}}
+{"type":"message_start","message":{"role":"assistant","content":[],"api":"openai-completions","provider":"openrouter","model":"z-ai/glm-5","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"stop","timestamp":1772464800001}}
+{"type":"message_update","assistantMessageEvent":{"type":"thinking_end","contentIndex":0,"content":"I need to read the main file to understand the bug."}}
+{"type":"message_end","message":{"role":"assistant","content":[{"type":"thinking","thinking":"I need to read the main file to understand the bug.","thinkingSignature":"reasoning"},{"type":"toolCall","id":"call_001","name":"read","arguments":{"path":"src/index.ts"}}],"api":"openai-completions","provider":"openrouter","model":"z-ai/glm-5","usage":{"input":500,"output":50,"cacheRead":0,"cacheWrite":0,"totalTokens":550,"cost":{"input":0.0005,"output":0.0001,"cacheRead":0,"cacheWrite":0,"total":0.0006}},"stopReason":"toolUse","timestamp":1772464800001}}
+{"type":"message_start","message":{"role":"toolResult","toolCallId":"call_001","toolName":"read","content":[{"type":"text","text":"console.log('hello')"}],"isError":false,"timestamp":1772464801000}}
+{"type":"message_end","message":{"role":"toolResult","toolCallId":"call_001","toolName":"read","content":[{"type":"text","text":"console.log('hello')"}],"isError":false,"timestamp":1772464801000}}
+{"type":"turn_end","message":{"role":"assistant","content":[{"type":"thinking","thinking":"I need to read the main file.","thinkingSignature":"reasoning"},{"type":"toolCall","id":"call_001","name":"read","arguments":{"path":"src/index.ts"}}],"api":"openai-completions","provider":"openrouter","model":"z-ai/glm-5","usage":{"input":500,"output":50,"cacheRead":0,"cacheWrite":0,"totalTokens":550,"cost":{"input":0.0005,"output":0.0001,"cacheRead":0,"cacheWrite":0,"total":0.0006}},"stopReason":"toolUse","timestamp":1772464800001},"toolResults":[]}
+{"type":"turn_start"}
+{"type":"message_start","message":{"role":"assistant","content":[],"api":"openai-completions","provider":"openrouter","model":"z-ai/glm-5","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"stop","timestamp":1772464802000}}
+{"type":"message_update","assistantMessageEvent":{"type":"thinking_end","contentIndex":0,"content":"Found the issue. Let me fix it."}}
+{"type":"message_update","assistantMessageEvent":{"type":"text_end","contentIndex":1,"content":"I've fixed the bug by updating the main file."}}
+{"type":"message_end","message":{"role":"assistant","content":[{"type":"thinking","thinking":"Found the issue.","thinkingSignature":"reasoning"},{"type":"text","text":"I've fixed the bug by updating the main file."}],"api":"openai-completions","provider":"openrouter","model":"z-ai/glm-5","usage":{"input":800,"output":30,"cacheRead":0,"cacheWrite":0,"totalTokens":830,"cost":{"input":0.0008,"output":0.00003,"cacheRead":0,"cacheWrite":0,"total":0.00083}},"stopReason":"stop","timestamp":1772464802000}}
+{"type":"turn_end","message":{"role":"assistant","content":[{"type":"thinking","thinking":"Found the issue.","thinkingSignature":"reasoning"},{"type":"text","text":"I've fixed the bug."}],"api":"openai-completions","provider":"openrouter","model":"z-ai/glm-5","usage":{"input":800,"output":30,"cacheRead":0,"cacheWrite":0,"totalTokens":830,"cost":{"input":0.0008,"output":0.00003,"cacheRead":0,"cacheWrite":0,"total":0.00083}},"stopReason":"stop","timestamp":1772464802000},"toolResults":[]}
+{"type":"agent_end","messages":[]}
+
+$ git add -A
+$ git commit -m 'huble: fix bug'
+[huble/test-pi-001 abc1234] huble: fix bug
+
+$ git push origin 'huble/test-pi-001'
+remote: Create a pull request
+`;
+
+test("isPiAgentJsonl detects pi-agent JSONL format", () => {
+  assert.ok(isPiAgentJsonl(PI_AGENT_SIMPLE_LOG), "should detect pi-agent JSONL in mixed log");
+
+  // Goose log should NOT be detected
+  assert.ok(!isPiAgentJsonl(MINIMAL_LOG), "should not detect Goose log as pi-agent");
+
+  // Empty log
+  assert.ok(!isPiAgentJsonl(""), "should not detect empty log as pi-agent");
+
+  // Pure JSONL
+  assert.ok(
+    isPiAgentJsonl('{"type":"agent_start"}\n{"type":"agent_end","messages":[]}'),
+    "should detect pure JSONL"
+  );
+});
+
+test("parseRunLog auto-dispatches to pi-agent parser for JSONL logs", () => {
+  const events = parseRunLog(PI_AGENT_SIMPLE_LOG);
+
+  // Should have parsed events (not empty)
+  assert.ok(events.length > 0, "should have parsed events");
+
+  // Should have session_start with model info
+  const sessionEvents = events.filter((e) => e.type === "session_start");
+  assert.equal(sessionEvents.length, 1, "should have exactly 1 session start");
+  assert.equal(sessionEvents[0].provider, "openrouter");
+  assert.equal(sessionEvents[0].model, "z-ai/glm-5");
+});
+
+test("parsePiAgentJsonl extracts tool calls from JSONL", () => {
+  const events = parsePiAgentJsonl(PI_AGENT_SIMPLE_LOG);
+  const toolEvents = events.filter((e) => e.type === "tool_call");
+
+  assert.ok(toolEvents.length >= 1, `expected >= 1 tool calls, got ${toolEvents.length}`);
+  assert.equal(toolEvents[0].tool, "read");
+  assert.equal(toolEvents[0].extension, "pi-agent");
+  assert.ok(toolEvents[0].params?.path?.includes("src/index.ts"));
+});
+
+test("parsePiAgentJsonl attaches tool results to matching tool calls", () => {
+  const events = parsePiAgentJsonl(PI_AGENT_SIMPLE_LOG);
+  const readEvent = events.find((e) => e.type === "tool_call" && e.tool === "read");
+
+  assert.ok(readEvent, "should have read tool call");
+  assert.ok(readEvent?.result?.includes("console.log"), "result should contain file contents");
+});
+
+test("parsePiAgentJsonl extracts thinking blocks", () => {
+  const events = parsePiAgentJsonl(PI_AGENT_SIMPLE_LOG);
+  const thinking = events.filter((e) => e.type === "agent_thinking");
+
+  assert.ok(thinking.length >= 2, `expected >= 2 thinking blocks, got ${thinking.length}`);
+  const thinkingText = thinking.map((e) => e.content).join(" ");
+  assert.ok(thinkingText.includes("read the main file"), "should have first thinking block");
+  assert.ok(thinkingText.includes("Found the issue"), "should have second thinking block");
+});
+
+test("parsePiAgentJsonl extracts text_end as agent_thinking", () => {
+  const events = parsePiAgentJsonl(PI_AGENT_SIMPLE_LOG);
+  const thinking = events.filter((e) => e.type === "agent_thinking");
+
+  const textContent = thinking.map((e) => e.content).join(" ");
+  assert.ok(
+    textContent.includes("fixed the bug"),
+    "should include text_end content as agent_thinking"
+  );
+});
+
+test("parsePiAgentJsonl extracts cost from message_end usage", () => {
+  const events = parsePiAgentJsonl(PI_AGENT_SIMPLE_LOG);
+  const infoEvents = events.filter((e) => e.type === "info" && e.content.includes("Agent complete"));
+
+  assert.ok(infoEvents.length >= 1, "should have agent complete info event");
+  assert.ok(infoEvents[0].content.includes("$"), "should include cost");
+  assert.ok(infoEvents[0].content.includes("in / "), "should include token counts");
+});
+
+test("parsePiAgentJsonl handles pipeline shell commands", () => {
+  const events = parsePiAgentJsonl(PI_AGENT_SIMPLE_LOG);
+
+  // Phase markers
+  const phases = events.filter((e) => e.type === "phase_marker");
+  const phaseNames = phases.map((e) => e.phase);
+  assert.ok(phaseNames.includes("cloning"), "should have cloning phase");
+  assert.ok(phaseNames.includes("agent"), "should have agent phase");
+  assert.ok(phaseNames.includes("pushing"), "should have pushing phase");
+
+  // Pipeline messages now have their own type
+  const pipelineMsgs = events.filter((e) => e.type === "pipeline_message");
+  assert.ok(pipelineMsgs.length >= 1, "should have pipeline_message events");
+  // Verify level classification
+  const successMsg = pipelineMsgs.find(e => e.phase === "success");
+  assert.ok(successMsg, "should classify 'success' pipeline messages");
+});
+
+test("parsePiAgentJsonl assigns monotonically non-decreasing progress", () => {
+  const events = parsePiAgentJsonl(PI_AGENT_SIMPLE_LOG);
+
+  for (let j = 1; j < events.length; j++) {
+    assert.ok(
+      events[j].progressPercent >= events[j - 1].progressPercent,
+      `progress should be non-decreasing at event[${j}]: ${events[j - 1].progressPercent} -> ${events[j].progressPercent}`
+    );
+  }
+});
+
+test("parsePiAgentJsonl increments progress per tool call in agent phase", () => {
+  const events = parsePiAgentJsonl(PI_AGENT_SIMPLE_LOG);
+  const toolEvents = events.filter((e) => e.type === "tool_call");
+
+  if (toolEvents.length > 0) {
+    // Tool calls within agent phase should have progress > 10%
+    assert.ok(
+      toolEvents[0].progressPercent > 10,
+      "first tool call should have progress > 10%"
+    );
+  }
+});
+
+test("getEventStats works with pi-agent JSONL parsed events", () => {
+  const events = parsePiAgentJsonl(PI_AGENT_SIMPLE_LOG);
+  const stats = getEventStats(events);
+
+  assert.ok(stats.totalEvents > 0, "should have events");
+  assert.ok(stats.toolCalls >= 1, "should have tool calls");
+  assert.ok(stats.thinkingBlocks >= 2, "should have thinking blocks");
+  assert.ok(stats.shellCommands >= 1, "should have shell commands");
+  assert.ok(stats.tools["read"] >= 1, "should count read tool");
+});
+
+test("parsePiAgentJsonl handles empty and minimal inputs", () => {
+  assert.deepEqual(parsePiAgentJsonl(""), []);
+  assert.deepEqual(parsePiAgentJsonl("\n\n\n"), []);
+
+  // Just agent_start + agent_end (no tool calls)
+  const minimal = '{"type":"agent_start"}\n{"type":"agent_end","messages":[]}';
+  const events = parsePiAgentJsonl(minimal);
+  const infoEvents = events.filter((e) => e.type === "info");
+  assert.ok(infoEvents.length >= 1, "should have agent complete event");
+});
+
+test("parseRunLog still routes Goose logs to regex parser", () => {
+  // Ensure existing Goose tests still pass through auto-detect
+  const events = parseRunLog(MINIMAL_LOG);
+  const sessionEvents = events.filter((e) => e.type === "session_start");
+  assert.equal(sessionEvents.length, 1, "Goose log should still parse via regex");
+  assert.equal(sessionEvents[0].provider, "openrouter");
 });

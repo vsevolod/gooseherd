@@ -48,9 +48,12 @@ const envSchema = z.object({
   CEMS_API_URL: z.string().optional(),
   CEMS_API_KEY: z.string().optional(),
   CEMS_ENABLED: z.string().optional(),
-  CEMS_MCP_COMMAND: z.string().optional(),
   CEMS_TEAM_ID: z.string().optional(),
   MCP_EXTENSIONS: z.string().optional(),
+  PI_AGENT_EXTENSIONS: z.string().optional(),
+
+  // OpenRouter provider routing (JSON object, e.g. {"ignore":["DeepInfra"]})
+  OPENROUTER_PROVIDER_PREFERENCES: z.string().optional(),
 
   PIPELINE_FILE: z.string().optional(),
 
@@ -77,10 +80,15 @@ const envSchema = z.object({
   OPENROUTER_API_KEY: z.string().optional(),
   ANTHROPIC_API_KEY: z.string().optional(),
   OPENAI_API_KEY: z.string().optional(),
+  DEFAULT_LLM_MODEL: z.string().optional(),
   PLAN_TASK_MODEL: z.string().optional(),
   SCOPE_JUDGE_ENABLED: z.string().optional(),
   SCOPE_JUDGE_MODEL: z.string().optional(),
   SCOPE_JUDGE_MIN_PASS_SCORE: z.string().optional(),
+
+  ORCHESTRATOR_MODEL: z.string().optional(),
+  ORCHESTRATOR_TIMEOUT_MS: z.string().optional(),
+  ORCHESTRATOR_WALL_CLOCK_TIMEOUT_MS: z.string().optional(),
 
   OBSERVER_SMART_TRIAGE_ENABLED: z.string().optional(),
   OBSERVER_SMART_TRIAGE_MODEL: z.string().optional(),
@@ -91,7 +99,7 @@ const envSchema = z.object({
   SCREENSHOT_ENABLED: z.string().optional(),
   BROWSER_VERIFY_MODEL: z.string().optional(),
   BROWSER_VERIFY_EXECUTION_MODEL: z.string().optional(),
-
+  BROWSER_VERIFY_MAX_STEPS: z.string().optional(),
 
   CI_WAIT_ENABLED: z.string().optional(),
   CI_POLL_INTERVAL_SECONDS: z.string().optional(),
@@ -108,7 +116,15 @@ const envSchema = z.object({
   SANDBOX_IMAGE: z.string().optional(),
   SANDBOX_HOST_WORK_PATH: z.string().optional(),
   SANDBOX_CPUS: z.string().optional(),
-  SANDBOX_MEMORY_MB: z.string().optional()
+  SANDBOX_MEMORY_MB: z.string().optional(),
+
+  SUPERVISOR_ENABLED: z.string().optional(),
+  SUPERVISOR_RUN_TIMEOUT_SECONDS: z.string().optional(),
+  SUPERVISOR_NODE_STALE_SECONDS: z.string().optional(),
+  SUPERVISOR_WATCHDOG_INTERVAL_SECONDS: z.string().optional(),
+  SUPERVISOR_MAX_AUTO_RETRIES: z.string().optional(),
+  SUPERVISOR_RETRY_COOLDOWN_SECONDS: z.string().optional(),
+  SUPERVISOR_MAX_RETRIES_PER_DAY: z.string().optional()
 });
 
 function parseList(value?: string): string[] {
@@ -189,9 +205,11 @@ export interface AppConfig {
   cemsApiUrl?: string;
   cemsApiKey?: string;
   cemsEnabled: boolean;
-  cemsMcpCommand?: string;
   cemsTeamId?: string;
   mcpExtensions: string[];
+  piAgentExtensions: string[];
+  /** OpenRouter provider routing preferences (passed as `provider` in request body). */
+  openrouterProviderPreferences?: Record<string, unknown>;
 
   pipelineFile: string;
 
@@ -222,10 +240,16 @@ export interface AppConfig {
   openrouterApiKey?: string;
   anthropicApiKey?: string;
   openaiApiKey?: string;
+  /** Shared default model for all LLM features (plan_task, scope_judge, smart_triage, browser_verify). Individual overrides take precedence. */
+  defaultLlmModel: string;
   planTaskModel: string;
   scopeJudgeEnabled: boolean;
   scopeJudgeModel: string;
   scopeJudgeMinPassScore: number;
+
+  orchestratorModel: string;
+  orchestratorTimeoutMs: number;
+  orchestratorWallClockTimeoutMs: number;
 
   observerSmartTriageEnabled: boolean;
   observerSmartTriageModel: string;
@@ -236,6 +260,7 @@ export interface AppConfig {
   screenshotEnabled: boolean;
   browserVerifyModel: string;
   browserVerifyExecutionModel?: string;
+  browserVerifyMaxSteps: number;
 
   ciWaitEnabled: boolean;
   ciPollIntervalSeconds: number;
@@ -255,6 +280,14 @@ export interface AppConfig {
   sandboxHostWorkPath: string;
   sandboxCpus: number;
   sandboxMemoryMb: number;
+
+  supervisorEnabled: boolean;
+  supervisorRunTimeoutSeconds: number;
+  supervisorNodeStaleSeconds: number;
+  supervisorWatchdogIntervalSeconds: number;
+  supervisorMaxAutoRetries: number;
+  supervisorRetryCooldownSeconds: number;
+  supervisorMaxRetriesPerDay: number;
 }
 
 function parseRepoMap(value?: string): Map<string, string> {
@@ -308,14 +341,21 @@ export function resolveGitHubAuthMode(config: AppConfig): "app" | "pat" | "none"
   return "none";
 }
 
-function buildMcpExtensions(cemsMcpCommand?: string, mcpExtensions?: string): string[] {
-  const extensions = parseList(mcpExtensions);
-  const legacy = cemsMcpCommand?.trim();
-  if (legacy && !extensions.includes(legacy)) {
-    extensions.unshift(legacy);
+function parseProviderPreferences(value?: string): Record<string, unknown> | undefined {
+  if (!value || value.trim() === "") return undefined;
+  try {
+    const parsed = JSON.parse(value) as Record<string, unknown>;
+    if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+      return parsed;
+    }
+  } catch {
+    // Invalid JSON — ignore
   }
-  return extensions;
+  return undefined;
 }
+
+
+
 
 export function loadConfig(): AppConfig {
   const parsed = envSchema.parse(process.env);
@@ -360,7 +400,7 @@ export function loadConfig(): AppConfig {
     lintFixCommand: parsed.LINT_FIX_COMMAND?.trim() || "",
     localTestCommand: parsed.LOCAL_TEST_COMMAND?.trim() || "",
     maxValidationRounds: parseInteger(parsed.MAX_VALIDATION_ROUNDS, 2),
-    agentTimeoutSeconds: parseInteger(parsed.AGENT_TIMEOUT_SECONDS, 1200),
+    agentTimeoutSeconds: parseInteger(parsed.AGENT_TIMEOUT_SECONDS, 600),
     slackProgressHeartbeatSeconds: parseInteger(parsed.SLACK_PROGRESS_HEARTBEAT_SECONDS, 20),
     dashboardEnabled: parseBoolean(parsed.DASHBOARD_ENABLED, true),
     dashboardHost: parsed.DASHBOARD_HOST?.trim() || "127.0.0.1",
@@ -376,11 +416,12 @@ export function loadConfig(): AppConfig {
     cemsApiUrl: parsed.CEMS_API_URL?.trim() || undefined,
     cemsApiKey: parsed.CEMS_API_KEY?.trim() || undefined,
     cemsEnabled: parseBoolean(parsed.CEMS_ENABLED, false),
-    cemsMcpCommand: parsed.CEMS_MCP_COMMAND?.trim() || undefined,
     cemsTeamId: parsed.CEMS_TEAM_ID?.trim() || undefined,
-    mcpExtensions: buildMcpExtensions(parsed.CEMS_MCP_COMMAND, parsed.MCP_EXTENSIONS),
+    mcpExtensions: parseList(parsed.MCP_EXTENSIONS),
+    piAgentExtensions: parseList(parsed.PI_AGENT_EXTENSIONS),
+    openrouterProviderPreferences: parseProviderPreferences(parsed.OPENROUTER_PROVIDER_PREFERENCES),
 
-    pipelineFile: parsed.PIPELINE_FILE?.trim() || "pipelines/default.yml",
+    pipelineFile: parsed.PIPELINE_FILE?.trim() || "pipelines/pipeline.yml",
 
     observerEnabled: parseBoolean(parsed.OBSERVER_ENABLED, false),
     observerAlertChannelId: parsed.OBSERVER_ALERT_CHANNEL_ID?.trim() || "",
@@ -405,20 +446,26 @@ export function loadConfig(): AppConfig {
     openrouterApiKey: parsed.OPENROUTER_API_KEY?.trim() || undefined,
     anthropicApiKey: parsed.ANTHROPIC_API_KEY?.trim() || undefined,
     openaiApiKey: parsed.OPENAI_API_KEY?.trim() || undefined,
-    planTaskModel: parsed.PLAN_TASK_MODEL?.trim() || "anthropic/claude-sonnet-4-6",
+    defaultLlmModel: parsed.DEFAULT_LLM_MODEL?.trim() || "anthropic/claude-sonnet-4-6",
+    planTaskModel: parsed.PLAN_TASK_MODEL?.trim() || parsed.DEFAULT_LLM_MODEL?.trim() || "anthropic/claude-sonnet-4-6",
     scopeJudgeEnabled: parseBoolean(parsed.SCOPE_JUDGE_ENABLED, false),
-    scopeJudgeModel: parsed.SCOPE_JUDGE_MODEL?.trim() || "anthropic/claude-sonnet-4-6",
+    scopeJudgeModel: parsed.SCOPE_JUDGE_MODEL?.trim() || parsed.DEFAULT_LLM_MODEL?.trim() || "anthropic/claude-sonnet-4-6",
     scopeJudgeMinPassScore: parseInteger(parsed.SCOPE_JUDGE_MIN_PASS_SCORE, 60),
 
+    orchestratorModel: parsed.ORCHESTRATOR_MODEL?.trim() || "openai/gpt-4.1-mini",
+    orchestratorTimeoutMs: parseInteger(parsed.ORCHESTRATOR_TIMEOUT_MS, 180_000),
+    orchestratorWallClockTimeoutMs: parseInteger(parsed.ORCHESTRATOR_WALL_CLOCK_TIMEOUT_MS, 480_000),
+
     observerSmartTriageEnabled: parseBoolean(parsed.OBSERVER_SMART_TRIAGE_ENABLED, false),
-    observerSmartTriageModel: parsed.OBSERVER_SMART_TRIAGE_MODEL?.trim() || "anthropic/claude-sonnet-4-6",
+    observerSmartTriageModel: parsed.OBSERVER_SMART_TRIAGE_MODEL?.trim() || parsed.DEFAULT_LLM_MODEL?.trim() || "anthropic/claude-sonnet-4-6",
     observerSmartTriageTimeoutMs: parseInteger(parsed.OBSERVER_SMART_TRIAGE_TIMEOUT_MS, 10_000),
 
     browserVerifyEnabled: parseBoolean(parsed.BROWSER_VERIFY_ENABLED, false),
     reviewAppUrlPattern: parsed.REVIEW_APP_URL_PATTERN?.trim() || undefined,
     screenshotEnabled: parseBoolean(parsed.SCREENSHOT_ENABLED, false),
-    browserVerifyModel: parsed.BROWSER_VERIFY_MODEL?.trim() || "anthropic/claude-sonnet-4-6",
+    browserVerifyModel: parsed.BROWSER_VERIFY_MODEL?.trim() || parsed.DEFAULT_LLM_MODEL?.trim() || "anthropic/claude-sonnet-4-6",
     browserVerifyExecutionModel: parsed.BROWSER_VERIFY_EXECUTION_MODEL?.trim() || undefined,
+    browserVerifyMaxSteps: parseInteger(parsed.BROWSER_VERIFY_MAX_STEPS, 15),
 
     ciWaitEnabled: parseBoolean(parsed.CI_WAIT_ENABLED, false),
     ciPollIntervalSeconds: parseInteger(parsed.CI_POLL_INTERVAL_SECONDS, 30),
@@ -435,6 +482,14 @@ export function loadConfig(): AppConfig {
     sandboxImage: parsed.SANDBOX_IMAGE?.trim() || "gooseherd/sandbox:default",
     sandboxHostWorkPath: parsed.SANDBOX_HOST_WORK_PATH?.trim() || "",
     sandboxCpus: parseInteger(parsed.SANDBOX_CPUS, 2),
-    sandboxMemoryMb: parseInteger(parsed.SANDBOX_MEMORY_MB, 4096)
+    sandboxMemoryMb: parseInteger(parsed.SANDBOX_MEMORY_MB, 4096),
+
+    supervisorEnabled: parseBoolean(parsed.SUPERVISOR_ENABLED, true),
+    supervisorRunTimeoutSeconds: parseInteger(parsed.SUPERVISOR_RUN_TIMEOUT_SECONDS, 7200),
+    supervisorNodeStaleSeconds: parseInteger(parsed.SUPERVISOR_NODE_STALE_SECONDS, 1800),
+    supervisorWatchdogIntervalSeconds: parseInteger(parsed.SUPERVISOR_WATCHDOG_INTERVAL_SECONDS, 30),
+    supervisorMaxAutoRetries: parseInteger(parsed.SUPERVISOR_MAX_AUTO_RETRIES, 1),
+    supervisorRetryCooldownSeconds: parseInteger(parsed.SUPERVISOR_RETRY_COOLDOWN_SECONDS, 60),
+    supervisorMaxRetriesPerDay: parseInteger(parsed.SUPERVISOR_MAX_RETRIES_PER_DAY, 20)
   };
 }

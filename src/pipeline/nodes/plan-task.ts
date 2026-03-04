@@ -58,7 +58,8 @@ export async function planTaskNode(
   const llmConfig: LLMCallerConfig = {
     apiKey: config.openrouterApiKey,
     defaultModel: config.planTaskModel,
-    defaultTimeoutMs: 15_000
+    defaultTimeoutMs: 15_000,
+    providerPreferences: config.openrouterProviderPreferences
   };
 
   try {

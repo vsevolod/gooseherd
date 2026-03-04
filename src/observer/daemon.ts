@@ -312,7 +312,8 @@ export class ObserverDaemon {
       const llmConfig: LLMCallerConfig = {
         apiKey: this.config.openrouterApiKey,
         defaultModel: this.config.observerSmartTriageModel,
-        defaultTimeoutMs: this.config.observerSmartTriageTimeoutMs
+        defaultTimeoutMs: this.config.observerSmartTriageTimeoutMs,
+        providerPreferences: this.config.openrouterProviderPreferences
       };
       const triageDecision = await triageEvent(
         event, rule, this.rules, llmConfig,

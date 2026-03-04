@@ -4,47 +4,17 @@ import test from "node:test";
 // Test the config loading indirectly by verifying type shapes
 // (loadConfig() reads process.env directly, so we test the helper logic)
 
-test("MCP extensions: backwards compat merges cemsMcpCommand into array", () => {
-  // Simulate the buildMcpExtensions logic
-  function buildMcpExtensions(cemsMcpCommand?: string, mcpExtensions?: string): string[] {
-    const extensions = (mcpExtensions ?? "")
-      .split(",")
-      .map(e => e.trim())
-      .filter(Boolean);
-    const legacy = cemsMcpCommand?.trim();
-    if (legacy && !extensions.includes(legacy)) {
-      extensions.unshift(legacy);
-    }
-    return extensions;
+test("MCP extensions: parseList splits comma-separated values", () => {
+  function parseList(value?: string): string[] {
+    if (!value || value.trim() === "") return [];
+    return value.split(",").map(e => e.trim()).filter(Boolean);
   }
 
-  // Legacy only
-  assert.deepEqual(
-    buildMcpExtensions("npx @cems/mcp", undefined),
-    ["npx @cems/mcp"]
-  );
-
-  // New only
-  assert.deepEqual(
-    buildMcpExtensions(undefined, "npx @a/ext,npx @b/ext"),
-    ["npx @a/ext", "npx @b/ext"]
-  );
-
-  // Both: legacy prepended if not duplicate
-  assert.deepEqual(
-    buildMcpExtensions("npx @cems/mcp", "npx @a/ext,npx @b/ext"),
-    ["npx @cems/mcp", "npx @a/ext", "npx @b/ext"]
-  );
-
-  // Both: legacy IS in extensions — no duplicate
-  assert.deepEqual(
-    buildMcpExtensions("npx @cems/mcp", "npx @cems/mcp,npx @b/ext"),
-    ["npx @cems/mcp", "npx @b/ext"]
-  );
-
-  // Neither
-  assert.deepEqual(buildMcpExtensions(undefined, undefined), []);
-  assert.deepEqual(buildMcpExtensions("", ""), []);
+  assert.deepEqual(parseList("npx @a/ext,npx @b/ext"), ["npx @a/ext", "npx @b/ext"]);
+  assert.deepEqual(parseList("npx @a/ext"), ["npx @a/ext"]);
+  assert.deepEqual(parseList(undefined), []);
+  assert.deepEqual(parseList(""), []);
+  assert.deepEqual(parseList(" , "), []);
 });
 
 test("Dashboard public URL: defaults to localhost when not set", () => {
@@ -66,17 +36,29 @@ test("Dashboard public URL: uses public URL when set", () => {
 });
 
 test("DRY_RUN: default is false", () => {
-  // Verify the expected default — the actual parseBoolean call is in loadConfig
   function parseBoolean(value: string | undefined, fallback: boolean): boolean {
     if (value === undefined) return fallback;
     const normalized = value.trim().toLowerCase();
     return normalized === "1" || normalized === "true" || normalized === "yes";
   }
 
-  // Default (no env var set) should be false
   assert.equal(parseBoolean(undefined, false), false);
-  // Explicit true
   assert.equal(parseBoolean("true", false), true);
-  // Explicit false
   assert.equal(parseBoolean("false", false), false);
+});
+
+test("DEFAULT_LLM_MODEL: feature models fall back to default", () => {
+  // Simulates the fallback chain: FEATURE_MODEL → DEFAULT_LLM_MODEL → hardcoded default
+  function resolveModel(featureModel?: string, defaultModel?: string): string {
+    return featureModel?.trim() || defaultModel?.trim() || "anthropic/claude-sonnet-4-6";
+  }
+
+  // Feature-specific override wins
+  assert.equal(resolveModel("openai/gpt-4.1-mini", "anthropic/claude-haiku-4-5"), "openai/gpt-4.1-mini");
+  // Falls back to default model
+  assert.equal(resolveModel(undefined, "anthropic/claude-haiku-4-5"), "anthropic/claude-haiku-4-5");
+  // Falls back to hardcoded default
+  assert.equal(resolveModel(undefined, undefined), "anthropic/claude-sonnet-4-6");
+  // Empty strings fall through
+  assert.equal(resolveModel("", ""), "anthropic/claude-sonnet-4-6");
 });

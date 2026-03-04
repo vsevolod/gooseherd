@@ -42,7 +42,7 @@ function makeConfig(overrides?: Partial<AppConfig>): AppConfig {
     workspaceCleanupIntervalMinutes: 60,
     cemsEnabled: false,
     mcpExtensions: [],
-    pipelineFile: "pipelines/default.yml",
+    pipelineFile: "pipelines/pipeline.yml",
     observerEnabled: false,
     observerAlertChannelId: "",
     observerMaxRunsPerDay: 10,
@@ -107,10 +107,7 @@ test("PipelineEngine: tryLoadPipelineOverride rejects invalid names", async (t) 
   assert.ok(engine instanceof PipelineEngine);
 });
 
-test("PipelineEngine: pipelineHint selects pipeline file via RunManager", () => {
-  // Verify the pipelineHint → pipelineFile resolution in RunManager
-  // (This is a type-check + integration test)
-  const hint = "with-quality-gates";
-  const resolved = `pipelines/${hint}.yml`;
-  assert.equal(resolved, "pipelines/with-quality-gates.yml");
+test("PipelineEngine: unified pipeline is the single pipeline file", () => {
+  const resolved = "pipelines/pipeline.yml";
+  assert.equal(resolved, "pipelines/pipeline.yml");
 });

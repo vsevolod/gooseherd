@@ -43,7 +43,7 @@ function makeConfig(overrides?: Partial<AppConfig>): AppConfig {
     workspaceMaxAgeHours: 24,
     workspaceCleanupIntervalMinutes: 60,
     cemsEnabled: false,
-    pipelineFile: "pipelines/default.yml",
+    pipelineFile: "pipelines/pipeline.yml",
     observerEnabled: false,
     observerAlertChannelId: "",
     observerMaxRunsPerDay: 10,
@@ -604,6 +604,12 @@ test("classifyError matches timeout errors", () => {
 
   const result2 = classifyError("Agent [timeout] after 600 seconds");
   assert.equal(result2.category, "timeout");
+
+  const result3 = classifyError("Agent timed out after 600s");
+  assert.equal(result3.category, "timeout");
+
+  const result4 = classifyError("[timeout: command exceeded limit, killed]");
+  assert.equal(result4.category, "timeout");
 });
 
 test("classifyError matches no-changes errors", () => {

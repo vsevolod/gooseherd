@@ -2,10 +2,11 @@ import { access, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { NodeConfig, NodeResult, NodeDeps } from "../types.js";
 import type { ContextBag } from "../context-bag.js";
+import type { RunRecord } from "../../types.js";
 import { runShellCapture } from "../shell.js";
 
 /**
- * Hydrate context node: write .goosehints, build prompt file.
+ * Hydrate context node: build prompt file with run context and instructions.
  */
 export async function hydrateContextNode(
   _nodeConfig: NodeConfig,
@@ -19,40 +20,6 @@ export async function hydrateContextNode(
 
   // Enrich prompt with org memories via lifecycle hooks
   const hookSections = deps.hooks ? await deps.hooks.onPromptEnrich(run) : [];
-
-  // Write dynamic .goosehints with run context
-  const goosehintsContent = [
-    `# Gooseherd Run Context`,
-    ``,
-    `Run ID: ${run.id}`,
-    `Repository: ${run.repoSlug}`,
-    `Base branch: ${run.baseBranch}`,
-    `Requested by: ${run.requestedBy}`,
-    ``,
-    `## Instructions`,
-    `- Keep changes minimal and deterministic`,
-    `- Preserve existing style and architecture`,
-    `- If tests are configured, satisfy them before finishing`,
-    isFollowUp ? `- This is a follow-up run. Only address the feedback — do not refactor unrelated code.` : ``,
-    ``,
-    `## Memory (CEMS)`,
-    `You have memory tools: memory_search, memory_add. USE THEM.`,
-    ``,
-    `### Before coding:`,
-    `- Search for past mistakes, corrections, and patterns on this repo`,
-    `- Search for architectural decisions and coding conventions`,
-    `- Use SPECIFIC, DETAILED queries — not generic keywords. Examples:`,
-    `  - "What SEO improvements were rejected or corrected on epiccoders/pxls?"`,
-    `  - "What landing page patterns work well for this project?"`,
-    `  - "Previous bugs or issues with the landing pages controller"`,
-    ``,
-    `### After completing work:`,
-    `- Store what you learned: what files you changed, what approach worked`,
-    `- Store any gotchas or decisions for the next agent run`,
-    `- Include the repo name and specific file paths in your memory`,
-  ].filter(Boolean).join("\n");
-
-  await writeFile(path.join(repoDir, ".goosehints"), goosehintsContent, "utf8");
 
   // Build parent context for prompt
   let parentContext: { parentRunId: string; parentBranchName: string; parentChangedFiles?: string[]; parentCommitSha?: string; feedbackNote?: string } | undefined;
@@ -111,6 +78,12 @@ export async function hydrateContextNode(
   const implementationPlan = ctx.get<string>("implementationPlan");
 
   sections.push(
+    "## Instructions",
+    "- Keep changes minimal and deterministic",
+    "- Preserve existing style and architecture",
+    "- If tests are configured, satisfy them before finishing",
+    isFollowUp ? "- This is a follow-up run. Only address the feedback — do not refactor unrelated code." : "",
+    "",
     `Task type: ${taskType}`,
     "",
     "Task:",
@@ -124,6 +97,11 @@ export async function hydrateContextNode(
   }
 
   await writeFile(promptFile, sections.join("\n"), "utf8");
+
+  // Write dynamic AGENTS.md into the cloned repo for pi-agent auto-discovery.
+  // Pi-agent automatically finds and injects AGENTS.md into its system prompt.
+  const agentsMd = buildAgentsMd(run, ctx, hookSections, repoSummary);
+  await writeFile(path.join(repoDir, "AGENTS.md"), agentsMd, "utf8");
 
   return { outcome: "success" };
 }
@@ -240,6 +218,63 @@ const TASK_TYPE_INSTRUCTIONS: Record<string, string[]> = {
 
 export function getExpectedOutput(taskType: string): string[] {
   return TASK_TYPE_INSTRUCTIONS[taskType] ?? TASK_TYPE_INSTRUCTIONS["chore"]!;
+}
+
+// ── Dynamic AGENTS.md builder ──
+
+/**
+ * Build a dynamic AGENTS.md that pi-agent auto-discovers in the repo root.
+ * Injects task context, CEMS memories, project conventions, and coding rules.
+ */
+export function buildAgentsMd(
+  run: RunRecord,
+  ctx: ContextBag,
+  hookSections: string[],
+  repoSummary: string | undefined
+): string {
+  const parts: string[] = [];
+
+  parts.push("# AGENTS.md — Gooseherd Context");
+  parts.push("");
+
+  // Task context
+  parts.push("## Task Context");
+  parts.push(`- Run ID: ${run.id}`);
+  parts.push(`- Repository: ${run.repoSlug}`);
+  parts.push(`- Base branch: ${run.baseBranch}`);
+  const taskType = ctx.get<string>("taskType") ?? "chore";
+  parts.push(`- Task type: ${taskType}`);
+  parts.push("");
+
+  // CEMS memories (from onPromptEnrich hooks)
+  if (hookSections.length > 0) {
+    parts.push("## Organizational Memory");
+    parts.push("");
+    parts.push("Relevant patterns and past solutions from your team's knowledge base:");
+    parts.push("");
+    parts.push(...hookSections);
+    parts.push("");
+  }
+
+  // Project conventions (from repo summary)
+  if (repoSummary) {
+    parts.push("## Project Conventions");
+    parts.push("");
+    parts.push(repoSummary);
+    parts.push("");
+  }
+
+  // Coding rules
+  parts.push("## Coding Rules");
+  parts.push("");
+  parts.push("- Keep changes minimal and deterministic");
+  parts.push("- Preserve existing style and architecture");
+  parts.push("- Do not refactor unrelated code");
+  parts.push("- If tests exist, ensure they pass before finishing");
+  parts.push("- Prefer editing existing files over creating new ones");
+  parts.push("");
+
+  return parts.join("\n");
 }
 
 // ── Parent diff extraction for follow-up runs ──

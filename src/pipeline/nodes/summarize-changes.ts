@@ -70,7 +70,8 @@ export async function summarizeChangesNode(
     const llmConfig: LLMCallerConfig = {
       apiKey: config.openrouterApiKey,
       defaultModel: "anthropic/claude-sonnet-4-6",
-      defaultTimeoutMs: 15_000
+      defaultTimeoutMs: 15_000,
+      providerPreferences: config.openrouterProviderPreferences
     };
 
     const response = await callLLM(llmConfig, {

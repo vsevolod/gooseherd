@@ -1,17 +1,17 @@
 import { App } from "@slack/bolt";
+import type { WebClient } from "@slack/web-api";
 import { resolveTeamFromChannel, type AppConfig } from "./config.js";
-import { parseCommand } from "./command-parser.js";
 import { logInfo } from "./logger.js";
 import { RunManager } from "./run-manager.js";
 import type { ObserverDaemon } from "./observer/index.js";
 import { parseSlackAlert, type SlackChannelAdapterConfig, type SlackMessageEvent } from "./observer/sources/slack-channel-adapter.js";
-
-function isRepoAllowed(repoSlug: string, allowlist: string[]): boolean {
-  if (allowlist.length === 0) {
-    return true;
-  }
-  return allowlist.includes(repoSlug);
-}
+import { handleMessage } from "./orchestrator/orchestrator.js";
+import { buildSystemContext } from "./orchestrator/system-context.js";
+import { ConversationStore } from "./orchestrator/conversation-store.js";
+import type { HandleMessageDeps, HandleMessageRequest } from "./orchestrator/types.js";
+import type { LLMCallerConfig } from "./llm/caller.js";
+import type { MemoryProvider } from "./memory/provider.js";
+import type { GitHubService } from "./github.js";
 
 function isChannelAllowed(channelId: string, channelAllowlist: string[]): boolean {
   if (channelAllowlist.length === 0) {
@@ -32,7 +32,7 @@ function shortRunId(id: string): string {
   return id.slice(0, 8);
 }
 
-/** Patterns that indicate casual/approval messages — should NOT trigger a run */
+/** Patterns that indicate casual messages — filter before LLM */
 const CASUAL_PATTERNS =
   /^(thanks|thank you|thx|ty|ok|okay|k|cool|nice|great|awesome|perfect|good|yep|yea|yeah|yes|no|nah|nope|sure|np|👍|👎|🎉|✅|❌|lol|haha|wow)[\s!.?]*$/i;
 
@@ -40,59 +40,187 @@ const CASUAL_PATTERNS =
 const APPROVAL_PATTERNS =
   /^(lgtm|looks good|approved|approve|ship it|ship|merge it|merge|good to go|all good)[\s!.?]*$/i;
 
-export function classifyThreadMessage(
-  text: string
-): "casual" | "approval" | "retry" | "follow_up" {
+/**
+ * Check if a message is casual (no LLM needed).
+ * Also returns true for empty messages.
+ */
+export function isCasualMessage(text: string): boolean {
   const cleaned = stripMentions(text).trim();
-  if (!cleaned) {
-    return "casual";
-  }
-  if (CASUAL_PATTERNS.test(cleaned)) {
-    return "casual";
-  }
-  if (APPROVAL_PATTERNS.test(cleaned)) {
-    return "approval";
-  }
-  if (/^(retry|rerun|run again|try again)[\s!.?]*$/i.test(cleaned)) {
-    return "retry";
-  }
+  if (!cleaned) return true;
+  if (CASUAL_PATTERNS.test(cleaned)) return true;
   // Short messages without action verbs are likely casual
-  if (cleaned.length < 15 && !/\b(add|fix|change|update|remove|move|rename|refactor|implement|create|delete|use|try|make|set|wrap|lint|test|run|split|merge|revert|undo|convert|enable|disable)\b/i.test(cleaned)) {
-    return "casual";
+  if (cleaned.length < 15 && !/\b(add|fix|change|update|remove|move|rename|refactor|implement|create|delete|use|try|make|set|wrap|lint|test|run|split|merge|revert|undo|convert|enable|disable|what|how|why|where|when|who|which|help|status|tail|list|show|tell|explain|describe|check|retry|rerun)\b/i.test(cleaned)) {
+    return true;
   }
-  return "follow_up";
+  return false;
 }
 
-export function parseFollowUpMessage(text: string): { task: string; baseBranch?: string; retry: boolean } {
-  const cleaned = stripMentions(text);
-  if (!cleaned) {
-    return { task: "", retry: false };
+/** Fast-path checks for help/status/tail. Returns the type or null for non-matches. */
+function detectFastPath(text: string): { type: "help" } | { type: "status"; runId?: string } | { type: "tail"; runId?: string } | null {
+  const normalized = stripMentions(text).trim();
+  if (!normalized || normalized.toLowerCase() === "help") {
+    return { type: "help" };
   }
+  if (normalized.toLowerCase() === "status") {
+    return { type: "status" };
+  }
+  if (normalized.toLowerCase().startsWith("status ")) {
+    const runId = normalized.slice("status ".length).trim();
+    return { type: "status", runId: runId || undefined };
+  }
+  if (normalized.toLowerCase() === "tail") {
+    return { type: "tail" };
+  }
+  if (normalized.toLowerCase().startsWith("tail ")) {
+    const runId = normalized.slice("tail ".length).trim();
+    return { type: "tail", runId: runId || undefined };
+  }
+  return null;
+}
 
-  let baseBranch: string | undefined;
-  let task = cleaned;
+/**
+ * Gather thread run history for the orchestrator.
+ * Thread text history is no longer needed — the ConversationStore
+ * provides full multi-turn LLM history instead.
+ */
+async function gatherThreadContext(
+  _client: WebClient,
+  channelId: string,
+  threadTs: string,
+  runManager: RunManager
+): Promise<{ existingRunRepo?: string; existingRunId?: string }> {
+  let existingRunRepo: string | undefined;
+  let existingRunId: string | undefined;
 
-  const baseDirectiveMatch = task.match(/\b(?:base|branch)\s*[:=]\s*([A-Za-z0-9._/-]+)/i);
-  if (baseDirectiveMatch?.[1]) {
-    baseBranch = baseDirectiveMatch[1];
-    task = task.replace(baseDirectiveMatch[0], "").trim();
-  } else {
-    const naturalBranchMatch = task.match(
-      /\b(?:base|branch)\b[^.\n]*?\b(?:is|to)\s+([A-Za-z0-9._/-]+)/i
-    );
-    if (naturalBranchMatch?.[1]) {
-      baseBranch = naturalBranchMatch[1];
-      task = task.replace(naturalBranchMatch[0], "").trim();
+  try {
+    const runs = await runManager.getRunChain(channelId, threadTs);
+    if (runs.length > 0) {
+      const latestRun = runs[runs.length - 1];
+      existingRunRepo = latestRun.repoSlug;
+      existingRunId = latestRun.id;
     }
+  } catch {
+    // Run chain fetch failed — not critical
   }
 
-  const retry = /^(retry|rerun|run again|try again)\b/i.test(task);
+  return { existingRunRepo, existingRunId };
+}
 
-  return {
-    task,
-    baseBranch,
-    retry
+/**
+ * Build HandleMessageDeps from the app's services.
+ */
+function buildHandleMessageDeps(
+  config: AppConfig,
+  runManager: RunManager,
+  memoryProvider?: MemoryProvider,
+  githubService?: GitHubService
+): HandleMessageDeps {
+  const deps: HandleMessageDeps = {
+    repoAllowlist: config.repoAllowlist,
+
+    enqueueRun: async (repo, task, opts) => {
+      if (opts.continueFrom) {
+        const continued = await runManager.continueRun(opts.continueFrom, task, "orchestrator");
+        if (!continued) {
+          throw new Error(`Could not continue from run ${opts.continueFrom}`);
+        }
+        return { id: continued.id, branchName: continued.branchName, repoSlug: continued.repoSlug };
+      }
+
+      const run = await runManager.enqueueRun({
+        repoSlug: repo,
+        task,
+        baseBranch: config.defaultBaseBranch,
+        requestedBy: "orchestrator",
+        channelId: "",
+        threadTs: "",
+        skipNodes: opts.skipNodes,
+        enableNodes: opts.enableNodes,
+        teamId: undefined
+      });
+      return { id: run.id, branchName: run.branchName, repoSlug: run.repoSlug };
+    },
+
+    listRuns: async (repoSlug?: string) => {
+      const runs = await runManager.getRecentRuns(repoSlug);
+      return JSON.stringify(runs.map(r => ({
+        id: r.id.slice(0, 8),
+        status: r.status,
+        repo: r.repoSlug,
+        task: r.task.slice(0, 80),
+        requestedBy: r.requestedBy,
+        createdAt: r.createdAt
+      })));
+    },
+
+    getConfig: async (key?: string) => {
+      const safeKeys = [
+        "browserVerifyModel", "browserVerifyMaxSteps", "pipelineFile",
+        "orchestratorModel", "planTaskModel", "agentTimeoutSeconds",
+        "maxValidationRounds", "ciMaxFixRounds"
+      ];
+      if (key && safeKeys.includes(key)) {
+        return JSON.stringify({ [key]: (config as unknown as Record<string, unknown>)[key] });
+      }
+      const subset: Record<string, unknown> = {};
+      for (const k of safeKeys) {
+        subset[k] = (config as unknown as Record<string, unknown>)[k];
+      }
+      return JSON.stringify(subset);
+    }
   };
+
+  if (memoryProvider) {
+    deps.searchMemory = async (query: string) => {
+      return memoryProvider.searchMemories(query);
+    };
+  }
+
+  if (githubService) {
+    deps.searchCode = async (query: string, repoSlug: string) => {
+      const results = await githubService.searchCode(query, repoSlug);
+      return results.map(r => `${r.path}\n${r.textMatches.map(m => `  ${m}`).join("\n")}`).join("\n\n");
+    };
+
+    deps.describeRepo = async (repoSlug: string) => {
+      const info = await githubService.describeRepo(repoSlug);
+      const parts: string[] = [];
+
+      // Language breakdown
+      const totalBytes = Object.values(info.languages).reduce((a, b) => a + b, 0);
+      if (totalBytes > 0) {
+        const langLines = Object.entries(info.languages)
+          .sort((a, b) => b[1] - a[1])
+          .map(([lang, bytes]) => `- ${lang}: ${((bytes / totalBytes) * 100).toFixed(1)}%`);
+        parts.push(`Languages:\n${langLines.join("\n")}`);
+      }
+
+      // Root files
+      if (info.files.length > 0) {
+        parts.push(`Root files:\n${info.files.join("\n")}`);
+      }
+
+      // README snippet
+      if (info.readmeSnippet) {
+        parts.push(`README (first 500 chars):\n${info.readmeSnippet}`);
+      }
+
+      return parts.join("\n\n") || "No information available for this repository.";
+    };
+
+    deps.readFile = async (repoSlug: string, path: string) => {
+      return githubService.readFile(repoSlug, path);
+    };
+
+    deps.listFiles = async (repoSlug: string, path: string) => {
+      const entries = await githubService.listDirectory(repoSlug, path);
+      return entries
+        .map(e => `${e.type === "dir" ? "📁" : "📄"} ${e.name}${e.type === "dir" ? "/" : ""} (${String(e.size)}B)`)
+        .join("\n");
+    };
+  }
+
+  return deps;
 }
 
 /** Build help blocks for the App Home tab and /help responses. */
@@ -107,26 +235,25 @@ export function buildHelpBlocks(config: AppConfig): Array<Record<string, unknown
       text: {
         type: "mrkdwn",
         text: [
-          `*Mention the bot* in any allowed channel to kick off an AI coding run.`,
+          `*Mention the bot* in any allowed channel to get help with code.`,
           "",
-          `\`@${config.slackCommandName} owner/repo Fix the login timeout bug\``,
+          `\`@${config.slackCommandName} fix the login timeout in epiccoders/pxls\``,
           "",
-          `The agent clones the repo, writes code, opens a PR, and reports back in the thread.`
+          `The agent understands natural language — just describe what you need.`,
+          `It can answer questions, make code changes, and check run status.`
         ].join("\n")
       }
     },
     { type: "divider" },
     {
       type: "header",
-      text: { type: "plain_text", text: "Commands", emoji: true }
+      text: { type: "plain_text", text: "Quick Commands", emoji: true }
     },
     {
       type: "section",
       text: {
         type: "mrkdwn",
         text: [
-          `\`${botCommand(config, "owner/repo your task here")}\` — natural format`,
-          `\`${botCommand(config, "run owner/repo[@base] | your task")}\` — explicit format`,
           `\`${botCommand(config, "status")}\` — latest run in thread/channel`,
           `\`${botCommand(config, "status <run-id>")}\` — specific run status`,
           `\`${botCommand(config, "tail")}\` — latest logs`,
@@ -138,28 +265,35 @@ export function buildHelpBlocks(config: AppConfig): Array<Record<string, unknown
     { type: "divider" },
     {
       type: "header",
-      text: { type: "plain_text", text: "Thread Follow-ups", emoji: true }
+      text: { type: "plain_text", text: "Conversations", emoji: true }
     },
     {
       type: "section",
       text: {
         type: "mrkdwn",
         text: [
-          "In a run thread, mention the bot with plain text to queue a follow-up run on the same branch.",
+          "Just talk naturally in threads. The bot understands context:",
           "",
-          "*Examples:*",
-          `\`@${config.slackCommandName} also fix the tests\``,
-          `\`@${config.slackCommandName} retry\``,
-          `\`@${config.slackCommandName} base=staging add the migration\``,
+          `\`@${config.slackCommandName} fix the login timeout in epiccoders/pxls\` — starts a run`,
+          `\`@${config.slackCommandName} also fix the tests\` — follow-up in same thread`,
+          `\`@${config.slackCommandName} what model does browser verify use?\` — answers questions`,
+          `\`@${config.slackCommandName} retry\` — retry the last run`,
           "",
-          "Casual messages (thanks, lgtm, etc.) are ignored. Approval signals save positive feedback."
+          "Casual messages (thanks, lgtm, etc.) are handled gracefully."
         ].join("\n")
       }
     }
   ];
 }
 
-export async function startSlackApp(config: AppConfig, runManager: RunManager, observer?: ObserverDaemon): Promise<void> {
+export async function startSlackApp(
+  config: AppConfig,
+  runManager: RunManager,
+  observer?: ObserverDaemon,
+  memoryProvider?: MemoryProvider,
+  githubService?: GitHubService,
+  sharedConversationStore?: ConversationStore
+): Promise<void> {
   const app = new App({
     token: config.slackBotToken,
     appToken: config.slackAppToken,
@@ -168,6 +302,22 @@ export async function startSlackApp(config: AppConfig, runManager: RunManager, o
   });
 
   const usernameOpt = config.slackCommandName ? { username: config.slackCommandName } : {};
+
+  // Pre-build system context (stable across requests)
+  const systemContext = buildSystemContext(config);
+
+  // Resolve API key for LLM calls
+  const apiKey = config.openrouterApiKey ?? config.openaiApiKey ?? config.anthropicApiKey;
+  const llmConfig: LLMCallerConfig | undefined = apiKey
+    ? { apiKey, defaultModel: config.orchestratorModel, defaultTimeoutMs: 10_000, providerPreferences: config.openrouterProviderPreferences }
+    : undefined;
+
+  // Pre-build deps (stable across requests)
+  const handleMessageDeps = buildHandleMessageDeps(config, runManager, memoryProvider, githubService);
+
+  // Conversation memory — persists full LLM history per thread
+  const conversationStore = sharedConversationStore ?? new ConversationStore();
+  setInterval(() => conversationStore.cleanup(24 * 60 * 60 * 1000), 60 * 60 * 1000);
 
   /** Wrapper around say() that always includes username override */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -406,126 +556,68 @@ export async function startSlackApp(config: AppConfig, runManager: RunManager, o
     }
   });
 
-  app.event("app_mention", async ({ event, say }) => {
+  // ── Main Message Handler ──────────────────────────────
+  app.event("app_mention", async ({ event, say, client }) => {
     const replyThreadTs = event.thread_ts ?? event.ts;
 
     if (!isChannelAllowed(event.channel, config.slackAllowedChannels)) {
       await sayAs(say, {
-        text: `This channel is not allowed for ${config.slackCommandName} runs.`,
+        text: `This channel is not allowed for ${config.slackCommandName}.`,
         thread_ts: replyThreadTs
       });
       return;
     }
 
-    const command = parseCommand(event.text);
-
-    if (command.type === "help") {
-      await sayAs(say, {
-        thread_ts: replyThreadTs,
-        blocks: buildHelpBlocks(config),
-        text: `${config.appName} help — use \`${botCommand(config, "help")}\` for commands.`
-      });
-      return;
+    // ── Fast paths (no LLM) ──
+    const fastPath = detectFastPath(event.text);
+    if (fastPath) {
+      if (fastPath.type === "help") {
+        await sayAs(say, {
+          thread_ts: replyThreadTs,
+          blocks: buildHelpBlocks(config),
+          text: `${config.appName} help`
+        });
+        return;
+      }
+      if (fastPath.type === "status") {
+        const status = await runManager.formatRunStatus(fastPath.runId, event.channel, event.thread_ts);
+        await sayAs(say, { thread_ts: replyThreadTs, text: status });
+        return;
+      }
+      if (fastPath.type === "tail") {
+        const tail = await runManager.tailRunLogs(fastPath.runId, event.channel, event.thread_ts, 40);
+        await sayAs(say, { thread_ts: replyThreadTs, text: tail });
+        return;
+      }
     }
 
-    if (command.type === "invalid") {
-      if (event.thread_ts && event.user) {
+    // ── Casual pre-filter (no LLM) ──
+    const stripped = stripMentions(event.text);
+    if (isCasualMessage(event.text)) {
+      // In threads with existing runs, save approval feedback
+      if (event.thread_ts && event.user && APPROVAL_PATTERNS.test(stripped)) {
         const latestRun = await runManager.getLatestRunForThread(event.channel, event.thread_ts);
         if (latestRun) {
-          const messageType = classifyThreadMessage(event.text);
-
-          // Casual messages — ignore silently
-          if (messageType === "casual") {
-            return;
-          }
-
-          // Approval signals — save as positive feedback, don't trigger run
-          if (messageType === "approval") {
-            await runManager.saveFeedbackFromSlackAction({
-              runId: latestRun.id,
-              rating: "up",
-              userId: event.user,
-              note: stripMentions(event.text).trim()
-            });
-            await sayAs(say, {
-              thread_ts: replyThreadTs,
-              text: `Noted! Saved positive feedback for *${latestRun.repoSlug}* run ${shortRunId(latestRun.id)}.`
-            });
-            return;
-          }
-
-          // Retry — re-enqueue same task from scratch
-          if (messageType === "retry") {
-            const run = await runManager.retryRun(latestRun.id, event.user);
-            if (run) {
-              await sayAs(say, {
-                thread_ts: replyThreadTs,
-                text: [
-                  `Queued retry for *${run.repoSlug}*`,
-                  `Branch: \`${run.branchName}\``,
-                  `Use \`${botCommand(config, "status")}\` for latest thread status, or \`${botCommand(config, "tail")}\` for logs.`
-                ].join("\n")
-              });
-            }
-            return;
-          }
-
-          // Follow-up — continue the run chain with new instructions
-          const followUp = parseFollowUpMessage(event.text);
-          const feedbackNote = followUp.task || stripMentions(event.text).trim();
-
-          if (feedbackNote.length > config.maxTaskChars) {
-            await sayAs(say, {
-              thread_ts: replyThreadTs,
-              text: `Task is too long. Maximum ${String(config.maxTaskChars)} characters.`
-            });
-            return;
-          }
-
-          const run = await runManager.continueRun(latestRun.id, feedbackNote, event.user);
-          if (run) {
-            await sayAs(say, {
-              thread_ts: replyThreadTs,
-              text: [
-                `Queued follow-up for *${run.repoSlug}* (continuing from ${shortRunId(latestRun.id)})`,
-                `Branch: \`${run.branchName}\``,
-                `Use \`${botCommand(config, "status")}\` for latest thread status, or \`${botCommand(config, "tail")}\` for logs.`
-              ].join("\n")
-            });
-          }
-          return;
+          await runManager.saveFeedbackFromSlackAction({
+            runId: latestRun.id,
+            rating: "up",
+            userId: event.user,
+            note: stripped
+          });
+          await sayAs(say, {
+            thread_ts: replyThreadTs,
+            text: `Noted! Saved positive feedback for *${latestRun.repoSlug}* run ${shortRunId(latestRun.id)}.`
+          });
         }
       }
-
-      await sayAs(say, { thread_ts: replyThreadTs, text: `Invalid command: ${command.reason}` });
       return;
     }
 
-    if (command.type === "status") {
-      const status = await runManager.formatRunStatus(command.runId, event.channel, event.thread_ts);
-      await sayAs(say, { thread_ts: replyThreadTs, text: status });
-      return;
-    }
-
-    if (command.type === "tail") {
-      const tail = await runManager.tailRunLogs(command.runId, event.channel, event.thread_ts, 40);
-      await sayAs(say, { thread_ts: replyThreadTs, text: tail });
-      return;
-    }
-
-    const payload = command.payload;
-    if (!isRepoAllowed(payload.repoSlug, config.repoAllowlist)) {
+    // ── LLM Orchestrator ──
+    if (!llmConfig) {
       await sayAs(say, {
         thread_ts: replyThreadTs,
-        text: `Repo not allowed: ${payload.repoSlug}`
-      });
-      return;
-    }
-
-    if (payload.task.length > config.maxTaskChars) {
-      await sayAs(say, {
-        thread_ts: replyThreadTs,
-        text: `Task is too long. Maximum ${String(config.maxTaskChars)} characters.`
+        text: "No API key configured for the orchestrator. Set OPENROUTER_API_KEY, OPENAI_API_KEY, or ANTHROPIC_API_KEY."
       });
       return;
     }
@@ -533,29 +625,138 @@ export async function startSlackApp(config: AppConfig, runManager: RunManager, o
     if (!event.user) {
       await sayAs(say, {
         thread_ts: replyThreadTs,
-        text: "Unable to identify requesting user for this event."
+        text: "Unable to identify requesting user."
       });
       return;
     }
 
-    const run = await runManager.enqueueRun({
-      repoSlug: payload.repoSlug,
-      task: payload.task,
-      baseBranch: payload.baseBranch ?? config.defaultBaseBranch,
-      requestedBy: event.user,
+    // Gather run history for this thread
+    const threadCtx = event.thread_ts
+      ? await gatherThreadContext(client as unknown as WebClient, event.channel, event.thread_ts, runManager)
+      : {};
+
+    // Load prior conversation from memory store
+    const threadKey = `${event.channel}:${replyThreadTs}`;
+    const priorMessages = conversationStore.get(threadKey);
+    const maskedMessages = priorMessages
+      ? conversationStore.maskOldObservations(priorMessages, 12)
+      : undefined;
+
+    // Build request with conversation history
+    const request: HandleMessageRequest = {
+      message: stripped,
+      userId: event.user,
       channelId: event.channel,
       threadTs: replyThreadTs,
-      teamId: resolveTeamFromChannel(event.channel, config.teamChannelMap)
-    });
+      priorMessages: maskedMessages,
+      existingRunRepo: threadCtx.existingRunRepo,
+      existingRunId: threadCtx.existingRunId
+    };
 
-    await sayAs(say, {
-      thread_ts: replyThreadTs,
-      text: [
-        `Queued run for *${run.repoSlug}*`,
-        `Branch: \`${run.branchName}\``,
-        `Use \`${botCommand(config, "status")}\` for latest thread status, or \`${botCommand(config, "tail")}\` for logs.`
-      ].join("\n")
-    });
+    // Override enqueueRun to use actual user/channel/thread context
+    const depsWithContext: HandleMessageDeps = {
+      ...handleMessageDeps,
+      enqueueRun: async (repo, task, opts) => {
+        if (opts.continueFrom) {
+          const continued = await runManager.continueRun(opts.continueFrom, task, event.user!);
+          if (!continued) {
+            throw new Error(`Could not continue from run ${opts.continueFrom}`);
+          }
+          return { id: continued.id, branchName: continued.branchName, repoSlug: continued.repoSlug };
+        }
+
+        const run = await runManager.enqueueRun({
+          repoSlug: repo,
+          task,
+          baseBranch: config.defaultBaseBranch,
+          requestedBy: event.user!,
+          channelId: event.channel,
+          threadTs: replyThreadTs,
+          skipNodes: opts.skipNodes,
+          enableNodes: opts.enableNodes,
+          teamId: resolveTeamFromChannel(event.channel, config.teamChannelMap)
+        });
+        return { id: run.id, branchName: run.branchName, repoSlug: run.repoSlug };
+      }
+    };
+
+    // Post a "thinking" indicator that we'll update with progress
+    const TOOL_LABELS: Record<string, string> = {
+      describe_repo: "Examining repository",
+      search_code: "Searching code",
+      read_file: "Reading file",
+      list_files: "Browsing files",
+      search_memory: "Searching memory",
+      execute_task: "Queuing run",
+      list_runs: "Checking runs",
+      get_config: "Loading config"
+    };
+
+    let thinkingTs: string | undefined;
+    try {
+      const thinkingMsg = await (client as unknown as WebClient).chat.postMessage({
+        channel: event.channel,
+        thread_ts: replyThreadTs,
+        text: ":hourglass_flowing_sand: Thinking...",
+        ...usernameOpt
+      });
+      thinkingTs = thinkingMsg.ts;
+    } catch {
+      // If posting thinking message fails, continue without it
+    }
+
+    const result = await handleMessage(
+      llmConfig,
+      config.orchestratorModel,
+      systemContext,
+      request,
+      depsWithContext,
+      {
+        onToolCall: (toolName, args) => {
+          if (!thinkingTs) return;
+          const label = TOOL_LABELS[toolName] ?? toolName;
+          const detail = args["path"] ? ` \`${args["path"] as string}\`` :
+                         args["repoSlug"] ? ` in ${args["repoSlug"] as string}` :
+                         args["query"] ? ` for "${(args["query"] as string).slice(0, 40)}"` : "";
+          (client as unknown as WebClient).chat.update({
+            channel: event.channel,
+            ts: thinkingTs!,
+            text: `:mag: ${label}${detail}...`
+          }).catch(() => { /* ignore update failures */ });
+        },
+        timeoutMs: config.orchestratorTimeoutMs,
+        wallClockTimeoutMs: config.orchestratorWallClockTimeoutMs
+      }
+    );
+
+    // Store the full conversation back for future messages in this thread
+    conversationStore.set(threadKey, result.messages);
+
+    // Replace thinking message with final response, or delete if empty
+    if (result.response) {
+      if (thinkingTs) {
+        try {
+          await (client as unknown as WebClient).chat.update({
+            channel: event.channel,
+            ts: thinkingTs,
+            text: result.response
+          });
+        } catch {
+          // If update fails, post a new message
+          await sayAs(say, { thread_ts: replyThreadTs, text: result.response });
+        }
+      } else {
+        await sayAs(say, { thread_ts: replyThreadTs, text: result.response });
+      }
+    } else if (thinkingTs) {
+      // Delete the thinking message if there's no response
+      try {
+        await (client as unknown as WebClient).chat.delete({
+          channel: event.channel,
+          ts: thinkingTs
+        });
+      } catch { /* ignore */ }
+    }
   });
 
   await app.start();

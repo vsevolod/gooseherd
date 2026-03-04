@@ -430,7 +430,7 @@ describe("Browser Verify", () => {
     assert.equal(result.checks.length, 2);
   });
 
-  test("aggregateChecks: one fail → overall fail", () => {
+  test("aggregateChecks: accessibility fail without feature check → overall fail", () => {
     const result = aggregateChecks([
       { name: "smoke_test", passed: true, details: "HTTP 200" },
       { name: "accessibility", passed: false, details: "3 errors" }
@@ -438,6 +438,37 @@ describe("Browser Verify", () => {
     assert.equal(result.overallPass, false);
     assert.equal(result.errors.length, 1);
     assert.ok(result.errors[0].includes("accessibility"));
+  });
+
+  test("aggregateChecks: accessibility fail + feature pass → overall pass (a11y demoted)", () => {
+    const result = aggregateChecks([
+      { name: "smoke_test", passed: true, details: "HTTP 200" },
+      { name: "accessibility", passed: false, details: "286 errors" },
+      { name: "feature_verification", passed: true, details: "[high] Feature implemented correctly" }
+    ]);
+    assert.equal(result.overallPass, true);
+    // a11y warning still in errors array for reporting
+    assert.equal(result.errors.length, 1);
+    assert.ok(result.errors[0].includes("accessibility"));
+  });
+
+  test("aggregateChecks: feature fail + accessibility fail → overall fail", () => {
+    const result = aggregateChecks([
+      { name: "smoke_test", passed: true, details: "HTTP 200" },
+      { name: "accessibility", passed: false, details: "3 errors" },
+      { name: "feature_verification", passed: false, details: "Feature missing" }
+    ]);
+    assert.equal(result.overallPass, false);
+    assert.equal(result.errors.length, 2);
+  });
+
+  test("aggregateChecks: smoke fail always blocks regardless of feature", () => {
+    const result = aggregateChecks([
+      { name: "smoke_test", passed: false, details: "HTTP 502" },
+      { name: "feature_verification", passed: true, details: "Feature visible" }
+    ]);
+    assert.equal(result.overallPass, false);
+    assert.ok(result.errors[0].includes("smoke_test"));
   });
 
   test("aggregateChecks: empty → pass", () => {

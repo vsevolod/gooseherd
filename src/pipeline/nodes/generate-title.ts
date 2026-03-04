@@ -34,7 +34,8 @@ export async function generateTitleNode(
     const llmConfig: LLMCallerConfig = {
       apiKey: config.openrouterApiKey,
       defaultModel: "anthropic/claude-sonnet-4-6",
-      defaultTimeoutMs: 10_000
+      defaultTimeoutMs: 10_000,
+      providerPreferences: config.openrouterProviderPreferences
     };
 
     const result = await summarizeTitle(llmConfig, run.task);

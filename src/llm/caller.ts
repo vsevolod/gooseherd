@@ -8,6 +8,8 @@ export interface LLMCallerConfig {
   apiKey: string;
   defaultModel: string;
   defaultTimeoutMs: number;
+  /** OpenRouter provider routing preferences (e.g. { ignore: ["DeepInfra"] }). */
+  providerPreferences?: Record<string, unknown>;
 }
 
 export interface LLMRequest {
@@ -42,6 +44,12 @@ export interface LLMResponse {
   outputTokens: number;
 }
 
+function isAbortError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  if (error.name === "AbortError") return true;
+  return /operation was aborted|aborted/i.test(error.message);
+}
+
 /**
  * Call the OpenRouter Chat Completions API with timeout support.
  * Returns the text content from the first choice.
@@ -59,23 +67,32 @@ export async function callLLM(
   const timer = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
-    const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${config.apiKey}`
-      },
-      body: JSON.stringify({
-        model,
-        max_tokens: maxTokens,
-        messages: [
-          { role: "system", content: request.system },
-          { role: "user", content: request.userMessage }
-        ],
-        ...(request.jsonMode ? { response_format: { type: "json_object" } } : {})
-      }),
-      signal: controller.signal
-    });
+    let response: Awaited<ReturnType<typeof fetch>>;
+    try {
+      response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${config.apiKey}`
+        },
+        body: JSON.stringify({
+          model,
+          max_tokens: maxTokens,
+          messages: [
+            { role: "system", content: request.system },
+            { role: "user", content: request.userMessage }
+          ],
+          ...(request.jsonMode ? { response_format: { type: "json_object" } } : {}),
+          ...(config.providerPreferences ? { provider: config.providerPreferences } : {})
+        }),
+        signal: controller.signal
+      });
+    } catch (error) {
+      if (isAbortError(error)) {
+        throw new Error(`LLM request timed out after ${String(timeoutMs)}ms`);
+      }
+      throw error;
+    }
 
     if (!response.ok) {
       const body = await response.text().catch(() => "");
@@ -120,23 +137,32 @@ export async function callLLMVision(
   const timer = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
-    const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${config.apiKey}`
-      },
-      body: JSON.stringify({
-        model,
-        max_tokens: maxTokens,
-        messages: [
-          { role: "system", content: request.system },
-          { role: "user", content: request.userContent }
-        ],
-        ...(request.jsonMode ? { response_format: { type: "json_object" } } : {})
-      }),
-      signal: controller.signal
-    });
+    let response: Awaited<ReturnType<typeof fetch>>;
+    try {
+      response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${config.apiKey}`
+        },
+        body: JSON.stringify({
+          model,
+          max_tokens: maxTokens,
+          messages: [
+            { role: "system", content: request.system },
+            { role: "user", content: request.userContent }
+          ],
+          ...(request.jsonMode ? { response_format: { type: "json_object" } } : {}),
+          ...(config.providerPreferences ? { provider: config.providerPreferences } : {})
+        }),
+        signal: controller.signal
+      });
+    } catch (error) {
+      if (isAbortError(error)) {
+        throw new Error(`LLM request timed out after ${String(timeoutMs)}ms`);
+      }
+      throw error;
+    }
 
     if (!response.ok) {
       const body = await response.text().catch(() => "");
@@ -187,7 +213,14 @@ export async function summarizeTitle(
     model: "anthropic/claude-sonnet-4-6"
   });
 
-  const title = response.content.trim().replace(/[."']+$/, "");
+  let title = response.content.trim();
+  // Strip markdown artifacts: **, *, ``, ```, #, newlines
+  title = title.replace(/```[\s\S]*/g, "");   // Remove code blocks and everything after
+  title = title.split("\n")[0]!;               // Take first line only
+  title = title.replace(/[*`#]+/g, "");        // Strip markdown formatting chars
+  title = title.replace(/[."']+$/, "");        // Strip trailing punctuation
+  title = title.replace(/\s+/g, " ").trim();   // Normalize whitespace
+  if (title.length > 72) title = title.slice(0, 69) + "...";
   return {
     title,
     inputTokens: response.inputTokens,
@@ -333,21 +366,30 @@ export async function callLLMWithTools(
     };
 
     try {
-      const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${config.apiKey}`
-        },
-        body: JSON.stringify({
-          model,
-          max_tokens: maxTokens,
-          messages,
-          tools: request.tools,
-          parallel_tool_calls: false
-        }),
-        signal: controller.signal
-      });
+      let response: Awaited<ReturnType<typeof fetch>>;
+      try {
+        response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${config.apiKey}`
+          },
+          body: JSON.stringify({
+            model,
+            max_tokens: maxTokens,
+            messages,
+            tools: request.tools,
+            parallel_tool_calls: false,
+            ...(config.providerPreferences ? { provider: config.providerPreferences } : {})
+          }),
+          signal: controller.signal
+        });
+      } catch (error) {
+        if (isAbortError(error)) {
+          throw new Error(`LLM request timed out after ${String(timeoutMs)}ms (turn ${String(turn + 1)})`);
+        }
+        throw error;
+      }
 
       if (!response.ok) {
         const body = await response.text().catch(() => "");
@@ -423,7 +465,7 @@ export async function callLLMWithTools(
       ? `token budget exceeded (${String(totalInputTokens)} input tokens)`
       : "max turns reached";
   return {
-    content: exhaustedContent || `{"passed": false, "confidence": "low", "reasoning": "Verification incomplete: ${exhaustionReason} after ${String(turnsUsed)} turns"}`,
+    content: exhaustedContent || `Loop exhausted: ${exhaustionReason} after ${String(turnsUsed)} turns`,
     model,
     totalInputTokens,
     totalOutputTokens,

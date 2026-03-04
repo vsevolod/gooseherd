@@ -66,6 +66,10 @@ export interface RunRecord {
   feedbackNote?: string;
   /** Pipeline override hint from smart triage or trigger rule */
   pipelineHint?: string;
+  /** Node IDs to skip (from orchestrator classification) */
+  skipNodes?: string[];
+  /** Node IDs to force-enable (overrides enabled: false in pipeline YAML) */
+  enableNodes?: string[];
   /** CI fix loop attempts counter */
   ciFixAttempts?: number;
   /** Final CI conclusion after wait */
@@ -93,6 +97,10 @@ export interface NewRunInput {
   feedbackNote?: string;
   /** Pipeline override hint from smart triage or trigger rule */
   pipelineHint?: string;
+  /** Node IDs to skip (from orchestrator classification) */
+  skipNodes?: string[];
+  /** Node IDs to force-enable (overrides enabled: false in pipeline YAML) */
+  enableNodes?: string[];
   /** Team identifier derived from channel mapping */
   teamId?: string;
 }
@@ -106,16 +114,3 @@ export interface ExecutionResult {
   tokenUsage?: TokenUsage;
   title?: string;
 }
-
-export interface CommandRunRequest {
-  repoSlug: string;
-  task: string;
-  baseBranch?: string;
-}
-
-export type ParsedCommand =
-  | { type: "help" }
-  | { type: "status"; runId?: string }
-  | { type: "tail"; runId?: string }
-  | { type: "run"; payload: CommandRunRequest }
-  | { type: "invalid"; reason: string };

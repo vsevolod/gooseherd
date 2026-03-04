@@ -155,4 +155,58 @@ describe("uploadScreenshotNode", () => {
 
     await rm(tmpDir, { recursive: true });
   });
+
+  test("uploads video and adds embed + clickable link to PR body", async () => {
+    const tmpDir = await mkdtemp(path.join(os.tmpdir(), "screenshot-test-"));
+    const screenshotFile = path.join(tmpDir, "screenshot.png");
+    const videoFile = path.join(tmpDir, "verification.mp4");
+    const pngData = Buffer.from(
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
+      "base64"
+    );
+    await writeFile(screenshotFile, pngData);
+    await writeFile(videoFile, Buffer.from("fake-mp4-content"));
+
+    const uploadCalls: any[] = [];
+    let updatedPrBody: any = null;
+
+    const mockGithub = {
+      uploadFileToRepo: async (params: any) => {
+        uploadCalls.push(params);
+        if (params.filePath.includes("/videos/")) {
+          return {
+            url: "https://github.com/org/repo/raw/video-sha/.gooseherd/videos/run-123.mp4",
+            commitSha: "video-sha"
+          };
+        }
+        return {
+          url: "https://github.com/org/repo/raw/screenshot-sha/.gooseherd/screenshots/run-123.png",
+          commitSha: "screenshot-sha"
+        };
+      },
+      updatePullRequestBody: async (params: any) => {
+        updatedPrBody = params;
+      }
+    };
+
+    const run = makeRun({ id: "run-123" });
+    const ctx = new ContextBag({});
+    ctx.set("screenshotPath", screenshotFile);
+    ctx.set("videoPath", videoFile);
+    ctx.set("prNumber", 42);
+    const deps = makeDeps({ githubService: mockGithub as any, run });
+
+    const result = await uploadScreenshotNode(makeNodeConfig(), ctx, deps);
+
+    assert.equal(result.outcome, "success");
+    assert.equal(uploadCalls.length, 2, "Should upload screenshot and video");
+    assert.ok(updatedPrBody?.body.includes("### Verification Video"));
+    assert.ok(updatedPrBody?.body.includes("<video"));
+    assert.ok(updatedPrBody?.body.includes("View verification video"));
+    assert.ok(updatedPrBody?.body.includes("/blob/video-sha/"), "PR should link to GitHub blob player URL");
+    assert.ok(updatedPrBody?.body.includes("/raw/video-sha/"), "PR should keep raw URL for embed source");
+    assert.equal(ctx.get("commitSha"), "video-sha", "commitSha should track latest media commit");
+
+    await rm(tmpDir, { recursive: true });
+  });
 });

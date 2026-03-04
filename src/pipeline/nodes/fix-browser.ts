@@ -1,8 +1,8 @@
-import { writeFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { NodeConfig, NodeResult, NodeDeps } from "../types.js";
 import type { ContextBag } from "../context-bag.js";
-import { runShell, runShellCapture, shellEscape, renderTemplate, appendLog, buildMcpFlags, mapToContainerPath } from "../shell.js";
+import { runShell, runShellCapture, shellEscape, renderTemplate, appendLog, mapToContainerPath, buildMcpFlags, buildPiExtensionFlags } from "../shell.js";
 
 /**
  * Fix Browser node: "fat" agent node that fixes browser verification failures.
@@ -33,8 +33,42 @@ export async function fixBrowserNode(
   const task = run.task;
   const changedFiles = ctx.get<string[]>("changedFiles") ?? [];
 
+  // Read CDP artifacts for richer fix context
+  const actionsPath = ctx.get<string>("actionsPath");
+  const consolePath = ctx.get<string>("consolePath");
+  const failureHistory = ctx.get<Array<{ round: number; verdict?: string }>>("browserVerifyFailureHistory");
+
+  let agentActions: Array<{ type: string; reasoning?: string; pageUrl?: string }> | undefined;
+  if (actionsPath) {
+    try {
+      const raw = await readFile(actionsPath, "utf8");
+      agentActions = JSON.parse(raw) as typeof agentActions;
+    } catch { /* non-fatal */ }
+  }
+
+  let consoleErrors: Array<{ level: string; text: string }> | undefined;
+  if (consolePath) {
+    try {
+      const raw = await readFile(consolePath, "utf8");
+      const allLogs = JSON.parse(raw) as Array<{ level?: string; text?: string; message?: string }>;
+      consoleErrors = allLogs
+        .filter(l => l.level === "error" || l.level === "warning")
+        .map((entry) => ({
+          level: entry.level ?? "log",
+          text: normalizeConsoleText(entry)
+        }))
+        .slice(0, 10);
+    } catch { /* non-fatal */ }
+  }
+
+  // Extract last visited URL from agent actions
+  const lastVisitedUrl = agentActions?.filter(a => a.pageUrl).pop()?.pageUrl;
+
   // Build fix prompt
-  const fixPrompt = buildBrowserFixPrompt(task, verdictReason, domFindings, changedFiles, reviewAppUrl);
+  const fixPrompt = buildBrowserFixPrompt(
+    task, verdictReason, domFindings, changedFiles, reviewAppUrl,
+    agentActions, consoleErrors, lastVisitedUrl, failureHistory
+  );
 
   // Write fix prompt to disk for the agent
   const runDir = ctx.getRequired<string>("runDir");
@@ -54,15 +88,12 @@ export async function fixBrowserNode(
     run_id: run.id,
     repo_slug: run.repoSlug,
     parent_run_id: run.parentRunId ?? ""
+  }, {
+    mcp_flags: buildMcpFlags(config.mcpExtensions),
+    pi_extensions: buildPiExtensionFlags(config.piAgentExtensions)
   });
 
-  let cmd = agentCommand;
-  const mcpFlags = buildMcpFlags(config.mcpExtensions);
-  if (mcpFlags) {
-    cmd = `${cmd} ${mcpFlags}`;
-  }
-
-  await runShell(cmd, {
+  await runShell(agentCommand, {
     cwd: path.resolve("."),
     logFile,
     timeoutMs: config.agentTimeoutSeconds * 1000
@@ -118,12 +149,16 @@ export async function fixBrowserNode(
   };
 }
 
-function buildBrowserFixPrompt(
+export function buildBrowserFixPrompt(
   task: string,
   verdictReason: string,
   domFindings: string[],
   changedFiles: string[],
-  reviewAppUrl: string
+  reviewAppUrl: string,
+  agentActions?: Array<{ type: string; reasoning?: string; pageUrl?: string }>,
+  consoleErrors?: Array<{ level: string; text: string }>,
+  lastVisitedUrl?: string,
+  failureHistory?: Array<{ round: number; verdict?: string }>
 ): string {
   const parts: string[] = [
     "# Browser Verification Fix Required\n",
@@ -132,12 +167,35 @@ function buildBrowserFixPrompt(
     `### Verdict\n${verdictReason}\n`
   ];
 
+  if (lastVisitedUrl) {
+    parts.push(`### Last Visited URL\nThe browser was on \`${lastVisitedUrl}\` when the verification failed.\n`);
+  }
+
+  if (agentActions && agentActions.length > 0) {
+    const actionLines = agentActions.map((a, i) =>
+      `${String(i + 1)}. [${a.type}] ${a.reasoning ?? "(no reasoning)"}${a.pageUrl ? ` (on ${a.pageUrl})` : ""}`
+    );
+    parts.push(`### Browser Agent Actions\nWhat the QA agent actually did:\n${actionLines.join("\n")}\n`);
+  }
+
+  if (consoleErrors && consoleErrors.length > 0) {
+    const errorLines = consoleErrors.map(e => `- [${e.level}] ${e.text.slice(0, 200)}`);
+    parts.push(`### Console Errors\n${errorLines.join("\n")}\n`);
+  }
+
   if (domFindings.length > 0) {
     parts.push(`### DOM Inspection Results\n${domFindings.map(f => `- ${f}`).join("\n")}\n`);
   }
 
   if (changedFiles.length > 0) {
     parts.push(`### Files Changed\n${changedFiles.map(f => `- ${f}`).join("\n")}\n`);
+  }
+
+  if (failureHistory && failureHistory.length > 0) {
+    const historyLines = failureHistory.map(h =>
+      `- Round ${String(h.round)}: ${h.verdict ?? "unknown failure"}`
+    );
+    parts.push(`### Previous Fix Attempts\nThese fixes were already tried and failed:\n${historyLines.join("\n")}\nDo NOT repeat the same approach. Try a different strategy.\n`);
   }
 
   parts.push(
@@ -211,4 +269,14 @@ async function waitForPreviewRedeploy(
 
 function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function normalizeConsoleText(entry: { text?: string; message?: string }): string {
+  if (typeof entry.text === "string" && entry.text.trim().length > 0) {
+    return entry.text;
+  }
+  if (typeof entry.message === "string" && entry.message.trim().length > 0) {
+    return entry.message;
+  }
+  return "(no console text)";
 }

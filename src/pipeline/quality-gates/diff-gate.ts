@@ -89,6 +89,12 @@ export function evaluateDiffGate(
 
   let verdict: DiffVerdict = "pass";
 
+  // Zero-change safety net — agent may have failed silently
+  if (stats.filesChanged === 0 && stats.totalLines === 0) {
+    return { verdict: "hard_fail", stats, profile: profileName, thresholds,
+      reasons: ["No file changes detected — agent may have failed silently"] };
+  }
+
   // Check hard limits first
   if (stats.totalLines > thresholds.hardMaxLines) {
     verdict = "hard_fail";

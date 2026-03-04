@@ -1,7 +1,7 @@
 import path from "node:path";
 import type { NodeConfig, NodeResult, NodeDeps } from "../types.js";
 import type { ContextBag } from "../context-bag.js";
-import { runShellCapture, shellEscape, renderTemplate, buildMcpFlags, mapToContainerPath } from "../shell.js";
+import { appendLog, runShellCapture, renderTemplate, mapToContainerPath, buildMcpFlags, buildPiExtensionFlags } from "../shell.js";
 
 export interface AgentAnalysis {
   verdict: "clean" | "suspect" | "empty";
@@ -12,7 +12,7 @@ export interface AgentAnalysis {
 }
 
 /**
- * Implement node: run the coding agent with MCP extension.
+ * Implement node: run the coding agent.
  */
 export async function implementNode(
   _nodeConfig: NodeConfig,
@@ -39,26 +39,42 @@ export async function implementNode(
     run_id: run.id,
     repo_slug: run.repoSlug,
     parent_run_id: run.parentRunId ?? ""
+  }, {
+    mcp_flags: buildMcpFlags(config.mcpExtensions),
+    pi_extensions: buildPiExtensionFlags(config.piAgentExtensions)
   });
 
-  // Append MCP extensions if configured
-  let cmd = agentCommand;
-  const mcpFlags = buildMcpFlags(config.mcpExtensions);
-  if (mcpFlags) {
-    cmd = `${cmd} ${mcpFlags}`;
-  }
+  await appendLog(
+    logFile,
+    `[implement] waiting for natural agent exit; hard timeout ${String(config.agentTimeoutSeconds)}s\n`
+  );
 
-  const result = await runShellCapture(cmd, {
+  const result = await runShellCapture(agentCommand, {
     cwd: path.resolve("."),
     logFile,
     timeoutMs: config.agentTimeoutSeconds * 1000,
-    login: true  // Agent command needs login shell for PATH (goose, etc.)
+    login: true  // Agent command needs login shell for PATH
   });
 
+  await appendLog(
+    logFile,
+    `[implement] agent process exited with code ${String(result.code)}\n`
+  );
+
   if (result.code !== 0) {
+    const combinedOutput = `${result.stdout}\n${result.stderr}`;
+    const timeoutDetected = /\[timeout[^\]]*\]|timed out|timeout:/i.test(combinedOutput);
+
+    await appendLog(
+      logFile,
+      `[implement] failure classification: timeoutDetected=${String(timeoutDetected)}\n`
+    );
+
     return {
       outcome: "failure",
-      error: `Agent exited with code ${String(result.code)}`,
+      error: timeoutDetected
+        ? `Agent timed out after ${String(config.agentTimeoutSeconds)}s`
+        : `Agent exited with code ${String(result.code)}`,
       rawOutput: (result.stdout + result.stderr).slice(-2000)
     };
   }
@@ -74,9 +90,12 @@ export async function implementNode(
     };
   }
 
+  // Extract cost/token data from pi-agent JSONL output (agent_end event)
+  const agentCost = extractPiAgentCost(result.stdout);
+
   return {
     outcome: "success",
-    outputs: { agentAnalysis: analysis }
+    outputs: { agentAnalysis: analysis, ...(agentCost ? { agentCost } : {}) }
   };
 }
 
@@ -170,5 +189,59 @@ export async function analyzeAgentOutput(
     diffSummary: statResult.stdout.trim(),
     diffStats,
     signals
+  };
+}
+
+// ── pi-agent cost extraction ──
+
+export interface AgentCost {
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  totalCost: number;
+}
+
+/**
+ * Extract cost/token data from pi-agent JSONL stdout.
+ * Scans for the agent_end event and sums usage from all assistant messages.
+ * Returns null if no pi-agent JSONL data is found.
+ */
+export function extractPiAgentCost(stdout: string): AgentCost | null {
+  let totalInput = 0;
+  let totalOutput = 0;
+  let totalCost = 0;
+  let found = false;
+
+  for (const line of stdout.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("{")) continue;
+
+    try {
+      const event = JSON.parse(trimmed) as Record<string, unknown>;
+
+      // Use message_end events with assistant role for per-turn usage
+      if (event.type === "message_end") {
+        const msg = event.message as Record<string, unknown> | undefined;
+        if (msg?.role === "assistant" && msg.usage) {
+          const usage = msg.usage as Record<string, unknown>;
+          totalInput += (usage.input as number) ?? 0;
+          totalOutput += (usage.output as number) ?? 0;
+          const cost = usage.cost as Record<string, number> | undefined;
+          if (cost) totalCost += cost.total ?? 0;
+          found = true;
+        }
+      }
+    } catch {
+      continue;
+    }
+  }
+
+  if (!found) return null;
+
+  return {
+    inputTokens: totalInput,
+    outputTokens: totalOutput,
+    totalTokens: totalInput + totalOutput,
+    totalCost
   };
 }

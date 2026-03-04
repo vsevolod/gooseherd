@@ -11,7 +11,8 @@ const VALID_ACTIONS = new Set([
   "diff_gate", "forbidden_files", "security_scan",
   "wait_ci", "fix_ci", "fix_browser",
   "scope_judge", "deploy_preview", "browser_verify",
-  "generate_title", "upload_screenshot", "summarize_changes"
+  "generate_title", "upload_screenshot", "summarize_changes",
+  "decide_next_step"
 ]);
 
 const VALID_TYPES = new Set(["deterministic", "agentic", "conditional", "async"]);

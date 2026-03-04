@@ -37,6 +37,16 @@ export class ContextBag {
     return this.data.has(key);
   }
 
+  /** Append a value to an array stored at key. Creates the array if it doesn't exist. */
+  append(key: string, value: unknown): void {
+    const existing = this.data.get(key);
+    if (Array.isArray(existing)) {
+      existing.push(value);
+    } else {
+      this.data.set(key, [value]);
+    }
+  }
+
   /** Return all keys in the context bag */
   keys(): IterableIterator<string> {
     return this.data.keys();
@@ -47,6 +57,36 @@ export class ContextBag {
     for (const [key, value] of Object.entries(outputs)) {
       this.data.set(key, value);
     }
+  }
+
+  /**
+   * Build an LLM-friendly text summary of selected context keys.
+   * If no keys specified, includes all non-internal keys (skips _tokenUsage_*).
+   */
+  toSummary(keys?: string[]): string {
+    const lines: string[] = [];
+    const selectedKeys = keys ?? [...this.data.keys()].filter(k => !k.startsWith("_tokenUsage_"));
+
+    for (const key of selectedKeys) {
+      const value = this.data.get(key);
+      if (value === undefined) continue;
+
+      if (typeof value === "string") {
+        lines.push(`${key}: ${value.slice(0, 500)}`);
+      } else if (Array.isArray(value)) {
+        if (value.length === 0) continue;
+        const preview = value.length <= 5
+          ? JSON.stringify(value)
+          : `[${String(value.length)} items] ${JSON.stringify(value.slice(0, 3))}...`;
+        lines.push(`${key}: ${preview}`);
+      } else if (typeof value === "object" && value !== null) {
+        lines.push(`${key}: ${JSON.stringify(value).slice(0, 300)}`);
+      } else {
+        lines.push(`${key}: ${String(value)}`);
+      }
+    }
+
+    return lines.join("\n");
   }
 
   /** Get all data as a plain object (for template resolution) */

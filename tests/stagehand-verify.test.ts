@@ -4,7 +4,7 @@
 
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
-import { buildInstruction } from "../src/pipeline/quality-gates/stagehand-verify.js";
+import { buildInstruction, extractUrlHints } from "../src/pipeline/quality-gates/stagehand-verify.js";
 
 // ── buildInstruction ──
 
@@ -65,6 +65,99 @@ describe("buildInstruction", () => {
     const summaryPos = result.indexOf("Change summary");
     const credPos = result.indexOf("Test account credentials");
     assert.ok(summaryPos < credPos, "changeSummary should come before credentials");
+  });
+});
+
+// ── extractUrlHints ──
+
+describe("extractUrlHints", () => {
+  test("extracts Devise session path", () => {
+    const hints = extractUrlHints("fix login page", [
+      "app/views/devise/sessions/new.html.erb"
+    ]);
+    assert.ok(hints.includes("/users/sign_in"));
+  });
+
+  test("extracts Devise registration edit path", () => {
+    const hints = extractUrlHints("update profile page", [
+      "app/views/devise/registrations/edit.html.erb"
+    ]);
+    assert.ok(hints.includes("/user/edit"));
+  });
+
+  test("extracts controller path", () => {
+    const hints = extractUrlHints("update products", [
+      "app/controllers/products_controller.rb"
+    ]);
+    assert.ok(hints.includes("/products"));
+  });
+
+  test("extracts view index path", () => {
+    const hints = extractUrlHints("list items", [
+      "app/views/items/index.html.erb"
+    ]);
+    assert.ok(hints.includes("/items"));
+  });
+
+  test("extracts URL paths from task text", () => {
+    const hints = extractUrlHints("change the heading on /user/edit page", []);
+    assert.ok(hints.includes("/user/edit"));
+  });
+
+  test("extracts 'on the X page' patterns", () => {
+    const hints = extractUrlHints("change the heading on the landing page", []);
+    assert.ok(hints.includes("/landing"));
+  });
+
+  test("ignores system paths like /tmp", () => {
+    const hints = extractUrlHints("save to /tmp/file.txt", []);
+    assert.equal(hints.length, 0);
+  });
+
+  test("deduplicates hints", () => {
+    const hints = extractUrlHints("change /products page", [
+      "app/views/products/index.html.erb",
+      "app/controllers/products_controller.rb"
+    ]);
+    // /products should appear once from view, once from controller
+    const productHints = hints.filter(h => h === "/products");
+    assert.equal(productHints.length, 1);
+  });
+
+  test("handles homepage view", () => {
+    const hints = extractUrlHints("update home", [
+      "app/views/home/index.html.erb"
+    ]);
+    assert.ok(hints.includes("/"), `Expected "/" in hints: ${JSON.stringify(hints)}`);
+  });
+
+  test("returns empty for unrelated files", () => {
+    const hints = extractUrlHints("update config", [
+      "config/database.yml",
+      "Gemfile"
+    ]);
+    assert.equal(hints.length, 0);
+  });
+});
+
+// ── buildInstruction with navigation hints ──
+
+describe("buildInstruction navigation hints", () => {
+  test("includes navigation hints when URL paths are extracted", () => {
+    const result = buildInstruction(
+      "Fix the heading on /user/edit page",
+      ["app/views/devise/registrations/edit.html.erb"]
+    );
+    assert.ok(result.includes("Navigation hints"));
+    assert.ok(result.includes("/user/edit"));
+  });
+
+  test("omits navigation hints when no paths extracted", () => {
+    const result = buildInstruction(
+      "Fix a bug",
+      ["lib/utils.rb"]
+    );
+    assert.ok(!result.includes("Navigation hints"));
   });
 });
 

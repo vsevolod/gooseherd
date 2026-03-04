@@ -1,11 +1,11 @@
 # Gooseherd Sandbox — isolated container for agent runs
 #
 # Contains all tools needed by pipeline nodes:
-#   git, goose CLI, node, curl, gitleaks, chromium (for screenshots)
+#   git, pi-agent CLI, node, curl, gitleaks, chromium (for screenshots)
 #
 # Usage:
 #   docker build -t gooseherd/sandbox:default sandbox/
-#   docker run --rm gooseherd/sandbox:default goose --version
+#   docker run --rm gooseherd/sandbox:default pi --version
 
 FROM node:22-bookworm-slim
 
@@ -13,9 +13,7 @@ FROM node:22-bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     curl \
-    bzip2 \
     ca-certificates \
-    libxcb1 \
     chromium \
     procps \
     findutils \
@@ -24,10 +22,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
   && rm -rf /var/lib/apt/lists/*
 
-# Goose CLI (AI coding agent by Block)
-RUN curl -fsSL https://github.com/block/goose/releases/download/stable/download_cli.sh \
-    | CONFIGURE=false GOOSE_BIN_DIR=/usr/local/bin bash \
-  && goose --version
+# pi-agent CLI (AI coding agent)
+RUN npm install -g @mariozechner/pi-coding-agent \
+  && pi --version
 
 # Gitleaks (secret scanner)
 RUN ARCH=$(dpkg --print-architecture) && \
@@ -48,7 +45,7 @@ RUN npm install -g playwright@latest pa11y@latest @browserbasehq/stagehand@lates
 # Pa11y config — run Chromium with --no-sandbox (required when running as root)
 RUN printf '{"chromeLaunchConfig":{"executablePath":"/usr/bin/chromium","args":["--no-sandbox","--disable-setuid-sandbox"]}}\n' > /etc/pa11y.json
 
-# CEMS MCP (memory tools for Goose agent)
+# CEMS MCP (memory tools — kept for future pi-agent extension support)
 # Install uv (Python package manager), then install cems package which provides cems-mcp binary
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh \
   && export PATH="$HOME/.local/bin:$PATH" \
@@ -56,9 +53,6 @@ RUN curl -LsSf https://astral.sh/uv/install.sh | sh \
   && ln -sf $HOME/.local/bin/cems-mcp /usr/local/bin/cems-mcp \
   && cems-mcp --help || true
 ENV PATH="/root/.local/bin:$PATH"
-
-# Goose headless mode (no system keyring)
-ENV GOOSE_DISABLE_KEYRING=1
 
 # Copy sandbox-compatible dummy agent for E2E testing
 COPY sandbox-dummy-agent.sh /usr/local/bin/sandbox-dummy-agent.sh

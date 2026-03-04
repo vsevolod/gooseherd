@@ -167,7 +167,8 @@ export async function browserVerifyNode(
         savedCreds ?? undefined,
         ctx.get<string>("changeSummary"),
         stagehandBaseURL,
-        config.browserVerifyExecutionModel
+        config.browserVerifyExecutionModel,
+        config.browserVerifyMaxSteps
       );
       screenshotPath = result.screenshotPath;
       verifyResult = result.verifyResult;
@@ -197,7 +198,8 @@ export async function browserVerifyNode(
         const llmConfig: LLMCallerConfig = {
           apiKey: config.openrouterApiKey ?? stagehandApiKey,
           defaultModel: config.browserVerifyModel,
-          defaultTimeoutMs: 30_000
+          defaultTimeoutMs: 30_000,
+          providerPreferences: config.openrouterProviderPreferences
         };
         try {
           verifyResult = await verifyFeatureVisually(

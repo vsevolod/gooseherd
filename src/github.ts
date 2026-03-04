@@ -248,11 +248,122 @@ export class GitHubService {
       sha: existingSha
     });
 
-    // Use github.com/raw/ format — GitHub's camo proxy handles auth for private repos,
-    // unlike raw.githubusercontent.com which requires browser cookies.
-    const url = `https://github.com/${owner}/${repo}/raw/${params.branch}/${params.filePath}`;
     const commitSha = (result.data.commit as { sha?: string })?.sha ?? "";
+    // Use commit SHA instead of branch name — branch may be deleted (PR closed/merged),
+    // but the commit persists. GitHub's camo proxy handles auth for private repos.
+    const ref = commitSha || params.branch;
+    const url = `https://github.com/${owner}/${repo}/raw/${ref}/${params.filePath}`;
     return { url, commitSha };
+  }
+
+  /**
+   * Search code in a repository using the GitHub Code Search API.
+   * Returns file paths and matching text fragments (read-only, no cloning).
+   */
+  async searchCode(
+    query: string,
+    repoSlug: string,
+    maxResults = 10
+  ): Promise<Array<{ path: string; textMatches: string[] }>> {
+    const response = await this.octokit.search.code({
+      q: `${query} repo:${repoSlug}`,
+      per_page: maxResults,
+      headers: { accept: "application/vnd.github.text-match+json" }
+    });
+
+    return response.data.items.map(item => ({
+      path: item.path,
+      textMatches: ((item as unknown as { text_matches?: Array<{ fragment: string }> }).text_matches ?? [])
+        .map(tm => tm.fragment)
+    }));
+  }
+
+  /**
+   * Describe a repository: languages, root file listing, and README snippet.
+   * Useful for answering "what tech stack / code type" questions without cloning.
+   */
+  async describeRepo(
+    repoSlug: string
+  ): Promise<{ languages: Record<string, number>; files: string[]; readmeSnippet: string }> {
+    const { owner, repo } = parseRepoSlug(repoSlug);
+
+    // Fetch languages (GitHub's linguist analysis)
+    const langResp = await this.octokit.repos.listLanguages({ owner, repo });
+    const languages = langResp.data as Record<string, number>;
+
+    // Fetch root directory listing
+    let files: string[] = [];
+    try {
+      const contentResp = await this.octokit.repos.getContent({ owner, repo, path: "" });
+      if (Array.isArray(contentResp.data)) {
+        files = contentResp.data.map(f => `${f.name}${f.type === "dir" ? "/" : ""}`);
+      }
+    } catch {
+      // Private repo or permissions issue — files remain empty
+    }
+
+    // Fetch README (first 500 chars)
+    let readmeSnippet = "";
+    try {
+      const readmeResp = await this.octokit.repos.getReadme({ owner, repo });
+      const content = Buffer.from(
+        (readmeResp.data as { content: string }).content,
+        "base64"
+      ).toString("utf-8");
+      readmeSnippet = content.slice(0, 500);
+    } catch {
+      // No README — that's fine
+    }
+
+    return { languages, files, readmeSnippet };
+  }
+
+  /**
+   * Read a file's content from a repository via the Contents API (no cloning).
+   * Returns the UTF-8 decoded content. Throws if path is a directory.
+   */
+  async readFile(repoSlug: string, path: string, ref?: string): Promise<string> {
+    const { owner, repo } = parseRepoSlug(repoSlug);
+    const resp = await this.octokit.repos.getContent({
+      owner, repo, path,
+      ...(ref ? { ref } : {})
+    });
+    if (Array.isArray(resp.data) || (resp.data as { type: string }).type !== "file") {
+      throw new Error(`${path} is a directory, not a file. Use list_files instead.`);
+    }
+    const content = Buffer.from(
+      (resp.data as { content: string }).content,
+      "base64"
+    ).toString("utf-8");
+    // Truncate very large files to avoid blowing token budget
+    if (content.length > 15_000) {
+      return content.slice(0, 15_000) + "\n\n[...truncated at 15000 chars]";
+    }
+    return content;
+  }
+
+  /**
+   * List directory contents from a repository via the Contents API (no cloning).
+   * Returns file/dir names with type indicators.
+   */
+  async listDirectory(
+    repoSlug: string,
+    path: string,
+    ref?: string
+  ): Promise<Array<{ name: string; type: string; size: number }>> {
+    const { owner, repo } = parseRepoSlug(repoSlug);
+    const resp = await this.octokit.repos.getContent({
+      owner, repo, path,
+      ...(ref ? { ref } : {})
+    });
+    if (!Array.isArray(resp.data)) {
+      throw new Error(`${path} is a file, not a directory. Use read_file instead.`);
+    }
+    return resp.data.map(f => ({
+      name: f.name,
+      type: f.type,
+      size: (f as { size?: number }).size ?? 0
+    }));
   }
 
   /**

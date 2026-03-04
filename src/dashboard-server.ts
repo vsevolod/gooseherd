@@ -10,12 +10,18 @@ import type { RunManager } from "./run-manager.js";
 import type { RunFeedback, RunRecord } from "./types.js";
 import { parseRunLog, getEventStats } from "./log-parser.js";
 import type { ObserverEventRecord, ObserverStateSnapshot, TriggerRule } from "./observer/types.js";
+import type { ChatMessage } from "./llm/caller.js";
 
 /** Lean interface — dashboard only reads observer state, never mutates it. */
 export interface DashboardObserver {
   getStateSnapshot(): ObserverStateSnapshot;
   getRecentEvents(limit?: number): ObserverEventRecord[];
   getRules(): TriggerRule[];
+}
+
+/** Optional source for in-memory orchestrator thread messages. */
+export interface DashboardConversationSource {
+  get(threadKey: string): ChatMessage[] | undefined;
 }
 
 function sendJson(res: ServerResponse, status: number, payload: unknown): void {
@@ -75,6 +81,57 @@ async function readLogFromOffset(logPath: string, offset: number): Promise<{ con
   } finally {
     await fh.close();
   }
+}
+
+interface ConversationPreviewMessage {
+  role: "user" | "assistant";
+  content: string;
+}
+
+function truncateText(value: string, maxChars: number): string {
+  if (value.length <= maxChars) return value;
+  return `${value.slice(0, maxChars)}…`;
+}
+
+function chatMessageToText(message: ChatMessage): string | null {
+  if (message.role === "user") {
+    if (typeof message.content === "string") {
+      return message.content;
+    }
+    if (Array.isArray(message.content)) {
+      return message.content
+        .map((part) => {
+          if (part.type === "text") return part.text;
+          if (part.type === "image_url") return "[image]";
+          return "";
+        })
+        .filter(Boolean)
+        .join("\n");
+    }
+    return null;
+  }
+
+  if (message.role === "assistant") {
+    return typeof message.content === "string" ? message.content : null;
+  }
+
+  return null;
+}
+
+function buildConversationPreview(messages: ChatMessage[]): ConversationPreviewMessage[] {
+  const preview: ConversationPreviewMessage[] = [];
+
+  for (const message of messages) {
+    if (message.role !== "user" && message.role !== "assistant") continue;
+    const text = chatMessageToText(message)?.trim();
+    if (!text) continue;
+    preview.push({
+      role: message.role,
+      content: truncateText(text, 2000)
+    });
+  }
+
+  return preview;
 }
 
 // ── Authentication helpers ──
@@ -1193,6 +1250,26 @@ function dashboardHtml(config: AppConfig): string {
       color: var(--muted);
       margin: 0;
     }
+    .act-truncated, .log-truncated {
+      text-align: center;
+      padding: 6px 10px;
+      background: color-mix(in srgb, var(--warn) 8%, var(--panel-3));
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      margin-bottom: 6px;
+      font-size: 12px;
+    }
+    .act-show-all-btn {
+      background: var(--accent);
+      color: #fff;
+      border: none;
+      border-radius: 4px;
+      padding: 3px 10px;
+      font-size: 11px;
+      cursor: pointer;
+      margin-right: 8px;
+    }
+    .act-show-all-btn:hover { opacity: 0.85; }
     .activity-stream {
       max-height: 600px;
       overflow-y: auto;
@@ -1380,6 +1457,22 @@ function dashboardHtml(config: AppConfig): string {
       font-family: var(--font-mono);
       padding: 4px 10px;
     }
+    .act-pipeline {
+      background: color-mix(in srgb, var(--running) 6%, var(--panel-3));
+      border: 1px solid color-mix(in srgb, var(--running) 15%, var(--border));
+      font-size: 11px;
+      font-family: var(--font-mono);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .act-pipeline .material-symbols-rounded { font-size: 14px; color: var(--running); flex-shrink: 0; }
+    .act-pipeline.pl-success { border-color: color-mix(in srgb, var(--ok) 25%, var(--border)); }
+    .act-pipeline.pl-success .material-symbols-rounded { color: var(--ok); }
+    .act-pipeline.pl-error { border-color: color-mix(in srgb, var(--fail) 25%, var(--border)); }
+    .act-pipeline.pl-error .material-symbols-rounded { color: var(--fail); }
+    .act-pipeline.pl-warn { border-color: color-mix(in srgb, var(--warn) 25%, var(--border)); }
+    .act-pipeline.pl-warn .material-symbols-rounded { color: var(--warn); }
     .act-badge {
       position: absolute;
       top: 6px;
@@ -1629,6 +1722,10 @@ function dashboardHtml(config: AppConfig): string {
             <div class="card-title">Agent activity</div>
             <div class="act-stats" id="act-stats"></div>
           </div>
+          <div class="act-truncated" id="act-truncated" style="display: none;">
+            <button class="act-show-all-btn" id="act-show-all">Show all events</button>
+            <span class="meta" id="act-truncated-count"></span>
+          </div>
           <div class="activity-stream" id="activity-stream">
             <div class="act-info">Select a run to see agent activity.</div>
           </div>
@@ -1644,6 +1741,9 @@ function dashboardHtml(config: AppConfig): string {
           <div class="toolbar">
             <div class="card-title">Run log</div>
             <div id="log-stats" class="meta"></div>
+          </div>
+          <div class="log-truncated" id="log-truncated" style="display: none;">
+            <span class="meta" id="log-truncated-msg">Log truncated — showing last 200 KB</span>
           </div>
           <pre class="log-viewer" id="log-viewer"></pre>
           <div class="act-footer">
@@ -1682,7 +1782,7 @@ function dashboardHtml(config: AppConfig): string {
           </div>
         </div>
         <div class="card" id="chat-card" style="display: none;">
-          <div class="card-title" style="margin-bottom: 8px;">Follow-up instructions</div>
+          <div class="card-title" style="margin-bottom: 8px;">Thread history & follow-up</div>
           <div class="chat-history" id="chat-history"></div>
           <div class="chat-input-area">
             <textarea id="chat-input" placeholder="Type follow-up instructions for the agent..." rows="2"></textarea>
@@ -1712,6 +1812,12 @@ function dashboardHtml(config: AppConfig): string {
     };
 
     var logStreamState = { runId: null, offset: 0 };
+
+    // ── Lazy loading constants ──
+    var MAX_VISIBLE_EVENTS = 150;
+    var MAX_LOG_CHARS = 200000; // ~200 KB
+    var activityShowAll = false;
+    var lastRenderedEventCount = -1;
 
     const el = {
       meta: document.getElementById('meta'),
@@ -1746,12 +1852,17 @@ function dashboardHtml(config: AppConfig): string {
       activityStream: document.getElementById('activity-stream'),
       actStats: document.getElementById('act-stats'),
       actCount: document.getElementById('act-count'),
+      actTruncated: document.getElementById('act-truncated'),
+      actTruncatedCount: document.getElementById('act-truncated-count'),
+      actShowAll: document.getElementById('act-show-all'),
       autoScroll: document.getElementById('auto-scroll'),
       logViewerCard: document.getElementById('log-viewer-card'),
       logViewer: document.getElementById('log-viewer'),
       logAutoScroll: document.getElementById('log-auto-scroll'),
       logSize: document.getElementById('log-size'),
       logStats: document.getElementById('log-stats'),
+      logTruncated: document.getElementById('log-truncated'),
+      logTruncatedMsg: document.getElementById('log-truncated-msg'),
       feedbackToast: document.getElementById('feedback-toast'),
       feedbackUp: document.getElementById('feedback-up'),
       feedbackDown: document.getElementById('feedback-down'),
@@ -2320,6 +2431,8 @@ function dashboardHtml(config: AppConfig): string {
         button.onclick = (function(runId) {
           return function() {
             state.selectedId = runId;
+            activityShowAll = false;
+            lastRenderedEventCount = -1;
             renderRuns();
             refreshSelected().catch(console.error);
           };
@@ -2507,6 +2620,24 @@ function dashboardHtml(config: AppConfig): string {
           lines.push(ts + '  ' + icon + ' ' + (evt.nodeId || '') + dur + (evt.error ? ' \u2014 ' + evt.error.slice(0, 80) : ''));
         } else if (evt.type === 'phase_change') {
           lines.push(ts + '  \u{1F504} phase \u2192 ' + (evt.phase || ''));
+        } else if (evt.type === 'artifact' && evt.artifact) {
+          var artifact = String(evt.artifact);
+          if (artifact.indexOf('loop_start:') === 0) {
+            var startParts = artifact.split(':');
+            lines.push(ts + '  \u{1F501} retry loop start ' + (startParts[1] || '') + ' via ' + (startParts[2] || '') + ' (max ' + (startParts[3] || '?') + ')');
+          } else if (artifact.indexOf('loop_fix_failed:') === 0) {
+            var fixParts = artifact.split(':');
+            lines.push(ts + '  \u26A0\uFE0F fix attempt failed ' + (fixParts[1] || '') + ' #' + (fixParts[2] || '?') + ' (' + (fixParts[3] || 'failure') + ')');
+          } else if (artifact.indexOf('loop_retry_failed:') === 0) {
+            var retryParts = artifact.split(':');
+            lines.push(ts + '  \u26A0\uFE0F retry check failed ' + (retryParts[1] || '') + ' #' + (retryParts[2] || '?') + ' (' + (retryParts[3] || 'failure') + ')');
+          } else if (artifact.indexOf('loop_success:') === 0) {
+            var successParts = artifact.split(':');
+            lines.push(ts + '  \u2705 retry loop resolved ' + (successParts[1] || '') + ' on attempt #' + (successParts[2] || '?'));
+          } else if (artifact.indexOf('loop_exhausted:') === 0) {
+            var exhaustedParts = artifact.split(':');
+            lines.push(ts + '  \u274C retry loop exhausted ' + (exhaustedParts[1] || '') + ' after ' + (exhaustedParts[2] || '?') + ' rounds');
+          }
         } else if (evt.type === 'error') {
           lines.push(ts + '  \u274C ' + (evt.error || ''));
         }
@@ -2520,12 +2651,34 @@ function dashboardHtml(config: AppConfig): string {
       el.pipelineTimeline.appendChild(pre);
     }
 
-    function renderActivityStream(events, stats, isActive) {
+    function renderActivityStream(events, stats, isActive, serverTotalCount) {
       if (!events || events.length === 0) {
         el.activityStream.innerHTML = '<div class="act-info">No activity events parsed.</div>';
         el.actStats.innerHTML = isActive ? '<span class="live-badge">Live</span>' : '';
         el.actCount.textContent = '';
+        el.actTruncated.style.display = 'none';
+        lastRenderedEventCount = -1;
         return;
+      }
+
+      var totalCount = serverTotalCount != null ? serverTotalCount : events.length;
+
+      // Skip re-render if event count unchanged (no new events since last poll)
+      if (totalCount === lastRenderedEventCount) {
+        return;
+      }
+      lastRenderedEventCount = totalCount;
+
+      // Server already sliced via ?limit=N, so events here is the visible window
+      var visibleEvents = events;
+      var hiddenCount = totalCount - visibleEvents.length;
+
+      // Show/hide truncation banner
+      if (hiddenCount > 0) {
+        el.actTruncated.style.display = '';
+        el.actTruncatedCount.textContent = hiddenCount + ' earlier events hidden';
+      } else {
+        el.actTruncated.style.display = 'none';
       }
 
       // Snapshot which expandable sections are open (by index) before rebuilding
@@ -2543,8 +2696,8 @@ function dashboardHtml(config: AppConfig): string {
 
       el.activityStream.innerHTML = '';
 
-      for (var idx = 0; idx < events.length; idx++) {
-        var ev = events[idx];
+      for (var idx = 0; idx < visibleEvents.length; idx++) {
+        var ev = visibleEvents[idx];
         var node = document.createElement('div');
         node.className = 'act-event';
 
@@ -2696,6 +2849,15 @@ function dashboardHtml(config: AppConfig): string {
           }(node);
           node.appendChild(shHeader);
           node.appendChild(shBody);
+        } else if (ev.type === 'pipeline_message') {
+          node.classList.add('act-pipeline');
+          if (ev.phase) node.classList.add('pl-' + ev.phase);
+          var plIcon = document.createElement('span');
+          plIcon.className = 'material-symbols-rounded';
+          plIcon.textContent = ev.phase === 'success' ? 'check_circle' : ev.phase === 'error' ? 'error' : ev.phase === 'warn' ? 'warning' : 'settings';
+          node.appendChild(plIcon);
+          var plText = document.createTextNode(ev.content);
+          node.appendChild(plText);
         } else {
           node.classList.add('act-info');
           node.textContent = ev.content;
@@ -2730,7 +2892,7 @@ function dashboardHtml(config: AppConfig): string {
         }
       }
 
-      el.actCount.textContent = events.length + ' events';
+      el.actCount.textContent = (hiddenCount > 0 ? visibleEvents.length + ' of ' : '') + totalCount + ' events';
 
       if (el.autoScroll.checked && wasNearBottom) {
         el.activityStream.scrollTop = el.activityStream.scrollHeight;
@@ -2773,7 +2935,7 @@ function dashboardHtml(config: AppConfig): string {
       const [runData, changesData, eventsData, pipelineEventsData] = await Promise.all([
         fetchJson('/api/runs/' + encodeURIComponent(state.selectedId)),
         fetchJson('/api/runs/' + encodeURIComponent(state.selectedId) + '/changes'),
-        fetchJson('/api/runs/' + encodeURIComponent(state.selectedId) + '/events').catch(function() { return { events: [], stats: null }; }),
+        fetchJson('/api/runs/' + encodeURIComponent(state.selectedId) + '/events' + (activityShowAll ? '' : '?limit=' + MAX_VISIBLE_EVENTS)).catch(function() { return { events: [], stats: null, totalCount: 0 }; }),
         fetchJson('/api/runs/' + encodeURIComponent(state.selectedId) + '/pipeline-events').catch(function() { return { events: [] }; }),
       ]);
 
@@ -2786,7 +2948,7 @@ function dashboardHtml(config: AppConfig): string {
       renderFiles(files, detailed);
 
       var isActive = run && (run.status !== 'completed' && run.status !== 'failed');
-      renderActivityStream(eventsData.events || [], eventsData.stats || null, isActive);
+      renderActivityStream(eventsData.events || [], eventsData.stats || null, isActive, eventsData.totalCount || 0);
       renderPipelineTimeline(pipelineEventsData.events || [], isActive);
 
       // Load media (screenshots + video) if available
@@ -2828,6 +2990,7 @@ function dashboardHtml(config: AppConfig): string {
         logStreamState.runId = state.selectedId;
         logStreamState.offset = 0;
         el.logViewer.textContent = '';
+        el.logTruncated.style.display = 'none';
       }
 
       try {
@@ -2839,6 +3002,21 @@ function dashboardHtml(config: AppConfig): string {
           var cleaned = stripAnsi(data.content);
           el.logViewer.textContent += cleaned;
           logStreamState.offset = data.offset;
+
+          // Front-truncate if log exceeds MAX_LOG_CHARS
+          var currentText = el.logViewer.textContent;
+          if (currentText.length > MAX_LOG_CHARS) {
+            var trimmed = currentText.slice(-MAX_LOG_CHARS);
+            // Trim to next newline to avoid partial lines
+            var nlIdx = trimmed.indexOf('\\n');
+            if (nlIdx > 0 && nlIdx < 200) {
+              trimmed = trimmed.slice(nlIdx + 1);
+            }
+            el.logViewer.textContent = trimmed;
+            var truncKb = (logStreamState.offset / 1024).toFixed(0);
+            el.logTruncatedMsg.textContent = 'Log truncated \\u2014 showing last ' + (MAX_LOG_CHARS / 1024).toFixed(0) + ' KB of ' + truncKb + ' KB';
+            el.logTruncated.style.display = '';
+          }
 
           // Auto-scroll
           if (el.logAutoScroll.checked) {
@@ -2888,6 +3066,11 @@ function dashboardHtml(config: AppConfig): string {
     el.feedbackUp.onclick = () => saveFeedback('up').catch(console.error);
     el.feedbackDown.onclick = () => saveFeedback('down').catch(console.error);
     el.retryRun.onclick = () => retrySelected().catch(console.error);
+    el.actShowAll.onclick = function() {
+      activityShowAll = true;
+      lastRenderedEventCount = -1; // force re-render
+      refreshSelected().catch(console.error);
+    };
     el.settingsBtn.onclick = () => alert('Settings panel is not implemented yet.');
     el.logoutBtn.onclick = () => {
       document.cookie = 'gooseherd-session=; Max-Age=0; Path=/; SameSite=Strict';
@@ -2901,9 +3084,15 @@ function dashboardHtml(config: AppConfig): string {
         return;
       }
       el.chatCard.style.display = '';
+      var threadMsgCount = 0;
       try {
-        var data = await fetchJson('/api/runs/' + encodeURIComponent(state.selectedId) + '/chain');
-        var chain = data.chain || [];
+        var [chainData, conversationData] = await Promise.all([
+          fetchJson('/api/runs/' + encodeURIComponent(state.selectedId) + '/chain'),
+          fetchJson('/api/runs/' + encodeURIComponent(state.selectedId) + '/conversation').catch(function() { return { messages: [] }; }),
+        ]);
+        var chain = chainData.chain || [];
+        var threadMessages = conversationData.messages || [];
+        threadMsgCount = threadMessages.length;
         el.chatHistory.innerHTML = '';
         chain.forEach(function(run) {
           // Show the original task or follow-up instruction
@@ -2919,7 +3108,8 @@ function dashboardHtml(config: AppConfig): string {
           msgDiv.appendChild(content);
           var time = document.createElement('div');
           time.className = 'chat-time';
-          time.textContent = formatDate(run.createdAt) + ' — ' + run.status;
+          var requester = run.requestedBy ? String(run.requestedBy) : 'unknown';
+          time.textContent = formatDate(run.createdAt) + ' — by ' + requester + ' — ' + run.status;
           if (run.status === 'completed') time.textContent += ' ✅';
           if (run.status === 'failed') time.textContent += ' ❌';
           msgDiv.appendChild(time);
@@ -2947,6 +3137,31 @@ function dashboardHtml(config: AppConfig): string {
             el.chatHistory.appendChild(workingDiv);
           }
         });
+
+        if (threadMessages.length > 0) {
+          var sectionLabel = document.createElement('div');
+          sectionLabel.className = 'chat-time';
+          sectionLabel.style.margin = '8px 0 2px';
+          sectionLabel.textContent = 'Thread Q/A (orchestrator memory)';
+          el.chatHistory.appendChild(sectionLabel);
+
+          threadMessages.forEach(function(msg) {
+            var bubble = document.createElement('div');
+            bubble.className = msg.role === 'user' ? 'chat-msg human' : 'chat-msg agent';
+
+            var bubbleSender = document.createElement('div');
+            bubbleSender.className = 'chat-sender';
+            bubbleSender.textContent = msg.role === 'user' ? 'Thread user' : 'Assistant';
+            bubble.appendChild(bubbleSender);
+
+            var bubbleText = document.createElement('div');
+            bubbleText.textContent = msg.content;
+            bubble.appendChild(bubbleText);
+
+            el.chatHistory.appendChild(bubble);
+          });
+        }
+
         el.chatHistory.scrollTop = el.chatHistory.scrollHeight;
       } catch(e) {
         console.error('Failed to load chain', e);
@@ -2955,7 +3170,11 @@ function dashboardHtml(config: AppConfig): string {
       var selectedRun = state.runs.find(function(r) { return r.id === state.selectedId; });
       var canContinue = selectedRun && (selectedRun.status === 'completed' || selectedRun.status === 'failed');
       el.chatSend.disabled = !canContinue;
-      el.chatStatus.textContent = canContinue ? 'Ready for follow-up instructions.' : (selectedRun ? 'Waiting for run to finish...' : '');
+      var baseStatus = canContinue ? 'Ready for follow-up instructions.' : (selectedRun ? 'Waiting for run to finish...' : '');
+      if (threadMsgCount > 0) {
+        baseStatus += ' ' + threadMsgCount + ' thread messages visible.';
+      }
+      el.chatStatus.textContent = baseStatus;
     }
 
     async function sendFollowUp() {
@@ -3120,7 +3339,8 @@ export function startDashboardServer(
   config: AppConfig,
   store: RunStore,
   runManager?: Pick<RunManager, "retryRun" | "continueRun" | "getRunChain" | "saveFeedbackFromSlackAction">,
-  observer?: DashboardObserver
+  observer?: DashboardObserver,
+  conversationSource?: DashboardConversationSource
 ): void {
   const server = createServer(async (req, res) => {
     try {
@@ -3232,13 +3452,22 @@ export function startDashboardServer(
 
         if (parts.length === 4 && parts[3] === "events" && req.method === "GET") {
           const logsPath = run.logsPath ?? path.resolve(config.workRoot, run.id, "run.log");
+          const limitParam = requestUrl.searchParams.get("limit");
           try {
             const rawLog = await readFile(logsPath, "utf8");
-            const events = parseRunLog(rawLog);
-            const stats = getEventStats(events);
-            sendJson(res, 200, { runId: run.id, events, stats });
+            const allEvents = parseRunLog(rawLog);
+            const stats = getEventStats(allEvents);
+            const totalCount = allEvents.length;
+            let events = allEvents;
+            if (limitParam !== null) {
+              const limit = Math.max(1, Number.parseInt(limitParam, 10) || 500);
+              if (totalCount > limit) {
+                events = allEvents.slice(-limit);
+              }
+            }
+            sendJson(res, 200, { runId: run.id, events, stats, totalCount });
           } catch {
-            sendJson(res, 200, { runId: run.id, events: [], stats: { totalEvents: 0, toolCalls: 0, thinkingBlocks: 0, shellCommands: 0, tools: {} } });
+            sendJson(res, 200, { runId: run.id, events: [], stats: { totalEvents: 0, toolCalls: 0, thinkingBlocks: 0, shellCommands: 0, tools: {} }, totalCount: 0 });
           }
           return;
         }
@@ -3497,6 +3726,17 @@ export function startDashboardServer(
             ? await runManager.getRunChain(run.channelId, run.threadTs)
             : [run];
           sendJson(res, 200, { chain });
+          return;
+        }
+
+        if (parts.length === 4 && parts[3] === "conversation" && req.method === "GET") {
+          const threadKey = `${run.channelId}:${run.threadTs}`;
+          const messages = conversationSource?.get(threadKey) ?? [];
+          sendJson(res, 200, {
+            threadKey,
+            available: Boolean(conversationSource),
+            messages: buildConversationPreview(messages)
+          });
           return;
         }
       }

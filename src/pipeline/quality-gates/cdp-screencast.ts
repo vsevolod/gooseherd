@@ -8,7 +8,7 @@
  * All errors are non-fatal — video is a bonus, never blocks verification.
  */
 
-import { writeFile, mkdir, rm } from "node:fs/promises";
+import { writeFile, mkdir, rm, stat } from "node:fs/promises";
 import path from "node:path";
 import { execFile } from "node:child_process";
 
@@ -149,7 +149,13 @@ export class CdpScreencast {
         "-movflags", "+faststart",
         outputPath
       ], { timeout: 30_000 }, (error) => {
-        resolve(error ? undefined : outputPath);
+        if (!error) return resolve(outputPath);
+        // ffmpeg can exit non-zero on harmless warnings (deprecated pixel format,
+        // metadata issues) while still producing a valid output file. Check if the
+        // file exists and has content before declaring failure.
+        stat(outputPath)
+          .then(s => resolve(s.size > 0 ? outputPath : undefined))
+          .catch(() => resolve(undefined));
       });
     });
   }

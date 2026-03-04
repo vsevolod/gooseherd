@@ -8,7 +8,9 @@ import type {
   NodeDeps,
   PipelineResult,
   PipelineStepResult,
-  LoopConfig
+  LoopConfig,
+  NodeEvent,
+  NodeEventListener
 } from "./types.js";
 import { EventLogger } from "./event-logger.js";
 import type { ExecutionResult, RunRecord, TokenUsage } from "../types.js";
@@ -53,6 +55,7 @@ import { deployPreviewNode } from "./nodes/deploy-preview.js";
 import { waitCiNode } from "./ci/wait-ci-node.js";
 import { fixCiNode } from "./ci/fix-ci-node.js";
 import { fixBrowserNode } from "./nodes/fix-browser.js";
+import { decideNextStepNode } from "./nodes/decide-next-step.js";
 
 // ── Node handler registry ──
 
@@ -81,7 +84,8 @@ const NODE_HANDLERS: Record<string, NodeHandler> = {
   local_test: localTestNode,
   upload_screenshot: uploadScreenshotNode,
   generate_title: generateTitleNode,
-  summarize_changes: summarizeChangesNode
+  summarize_changes: summarizeChangesNode,
+  decide_next_step: decideNextStepNode
 };
 
 export type PipelinePhase = "cloning" | "agent" | "validating" | "pushing" | "awaiting_ci" | "ci_fixing";
@@ -91,6 +95,8 @@ export type PipelinePhase = "cloning" | "agent" | "validating" | "pushing" | "aw
  * checkpoints context between nodes, handles loop constructs.
  */
 export class PipelineEngine {
+  private readonly nodeEventListeners: NodeEventListener[] = [];
+
   constructor(
     private readonly config: AppConfig,
     private readonly githubService?: GitHubService,
@@ -98,16 +104,31 @@ export class PipelineEngine {
     private readonly containerManager?: ContainerManager
   ) {}
 
+  /** Register a listener for real-time node start/end events. */
+  onNodeEvent(cb: NodeEventListener): void {
+    this.nodeEventListeners.push(cb);
+  }
+
+  private fireNodeEvent(event: NodeEvent): void {
+    for (const cb of this.nodeEventListeners) {
+      try { cb(event); } catch { /* swallow */ }
+    }
+  }
+
   /**
    * Execute a pipeline for a run.
+   * @param skipNodes — optional list of node IDs to skip entirely (from orchestrator classification)
+   * @param enableNodes — optional list of node IDs to force-enable (overrides enabled: false in YAML)
    */
   async execute(
     run: RunRecord,
     onPhase: (phase: PipelinePhase) => Promise<void>,
     pipelineFile?: string,
-    onDetail?: (detail: string) => Promise<void>
+    onDetail?: (detail: string) => Promise<void>,
+    skipNodes?: string[],
+    enableNodes?: string[]
   ): Promise<ExecutionResult> {
-    const yamlPath = pipelineFile ?? path.resolve("pipelines/default.yml");
+    const yamlPath = pipelineFile ?? path.resolve("pipelines/pipeline.yml");
     const pipeline = await loadPipeline(yamlPath);
 
     logInfo("Pipeline loaded", { name: pipeline.name, nodes: pipeline.nodes.length });
@@ -176,14 +197,14 @@ export class PipelineEngine {
     // Create sandbox container if enabled
     let sandbox: SandboxHandle | undefined;
     if (this.config.sandboxEnabled && this.containerManager) {
-      const sandboxEnv: Record<string, string> = {
-        GOOSE_DISABLE_KEYRING: "1"
-      };
+      const sandboxEnv: Record<string, string> = {};
 
       // Pass through agent-relevant env vars
       for (const key of [
-        "GOOSE_PROVIDER", "GOOSE_MODEL", "OPENROUTER_API_KEY", "ANTHROPIC_API_KEY",
-        "CEMS_API_URL", "CEMS_API_KEY"
+        "OPENROUTER_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY",
+        "XAI_API_KEY", "GEMINI_API_KEY",
+        "CEMS_API_URL", "CEMS_API_KEY",
+        "OPENROUTER_PROVIDER_PREFERENCES"
       ]) {
         if (process.env[key]) {
           sandboxEnv[key] = process.env[key]!;
@@ -209,7 +230,15 @@ export class PipelineEngine {
       );
 
       await appendLog(logFile, `[sandbox] container created: ${sandbox.containerName}\n`);
+
+      // Write pi-agent models.json with OpenRouter provider routing preferences
+      if (this.config.openrouterProviderPreferences) {
+        await this.writePiAgentModelsJson(sandbox.containerId, this.config.openrouterProviderPreferences, logFile);
+      }
     }
+
+    const skipNodeIdSet = skipNodes && skipNodes.length > 0 ? new Set(skipNodes) : undefined;
+    const enableNodeIdSet = enableNodes && enableNodes.length > 0 ? new Set(enableNodes) : undefined;
 
     let result;
     try {
@@ -218,10 +247,10 @@ export class PipelineEngine {
         // within this async tree route through the correct container.
         // Concurrent pipeline executions each get their own context.
         result = await runInSandboxContext(sandbox.containerId, run.id, () =>
-          this.executePipeline(pipeline, ctx, deps, startIndex, false, eventLogger)
+          this.executePipeline(pipeline, ctx, deps, startIndex, false, eventLogger, skipNodeIdSet, enableNodeIdSet)
         );
       } else {
-        result = await this.executePipeline(pipeline, ctx, deps, startIndex, false, eventLogger);
+        result = await this.executePipeline(pipeline, ctx, deps, startIndex, false, eventLogger, skipNodeIdSet, enableNodeIdSet);
       }
     } finally {
       if (sandbox && this.containerManager) {
@@ -264,7 +293,9 @@ export class PipelineEngine {
     deps: NodeDeps,
     startIndex: number,
     pipelineSwitched = false,
-    eventLogger?: EventLogger
+    eventLogger?: EventLogger,
+    skipNodeIds?: Set<string>,
+    enableNodeIds?: Set<string>
   ): Promise<PipelineResult> {
     const steps: PipelineStepResult[] = [];
     const warnings: string[] = [];
@@ -272,8 +303,16 @@ export class PipelineEngine {
     for (let i = startIndex; i < pipeline.nodes.length; i++) {
       const node = pipeline.nodes[i] as NodeConfig;
 
-      // Check enabled flag
-      if (node.enabled === false) {
+      // Check skipNodeIds first (explicit skip always wins)
+      if (skipNodeIds?.has(node.id)) {
+        steps.push({ nodeId: node.id, outcome: "skipped", durationMs: 0 });
+        await eventLogger?.emit("node_end", { nodeId: node.id, outcome: "skipped", durationMs: 0 });
+        await appendLog(deps.logFile, `\n[pipeline] ${node.id}: skipped (in skipNodes list)\n`);
+        continue;
+      }
+
+      // Check enabled flag — enableNodes overrides enabled: false
+      if (node.enabled === false && !enableNodeIds?.has(node.id)) {
         steps.push({ nodeId: node.id, outcome: "skipped", durationMs: 0 });
         await eventLogger?.emit("node_end", { nodeId: node.id, outcome: "skipped", durationMs: 0 });
         continue;
@@ -295,6 +334,7 @@ export class PipelineEngine {
 
       await appendLog(deps.logFile, `\n[pipeline] ${node.id}: starting\n`);
       await eventLogger?.emit("node_start", { nodeId: node.id });
+      this.fireNodeEvent({ runId: deps.run.id, nodeId: node.id, action: node.action, type: "start" });
       const startTime = Date.now();
 
       // Execute the node
@@ -316,16 +356,33 @@ export class PipelineEngine {
         durationMs,
         error: result.error
       });
+      this.fireNodeEvent({
+        runId: deps.run.id, nodeId: node.id, action: node.action,
+        type: "end", outcome: result.outcome, durationMs, error: result.error
+      });
 
       // Write outputs to context bag
       if (result.outputs) {
         ctx.mergeOutputs(result.outputs);
+
+        // Support dynamic node skipping from decision nodes
+        const dynamicSkips = result.outputs["_skipNodes"];
+        if (Array.isArray(dynamicSkips)) {
+          if (!skipNodeIds) {
+            skipNodeIds = new Set<string>();
+          }
+          for (const id of dynamicSkips) {
+            if (typeof id === "string") {
+              skipNodeIds.add(id);
+            }
+          }
+        }
       }
 
       // Handle failure with loop construct
       if (result.outcome === "failure" && node.on_failure) {
         const loopResult = await this.handleLoopFailure(
-          node, result, ctx, deps, pipeline
+          node, result, ctx, deps, pipeline, eventLogger
         );
 
         if (loopResult.outcome === "success") {
@@ -383,7 +440,7 @@ export class PipelineEngine {
             if (newPipeline) {
               const currentIdx = newPipeline.nodes.findIndex(n => n.id === node.id);
               if (currentIdx >= 0) {
-                const tailResult = await this.executePipeline(newPipeline, ctx, deps, currentIdx + 1, true, eventLogger);
+                const tailResult = await this.executePipeline(newPipeline, ctx, deps, currentIdx + 1, true, eventLogger, skipNodeIds, enableNodeIds);
                 steps.push(...tailResult.steps);
                 warnings.push(...tailResult.warnings);
                 return { outcome: tailResult.outcome, steps, warnings };
@@ -407,18 +464,26 @@ export class PipelineEngine {
     failedResult: NodeResult,
     ctx: ContextBag,
     deps: NodeDeps,
-    pipeline: PipelineConfig
+    pipeline: PipelineConfig,
+    eventLogger?: EventLogger
   ): Promise<PipelineResult> {
     const loopConfig = failedNode.on_failure as LoopConfig;
-    const maxRounds = typeof loopConfig.max_rounds === "string"
+    const resolvedMaxRounds = typeof loopConfig.max_rounds === "string"
       ? Number(ctx.resolve(loopConfig.max_rounds) ?? loopConfig.max_rounds)
       : loopConfig.max_rounds;
+    const maxRounds = Number.isFinite(resolvedMaxRounds) && resolvedMaxRounds > 0
+      ? resolvedMaxRounds
+      : 1;
 
     const agentHandler = this.getHandler(loopConfig.agent_node);
     const onExhausted = loopConfig.on_exhausted ?? "fail_run";
     const warnings: string[] = [];
 
     await appendLog(deps.logFile, `\n[pipeline] entering fix loop for ${failedNode.id} (max ${String(maxRounds)} rounds)\n`);
+    await eventLogger?.emit("artifact", {
+      nodeId: failedNode.id,
+      artifact: `loop_start:${failedNode.id}:${loopConfig.agent_node}:${String(maxRounds)}`
+    });
 
     // Store the last failure's raw output for the fix agent
     if (failedResult.rawOutput) {
@@ -437,13 +502,55 @@ export class PipelineEngine {
         type: "agentic",
         action: loopConfig.agent_node
       };
+      const fixStart = Date.now();
+      await eventLogger?.emit("node_start", { nodeId: fixNode.id });
+      this.fireNodeEvent({
+        runId: deps.run.id,
+        nodeId: fixNode.id,
+        action: fixNode.action,
+        type: "start"
+      });
+
+      let fixResult: NodeResult;
 
       try {
-        await agentHandler(fixNode, ctx, deps);
+        fixResult = await agentHandler(fixNode, ctx, deps);
       } catch (error) {
         const message = error instanceof Error ? error.message : "Unknown error";
         await appendLog(deps.logFile, `\n[pipeline] fix agent failed: ${message}\n`);
+        fixResult = { outcome: "failure", error: message };
+      }
+
+      const fixDurationMs = Date.now() - fixStart;
+      await eventLogger?.emit("node_end", {
+        nodeId: fixNode.id,
+        outcome: fixResult.outcome,
+        durationMs: fixDurationMs,
+        error: fixResult.error
+      });
+      this.fireNodeEvent({
+        runId: deps.run.id,
+        nodeId: fixNode.id,
+        action: fixNode.action,
+        type: "end",
+        outcome: fixResult.outcome,
+        durationMs: fixDurationMs,
+        error: fixResult.error
+      });
+
+      if (fixResult.outcome !== "success") {
+        await appendLog(
+          deps.logFile,
+          `[pipeline] fix agent outcome=${fixResult.outcome} on attempt ${String(attempt)} — skipping retry check\n`
+        );
+        await eventLogger?.emit("artifact", {
+          nodeId: failedNode.id,
+          artifact: `loop_fix_failed:${failedNode.id}:${String(attempt)}:${fixResult.outcome}`
+        });
         continue;
+      }
+      if (fixResult.outputs) {
+        ctx.mergeOutputs(fixResult.outputs);
       }
 
       // Run lint fix after agent fix (lint only runs after agent changes)
@@ -459,15 +566,44 @@ export class PipelineEngine {
       // Re-run the original node to check if fixed
       const retryHandler = this.getHandler(failedNode.action);
       let retryResult: NodeResult;
+      const retryNodeId = `${failedNode.id}_retry_${String(attempt)}`;
+      const retryStart = Date.now();
+      await eventLogger?.emit("node_start", { nodeId: retryNodeId });
+      this.fireNodeEvent({
+        runId: deps.run.id,
+        nodeId: retryNodeId,
+        action: failedNode.action,
+        type: "start"
+      });
       try {
         retryResult = await retryHandler(failedNode, ctx, deps);
       } catch (error) {
         const message = error instanceof Error ? error.message : "Unknown error";
         retryResult = { outcome: "failure", error: message };
       }
+      const retryDurationMs = Date.now() - retryStart;
+      await eventLogger?.emit("node_end", {
+        nodeId: retryNodeId,
+        outcome: retryResult.outcome,
+        durationMs: retryDurationMs,
+        error: retryResult.error
+      });
+      this.fireNodeEvent({
+        runId: deps.run.id,
+        nodeId: retryNodeId,
+        action: failedNode.action,
+        type: "end",
+        outcome: retryResult.outcome,
+        durationMs: retryDurationMs,
+        error: retryResult.error
+      });
 
       if (retryResult.outcome === "success") {
         await appendLog(deps.logFile, `\n[pipeline] fix loop succeeded on attempt ${String(attempt)}\n`);
+        await eventLogger?.emit("artifact", {
+          nodeId: failedNode.id,
+          artifact: `loop_success:${failedNode.id}:${String(attempt)}`
+        });
         if (retryResult.outputs) {
           ctx.mergeOutputs(retryResult.outputs);
         }
@@ -482,6 +618,21 @@ export class PipelineEngine {
         ctx.set("lastFailureRawOutput", retryResult.rawOutput);
         lastRawOutput = retryResult.rawOutput;
       }
+
+      // Accumulate failure history for browser verify (and potentially other loops)
+      if (failedNode.action === "browser_verify") {
+        ctx.append("browserVerifyFailureHistory", {
+          round: attempt,
+          verdict: retryResult.outputs?.browserVerifyVerdictReason ?? retryResult.error,
+          actionsPath: ctx.get("actionsPath"),
+          timestamp: Date.now()
+        });
+      }
+
+      await eventLogger?.emit("artifact", {
+        nodeId: failedNode.id,
+        artifact: `loop_retry_failed:${failedNode.id}:${String(attempt)}:${retryResult.outcome}`
+      });
     }
 
     // Loop exhausted — include last validation output for debugging
@@ -491,6 +642,10 @@ export class PipelineEngine {
       : `Fix loop exhausted after ${String(maxRounds)} rounds`;
 
     await appendLog(deps.logFile, `\n[pipeline] fix loop exhausted after ${String(maxRounds)} rounds\n`);
+    await eventLogger?.emit("artifact", {
+      nodeId: failedNode.id,
+      artifact: `loop_exhausted:${failedNode.id}:${String(maxRounds)}`
+    });
 
     if (onExhausted === "complete_with_warning") {
       warnings.push(`${failedNode.id} fix loop exhausted after ${String(maxRounds)} rounds — completing with warning`);
@@ -542,6 +697,41 @@ export class PipelineEngine {
       throw new Error(`No handler registered for action: ${action}`);
     }
     return handler;
+  }
+
+  /**
+   * Write ~/.pi/agent/models.json inside the sandbox container.
+   * Pi-agent auto-discovers this file and applies provider-level compat settings,
+   * including openRouterRouting which gets passed as the `provider` field in
+   * OpenRouter API requests.
+   */
+  private async writePiAgentModelsJson(
+    containerId: string,
+    providerPreferences: Record<string, unknown>,
+    logFile: string
+  ): Promise<void> {
+    if (!this.containerManager) return;
+
+    const modelsJson = JSON.stringify({
+      providers: {
+        openrouter: {
+          baseUrl: "https://openrouter.ai/api/v1",
+          apiKey: "OPENROUTER_API_KEY",
+          api: "openai-completions",
+          compat: {
+            openRouterRouting: providerPreferences
+          }
+        }
+      }
+    });
+
+    try {
+      await this.containerManager.exec(containerId, `mkdir -p /root/.pi/agent && cat > /root/.pi/agent/models.json << 'PIEOF'\n${modelsJson}\nPIEOF`, {});
+      await appendLog(logFile, `[sandbox] wrote pi-agent models.json with provider preferences: ${JSON.stringify(providerPreferences)}\n`);
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : "unknown";
+      await appendLog(logFile, `[sandbox] warning: failed to write models.json: ${msg}\n`);
+    }
   }
 }
 

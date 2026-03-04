@@ -64,6 +64,8 @@ export class RunStore {
         parentBranchName: existingBranchName,
         feedbackNote: input.feedbackNote,
         pipelineHint: input.pipelineHint,
+        skipNodes: input.skipNodes,
+        enableNodes: input.enableNodes,
         teamId: input.teamId
       };
 
@@ -105,6 +107,15 @@ export class RunStore {
     return state.runs
       .filter((run) => run.channelId === channelId && run.threadTs === threadTs)
       .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  }
+
+  async getRecentRuns(repoSlug?: string, limit = 10): Promise<RunRecord[]> {
+    const state = await this.readState();
+    let runs = state.runs;
+    if (repoSlug) {
+      runs = runs.filter(r => r.repoSlug === repoSlug);
+    }
+    return runs.slice(-limit).reverse();
   }
 
   async getLatestRunForChannel(channelId: string): Promise<RunRecord | undefined> {

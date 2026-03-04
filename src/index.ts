@@ -16,15 +16,17 @@ import { watch, type FSWatcher } from "node:fs";
 import { logError, logInfo, logWarn } from "./logger.js";
 import { ContainerManager } from "./sandbox/container-manager.js";
 import { setSandboxManager } from "./pipeline/shell.js";
+import { RunSupervisor } from "./supervisor/run-supervisor.js";
+import { ConversationStore } from "./orchestrator/conversation-store.js";
 
 function checkAgentDefault(config: { agentCommandTemplate: string }): void {
   if (!config.agentCommandTemplate.includes("dummy-agent")) return;
 
   try {
-    execSync("which goose", { stdio: "pipe" });
-    logWarn("Using dummy agent but goose is on PATH. Set AGENT_COMMAND_TEMPLATE to use the real agent.");
+    execSync("which pi", { stdio: "pipe" });
+    logWarn("Using dummy agent but pi is on PATH. Set AGENT_COMMAND_TEMPLATE to use the real agent.");
   } catch {
-    logWarn("No AGENT_COMMAND_TEMPLATE set and goose not found on PATH. Using dummy agent — runs will not produce real code changes.");
+    logWarn("No AGENT_COMMAND_TEMPLATE set and pi not found on PATH. Using dummy agent.");
   }
 }
 
@@ -79,6 +81,7 @@ async function main(): Promise<void> {
   const webClient = new WebClient(config.slackBotToken);
 
   const runManager = new RunManager(config, store, pipelineEngine, webClient, hooks);
+  const conversationStore = new ConversationStore();
   if (recoveredRuns.length > 0) {
     const runsToRequeue = recoveredRuns.filter((run) => run.channelId !== "local");
     for (const run of runsToRequeue) {
@@ -95,6 +98,13 @@ async function main(): Promise<void> {
 
   const cleaner = new WorkspaceCleaner(config, store);
   cleaner.start();
+
+  if (config.supervisorEnabled) {
+    const supervisor = new RunSupervisor(config, runManager, pipelineEngine, store, webClient);
+    supervisor.start();
+    globalRefs.supervisor = supervisor;
+    logInfo("Run supervisor enabled");
+  }
 
   if (config.observerEnabled) {
     const tokenGetter = githubService ? () => githubService.getToken() : undefined;
@@ -124,10 +134,10 @@ async function main(): Promise<void> {
   }
 
   if (config.dashboardEnabled) {
-    startDashboardServer(config, store, runManager, globalRefs.observer);
+    startDashboardServer(config, store, runManager, globalRefs.observer, conversationStore);
   }
 
-  await startSlackApp(config, runManager, globalRefs.observer);
+  await startSlackApp(config, runManager, globalRefs.observer, memoryProvider, githubService, conversationStore);
 }
 
 main().catch((error) => {
@@ -138,7 +148,10 @@ main().catch((error) => {
 
 async function shutdown(signal: string): Promise<void> {
   logInfo(`Shutting down (${signal})`);
-  // Flush observer state before exit
+  // Stop supervisor + observer before exit
+  try {
+    globalRefs.supervisor?.stop();
+  } catch { /* swallow */ }
   try {
     const { observer: obs } = globalRefs;
     if (obs) await obs.stop();
@@ -150,7 +163,7 @@ async function shutdown(signal: string): Promise<void> {
 }
 
 // Global refs for shutdown access and hot-reload
-const globalRefs: { observer?: ObserverDaemon; rulesWatcher?: FSWatcher } = {};
+const globalRefs: { observer?: ObserverDaemon; supervisor?: RunSupervisor; rulesWatcher?: FSWatcher } = {};
 
 process.on("SIGINT", () => { shutdown("SIGINT"); });
 process.on("SIGTERM", () => { shutdown("SIGTERM"); });

@@ -1,6 +1,6 @@
 import type { NodeConfig, NodeResult, NodeDeps } from "../types.js";
 import type { ContextBag } from "../context-bag.js";
-import { runShell, runShellCapture, shellEscape, appendLog } from "../shell.js";
+import { runShell, runShellCapture, shellEscape } from "../shell.js";
 
 /**
  * Commit node: assert changes, git add + commit, capture SHA + changed files.
@@ -21,13 +21,12 @@ export async function commitNode(
   if (statusResult.code === 0 && statusResult.stdout.trim() === "") {
     return {
       outcome: "failure",
-      error: "Agent produced no file changes. Ensure AGENT_COMMAND_TEMPLATE writes modifications before commit."
+      error: "Agent produced no file changes. The model may not support tool calling via the current provider."
     };
   }
 
-  // Stage all changes, excluding runtime artifacts
+  // Stage all changes
   await runShell("git add -A", { cwd: repoDir, logFile });
-  await runShellCapture("git reset HEAD -- .goosehints", { cwd: repoDir, logFile });
 
   // Build commit message
   const taskSummary = (isFollowUp ? run.feedbackNote ?? run.task : run.task).slice(0, 72);

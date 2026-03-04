@@ -63,7 +63,8 @@ export async function scopeJudgeNode(
   const llmConfig: LLMCallerConfig = {
     apiKey: config.openrouterApiKey,
     defaultModel: config.scopeJudgeModel,
-    defaultTimeoutMs: 15_000
+    defaultTimeoutMs: 15_000,
+    providerPreferences: config.openrouterProviderPreferences
   };
 
   const nc = nodeConfig.config as Record<string, unknown> | undefined;

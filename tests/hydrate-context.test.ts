@@ -4,7 +4,7 @@ import { readFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { getExpectedOutput, buildRepoSummary, hydrateContextNode } from "../src/pipeline/nodes/hydrate-context.js";
+import { getExpectedOutput, buildRepoSummary, buildAgentsMd, hydrateContextNode } from "../src/pipeline/nodes/hydrate-context.js";
 import { ContextBag } from "../src/pipeline/context-bag.js";
 import type { NodeDeps } from "../src/pipeline/types.js";
 
@@ -246,7 +246,7 @@ test("hydrateContextNode: includes repo summary in prompt", async (t) => {
   assert.ok(content.includes("Node.js"), "Should detect Node.js from package.json");
 });
 
-test("hydrateContextNode: writes .goosehints with run context", async (t) => {
+test("hydrateContextNode: prompt includes instructions section", async (t) => {
   const dir = await makeTempRepo();
   const repoDir = path.join(dir, "repo");
   await mkdir(repoDir, { recursive: true });
@@ -260,9 +260,10 @@ test("hydrateContextNode: writes .goosehints with run context", async (t) => {
 
   await hydrateContextNode({ id: "hydrate", type: "deterministic", action: "hydrate_context" }, ctx, deps);
 
-  const hints = await readFile(path.join(repoDir, ".goosehints"), "utf8");
-  assert.ok(hints.includes("Run ID: run-123"), "Should contain run ID");
-  assert.ok(hints.includes("Repository: owner/repo"), "Should contain repo slug");
+  const content = await readFile(promptFile, "utf8");
+  assert.ok(content.includes("Run ID: run-123"), "Should contain run ID");
+  assert.ok(content.includes("Repository: owner/repo"), "Should contain repo slug");
+  assert.ok(content.includes("Keep changes minimal"), "Should include instructions");
 });
 
 test("hydrateContextNode: follow-up run includes parent context", async (t) => {
@@ -293,4 +294,82 @@ test("hydrateContextNode: follow-up run includes parent context", async (t) => {
   assert.ok(content.includes("parent-ab"), "Should contain parent run ID prefix");
   assert.ok(content.includes("Please also add tests"), "Should contain feedback note");
   assert.ok(content.includes("src/index.ts"), "Should list changed files");
+});
+
+// ── buildAgentsMd ──
+
+test("buildAgentsMd: includes task context", () => {
+  const run = makeMockDeps().run;
+  const ctx = new ContextBag({ taskType: "bugfix" });
+  const result = buildAgentsMd(run, ctx, [], undefined);
+
+  assert.ok(result.includes("# AGENTS.md"), "Should have AGENTS.md header");
+  assert.ok(result.includes("Run ID: run-123"), "Should include run ID");
+  assert.ok(result.includes("Repository: owner/repo"), "Should include repo slug");
+  assert.ok(result.includes("Task type: bugfix"), "Should include task type");
+});
+
+test("buildAgentsMd: includes hook sections as organizational memory", () => {
+  const run = makeMockDeps().run;
+  const ctx = new ContextBag({});
+  const hooks = ["### Past fix for auth error", "Use Devise confirmable pattern"];
+  const result = buildAgentsMd(run, ctx, hooks, undefined);
+
+  assert.ok(result.includes("## Organizational Memory"), "Should have org memory section");
+  assert.ok(result.includes("Past fix for auth error"), "Should include hook content");
+  assert.ok(result.includes("Devise confirmable"), "Should include hook details");
+});
+
+test("buildAgentsMd: includes repo summary as project conventions", () => {
+  const run = makeMockDeps().run;
+  const ctx = new ContextBag({});
+  const summary = "### Tech stack: TypeScript, Node.js";
+  const result = buildAgentsMd(run, ctx, [], summary);
+
+  assert.ok(result.includes("## Project Conventions"), "Should have conventions section");
+  assert.ok(result.includes("TypeScript, Node.js"), "Should include tech stack");
+});
+
+test("buildAgentsMd: includes coding rules", () => {
+  const run = makeMockDeps().run;
+  const ctx = new ContextBag({});
+  const result = buildAgentsMd(run, ctx, [], undefined);
+
+  assert.ok(result.includes("## Coding Rules"), "Should have coding rules section");
+  assert.ok(result.includes("Keep changes minimal"), "Should include minimal change rule");
+});
+
+test("buildAgentsMd: omits empty sections", () => {
+  const run = makeMockDeps().run;
+  const ctx = new ContextBag({});
+  const result = buildAgentsMd(run, ctx, [], undefined);
+
+  assert.ok(!result.includes("## Organizational Memory"), "Should NOT have org memory when no hooks");
+  assert.ok(!result.includes("## Project Conventions"), "Should NOT have conventions when no summary");
+});
+
+test("hydrateContextNode: writes AGENTS.md alongside task.md", async (t) => {
+  const dir = await makeTempRepo();
+  const repoDir = path.join(dir, "repo");
+  await mkdir(repoDir, { recursive: true });
+  const promptFile = path.join(dir, "task.md");
+  const logFile = path.join(dir, "test.log");
+  await writeFile(logFile, "", "utf8");
+  t.after(async () => { await rm(dir, { recursive: true, force: true }); });
+
+  const ctx = new ContextBag({ repoDir, promptFile, taskType: "feature" });
+  const deps = makeMockDeps({ logFile });
+
+  await hydrateContextNode({ id: "hydrate", type: "deterministic", action: "hydrate_context" }, ctx, deps);
+
+  // Verify task.md was written
+  const taskContent = await readFile(promptFile, "utf8");
+  assert.ok(taskContent.includes("Task type: feature"), "task.md should contain task type");
+
+  // Verify AGENTS.md was written in the repo dir
+  const agentsContent = await readFile(path.join(repoDir, "AGENTS.md"), "utf8");
+  assert.ok(agentsContent.includes("# AGENTS.md"), "AGENTS.md should have header");
+  assert.ok(agentsContent.includes("Run ID: run-123"), "AGENTS.md should include run ID");
+  assert.ok(agentsContent.includes("Task type: feature"), "AGENTS.md should include task type");
+  assert.ok(agentsContent.includes("## Coding Rules"), "AGENTS.md should include coding rules");
 });

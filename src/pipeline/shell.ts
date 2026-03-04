@@ -82,10 +82,23 @@ export function shellEscape(value: string): string {
   return `'${value.replace(/'/g, `'"'"'`)}'`;
 }
 
-export function renderTemplate(template: string, values: Record<string, string>): string {
+/**
+ * Render a command template. Values in `values` are shell-escaped.
+ * Values in `rawValues` are substituted as-is (for pre-formatted flag strings).
+ */
+export function renderTemplate(
+  template: string,
+  values: Record<string, string>,
+  rawValues?: Record<string, string>
+): string {
   let output = template;
   for (const [key, value] of Object.entries(values)) {
     output = output.replaceAll(`{{${key}}}`, shellEscape(value));
+  }
+  if (rawValues) {
+    for (const [key, value] of Object.entries(rawValues)) {
+      output = output.replaceAll(`{{${key}}}`, value);
+    }
   }
   return output;
 }
@@ -94,6 +107,13 @@ export function buildMcpFlags(extensions: string[]): string {
   return extensions
     .filter(ext => ext.trim())
     .map(ext => `--with-extension ${shellEscape(ext)}`)
+    .join(" ");
+}
+
+export function buildPiExtensionFlags(extensions: string[]): string {
+  return extensions
+    .filter(ext => ext.trim())
+    .map(ext => `-e ${shellEscape(ext)}`)
     .join(" ");
 }
 
@@ -156,7 +176,8 @@ export async function runShell(
       env: {
         ...process.env,
         ...options.env
-      }
+      },
+      stdio: ["ignore", "pipe", "pipe"]
     });
 
     let timeoutHandle: NodeJS.Timeout | undefined;
@@ -257,7 +278,8 @@ export async function runShellWithProgress(
     let settled = false;
     const child = spawn("bash", ["-lc", command], {
       cwd: options.cwd,
-      env: process.env
+      env: process.env,
+      stdio: ["ignore", "pipe", "pipe"]
     });
 
     child.stdout.on("data", async (chunk) => {
@@ -321,7 +343,7 @@ export async function runShellCapture(
     return { code: result.code, stdout: result.stdout, stderr: result.stderr };
   }
 
-  // Local spawn path (existing behavior)
+  // Local spawn path
   return new Promise<{ code: number; stdout: string; stderr: string }>((resolve, reject) => {
     let settled = false;
     const bashFlags = options.login ? "-lc" : "-c";
@@ -330,25 +352,25 @@ export async function runShellCapture(
       env: {
         ...process.env,
         ...options.env
-      }
+      },
+      stdio: ["ignore", "pipe", "pipe"]
     });
 
     let stdout = "";
     let stderr = "";
 
+    const killChild = (reason: string) => {
+      if (settled) return;
+      appendLog(options.logFile, `\n[${reason}]\n`).catch(() => {});
+      child.kill("SIGTERM");
+      setTimeout(() => { if (!settled) child.kill("SIGKILL"); }, 5000);
+    };
+
     let timeoutHandle: NodeJS.Timeout | undefined;
     if (options.timeoutMs && options.timeoutMs > 0) {
       const timeoutMs = options.timeoutMs;
       timeoutHandle = setTimeout(() => {
-        if (settled) return;
-        appendLog(
-          options.logFile,
-          `\n[timeout] command exceeded ${String(Math.floor(timeoutMs / 1000))}s, terminating\n`
-        ).catch(() => {});
-        child.kill("SIGTERM");
-        setTimeout(() => {
-          if (!settled) child.kill("SIGKILL");
-        }, 5000);
+        killChild(`timeout: command exceeded ${String(Math.floor(timeoutMs / 1000))}s, terminating`);
       }, timeoutMs);
     }
 

@@ -85,6 +85,20 @@ export interface PipelineEvent {
   artifact?: string;
 }
 
+// ── Node event callbacks (real-time monitoring) ──
+
+export interface NodeEvent {
+  runId: string;
+  nodeId: string;
+  action: string;
+  type: "start" | "end";
+  outcome?: NodeOutcome;
+  durationMs?: number;
+  error?: string;
+}
+
+export type NodeEventListener = (event: NodeEvent) => void;
+
 // ── Pipeline result ──
 
 export interface PipelineStepResult {

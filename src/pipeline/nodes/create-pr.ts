@@ -27,11 +27,14 @@ export async function createPrNode(
   const commitSha = ctx.get<string>("commitSha");
   const changedFiles = ctx.get<string[]>("changedFiles");
 
-  // Screenshot URL is not available at PR creation time — it gets added
-  // later by upload_screenshot node after browser_verify captures it.
+  const changeSummary = ctx.get<string>("changeSummary");
+
+  // Screenshot/video URLs are not available at PR creation time — they get added
+  // later by upload_screenshot node after browser_verify captures them.
   const prBody = buildPrBody(
     run, resolvedBaseBranch, config.appName, isFollowUp,
-    gateReport, agentAnalysis, commitSha, changedFiles
+    gateReport, agentAnalysis, commitSha, changedFiles,
+    undefined, undefined, undefined, changeSummary
   );
 
   const prResult = isFollowUp
@@ -68,12 +71,19 @@ export function buildPrBody(
   agentAnalysis?: AgentAnalysis,
   commitSha?: string,
   changedFiles?: string[],
-  screenshotUrl?: string
+  screenshotUrl?: string,
+  videoUrl?: string,
+  videoEmbedUrl?: string,
+  changeSummary?: string
 ): string {
   const lines: string[] = [];
 
   // ── Task description ──
-  lines.push("## Task", "", formatTaskDescription(run.task), "");
+  // Prefer changeSummary (LLM-generated, human-readable) over raw task (may contain HTML/code).
+  const taskDisplay = changeSummary
+    ? changeSummary
+    : formatTaskDescription(run.task);
+  lines.push("## Task", "", taskDisplay, "");
 
   // ── Follow-up context ──
   if (isFollowUp && run.parentRunId) {
@@ -141,9 +151,18 @@ export function buildPrBody(
   }
 
   // ── Visual Evidence ──
-  if (screenshotUrl) {
+  if (screenshotUrl || videoUrl) {
     lines.push("## Visual Evidence", "");
-    lines.push(`![Screenshot](${screenshotUrl})`, "");
+    if (screenshotUrl) {
+      lines.push(`![Screenshot](${screenshotUrl})`, "");
+    }
+    if (videoUrl) {
+      lines.push("### Verification Video", "");
+      if (videoEmbedUrl) {
+        lines.push(`<video src="${videoEmbedUrl}" controls muted playsinline preload="metadata" style="max-width: 100%;"></video>`, "");
+      }
+      lines.push(`[View verification video](${videoUrl})`, "");
+    }
   }
 
   // ── Run metadata ──
@@ -174,21 +193,36 @@ export function buildPrBody(
 
 /**
  * Format task description for PR body.
- * Detects numbered requirements (e.g. "1. Do X 2. Do Y") and formats them as a list.
+ * Handles tasks with embedded code/HTML by truncating and wrapping in a details block.
  */
 function formatTaskDescription(task: string): string {
-  // Find the position of "1." — requires at least 2 numbered items to trigger formatting
+  // If task contains HTML/code blocks, show a truncated version with expandable details
+  const hasCode = /<[a-z][\s\S]*>/i.test(task) || /```/.test(task);
+  if (hasCode && task.length > 300) {
+    // Extract first meaningful line as summary
+    const firstLine = task.split("\n").find(l => l.trim() && !l.trim().startsWith("<") && !l.trim().startsWith("```"))
+      ?? task.slice(0, 100);
+    return [
+      firstLine.trim(),
+      "",
+      "<details><summary>Full task description</summary>",
+      "",
+      "```",
+      task,
+      "```",
+      "",
+      "</details>"
+    ].join("\n");
+  }
+
+  // Detect numbered requirements (e.g. "1. Do X 2. Do Y") and format as list
   const firstItemMatch = /(?:^|\s)1\.\s/.exec(task);
   if (!firstItemMatch) return task;
 
-  // Check there's at least a "2." following
   const afterFirst = task.slice(firstItemMatch.index);
   if (!/\s2\.\s/.test(afterFirst)) return task;
 
-  // Extract preamble (everything before "1.")
   const preamble = task.slice(0, firstItemMatch.index).replace(/\s+$/, "");
-
-  // Extract all numbered items using a global regex
   const itemRegex = /(\d+)\.\s+((?:(?!\s\d+\.\s).)*)/g;
   const items: string[] = [];
   let match: RegExpExecArray | null;

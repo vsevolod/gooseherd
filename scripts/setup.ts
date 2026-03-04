@@ -366,7 +366,7 @@ async function main(): Promise<void> {
   collected.APP_NAME = existing.APP_NAME || "Gooseherd";
   collected.SLACK_COMMAND_NAME = existing.SLACK_COMMAND_NAME || "gooseherd";
   collected.RUNNER_CONCURRENCY = existing.RUNNER_CONCURRENCY || "1";
-  collected.PIPELINE_FILE = existing.PIPELINE_FILE || "pipelines/default.yml";
+  collected.PIPELINE_FILE = existing.PIPELINE_FILE || "pipelines/pipeline.yml";
 
   // Keep the agent command from existing config, or use default
   if (!collected.AGENT_COMMAND_TEMPLATE) {

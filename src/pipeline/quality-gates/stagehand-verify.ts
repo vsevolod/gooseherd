@@ -79,6 +79,64 @@ function createOpenRouterClient(modelName: string, apiKey: string, baseURL: stri
   return client;
 }
 
+// ── URL Hint Extraction ──
+
+/** Rails view/controller path → route mapping rules. */
+const RAILS_ROUTE_PATTERNS: Array<{ pattern: RegExp; route: (m: RegExpMatchArray) => string }> = [
+  // Specific patterns first (before generic catch-all)
+  { pattern: /app\/views\/devise\/sessions\/new/, route: () => "/users/sign_in" },
+  { pattern: /app\/views\/devise\/registrations\/new/, route: () => "/users/sign_up" },
+  { pattern: /app\/views\/devise\/passwords\/new/, route: () => "/users/password/new" },
+  { pattern: /app\/views\/devise\/registrations\/edit/, route: () => "/user/edit" },
+  { pattern: /app\/views\/(home|landing|pages)\/(index|home|landing)/, route: () => "/" },
+  // Generic patterns
+  { pattern: /app\/views\/([^/]+)\/index/, route: (m) => `/${m[1]}` },
+  { pattern: /app\/views\/([^/]+)\/show/, route: (m) => `/${m[1]}/:id` },
+  { pattern: /app\/views\/([^/]+)\/new/, route: (m) => `/${m[1]}/new` },
+  { pattern: /app\/views\/([^/]+)\/edit/, route: (m) => `/${m[1]}/:id/edit` },
+  { pattern: /app\/controllers\/([^/]+)_controller/, route: (m) => `/${m[1]}` },
+];
+
+/**
+ * Extract URL path hints from task text and changed files.
+ * Helps the Stagehand agent navigate to the right page.
+ */
+export function extractUrlHints(task: string, changedFiles: string[]): string[] {
+  const hints = new Set<string>();
+
+  // 1. Parse changed files for Rails routes
+  for (const file of changedFiles) {
+    for (const { pattern, route } of RAILS_ROUTE_PATTERNS) {
+      const match = file.match(pattern);
+      if (match) {
+        hints.add(route(match));
+        break; // first match per file
+      }
+    }
+  }
+
+  // 2. Extract URL-like paths from task text
+  // Match patterns like "/user/edit", "/admin/dashboard", "on the /about page"
+  const urlPathRegex = /(?:^|\s|")(\/[a-z][a-z0-9_/-]*)/gi;
+  let match: RegExpExecArray | null;
+  while ((match = urlPathRegex.exec(task)) !== null) {
+    const p = match[1];
+    // Skip common non-route paths like /tmp, /var, /usr, /etc
+    if (!/^\/(tmp|var|usr|etc|bin|dev|proc|sys)\b/.test(p)) {
+      hints.add(p);
+    }
+  }
+
+  // 3. Extract "on the X page" patterns
+  const pagePatternRegex = /on\s+the\s+([a-z][a-z0-9_ -]*?)\s+page/gi;
+  while ((match = pagePatternRegex.exec(task)) !== null) {
+    const pageName = match[1].trim().toLowerCase().replace(/\s+/g, "-");
+    hints.add(`/${pageName}`);
+  }
+
+  return [...hints];
+}
+
 // ── Instruction Builder ──
 
 export function buildInstruction(
@@ -95,6 +153,12 @@ export function buildInstruction(
 
   if (changeSummary) {
     instruction += `\n\nChange summary (what the developer actually did):\n${changeSummary}`;
+  }
+
+  // Add navigation hints from file analysis and task text
+  const urlHints = extractUrlHints(task, changedFiles);
+  if (urlHints.length > 0) {
+    instruction += `\n\n## Navigation hints\nBased on the changed files and task, these pages are likely relevant:\n${urlHints.map(h => `  - ${h}`).join("\n")}\nNavigate to these paths on the review app URL to verify the changes.`;
   }
 
   if (credentials) {
@@ -130,7 +194,8 @@ export async function runStagehandVerification(
   credentials?: { email: string; password: string },
   changeSummary?: string,
   baseURL?: string,
-  executionModel?: string
+  executionModel?: string,
+  maxSteps?: number
 ): Promise<StagehandVerifyResult> {
   const screenshotsDir = path.join(runDir, "screenshots");
   await mkdir(screenshotsDir, { recursive: true });
@@ -203,11 +268,31 @@ export async function runStagehandVerification(
 
     // Start CDP captures BEFORE navigation to capture initial page load.
     // Each capture starts independently — partial failure doesn't null already-started ones.
-    const cdpSession = (() => {
+    // Try public Playwright API first (newCDPSession), then fall back to internal getSessionForFrame.
+    const cdpSession = await (async () => {
+      // Method 1: Public Playwright API — BrowserContext.newCDPSession(page)
+      try {
+        const ctx = (page as any).context?.();
+        if (ctx?.newCDPSession) {
+          const s = await ctx.newCDPSession(page);
+          if (s?.send && s?.on) {
+            await appendLog(logFile, "[gate:browser_verify] cdp: session via newCDPSession\n");
+            return s;
+          }
+        }
+      } catch { /* fall through */ }
+
+      // Method 2: Internal Playwright API — page.getSessionForFrame
       try {
         const s = (page as any).getSessionForFrame?.((page as any).mainFrameId?.());
-        return s?.send && s?.on ? s : undefined;
-      } catch { return undefined; }
+        if (s?.send && s?.on) {
+          await appendLog(logFile, "[gate:browser_verify] cdp: session via getSessionForFrame\n");
+          return s;
+        }
+      } catch { /* fall through */ }
+
+      await appendLog(logFile, "[gate:browser_verify] cdp: no session available — video/console/network capture disabled\n");
+      return undefined;
     })();
 
     if (cdpSession) {
@@ -248,12 +333,13 @@ export async function runStagehandVerification(
     }
     const agent = stagehand.agent(agentOpts);
 
-    await appendLog(logFile, "[gate:browser_verify] stagehand: executing agent (maxSteps=15)\n");
+    const effectiveMaxSteps = maxSteps ?? 15;
+    await appendLog(logFile, `[gate:browser_verify] stagehand: executing agent (maxSteps=${String(effectiveMaxSteps)})\n`);
 
     // Execute with timeout via AbortSignal (120s total)
     const result = await agent.execute({
       instruction,
-      maxSteps: 15,
+      maxSteps: effectiveMaxSteps,
       output: VerdictSchema,
       signal: AbortSignal.timeout(120_000)
     });

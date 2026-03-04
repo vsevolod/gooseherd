@@ -86,13 +86,32 @@ export function buildSmokeCheck(
 
 /**
  * Aggregate individual checks into a final result.
+ *
+ * Priority logic: if feature_verification passed, accessibility failures are
+ * demoted to warnings (pre-existing a11y issues shouldn't block a correctly
+ * implemented feature). Smoke test failures always block.
  */
 export function aggregateChecks(checks: BrowserCheck[]): BrowserVerifyResult {
-  const errors = checks.filter(c => !c.passed).map(c => `${c.name}: ${c.details}`);
+  const featureCheck = checks.find(c => c.name === "feature_verification");
+  const featurePassed = featureCheck?.passed === true;
+
+  const errors: string[] = [];
+  const warnings: string[] = [];
+
+  for (const c of checks) {
+    if (c.passed) continue;
+    if (c.name === "accessibility" && featurePassed) {
+      // Demote accessibility to warning when the feature itself passed
+      warnings.push(`${c.name}: ${c.details}`);
+    } else {
+      errors.push(`${c.name}: ${c.details}`);
+    }
+  }
+
   return {
     checks,
     overallPass: errors.length === 0,
-    errors
+    errors: [...errors, ...warnings]
   };
 }
 

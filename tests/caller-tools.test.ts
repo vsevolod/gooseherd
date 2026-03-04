@@ -158,9 +158,8 @@ describe("callLLMWithTools", () => {
       );
 
       assert.equal(result.turnsUsed, 3, "should stop at maxTurns");
+      assert.ok(result.content.includes("Loop exhausted:"), "should start with Loop exhausted");
       assert.ok(result.content.includes("max turns reached"), "should mention exhaustion reason");
-      const parsed = JSON.parse(result.content) as { passed: boolean };
-      assert.equal(parsed.passed, false, "exhaustion verdict should be FAIL");
     } finally {
       globalThis.fetch = originalFetch;
     }
@@ -203,6 +202,7 @@ describe("callLLMWithTools", () => {
       );
 
       assert.ok(result.turnsUsed < 100, "should stop before maxTurns due to wall-clock");
+      assert.ok(result.content.includes("Loop exhausted:"), "should start with Loop exhausted");
       assert.ok(result.content.includes("wall-clock timeout"), "should mention wall-clock timeout");
     } finally {
       globalThis.fetch = originalFetch;

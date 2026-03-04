@@ -1,17 +1,27 @@
 /**
- * Parses raw Goose agent logs into structured events for dashboard rendering.
+ * Parses raw agent logs into structured events for dashboard rendering.
  *
- * Goose (--debug mode) emits:
+ * Supports two agent formats (auto-detected):
+ *
+ * 1. Goose (--debug mode) — regex-parsed:
  *   ─── tool_name | extension ──────────────────────────
  *   key: value                    (tool parameters)
  *   <stdout from tool>
  *   Annotated { ... }             (tool result in Rust debug format)
  *   <free text>                   (agent thinking)
  *
- * Gooseherd pipeline emits:
+ * 2. pi-agent (--mode json) — JSONL-parsed:
+ *   {"type":"session","version":3,...}
+ *   {"type":"agent_start"}
+ *   {"type":"message_start","message":{"role":"assistant","model":"...",...}}
+ *   {"type":"message_update","assistantMessageEvent":{"type":"thinking_end",...}}
+ *   {"type":"message_end","message":{"role":"toolResult","toolName":"read",...}}
+ *   {"type":"agent_end","messages":[...]}
+ *
+ * Both formats are mixed with pipeline shell commands:
  *   $ command                     (shell commands)
  *   <AppName> run <uuid>          (run header)
- *   starting session | provider:  (session start)
+ *   [pipeline] node: status       (pipeline status markers)
  */
 
 export type RunEventType =
@@ -20,6 +30,7 @@ export type RunEventType =
   | "tool_call"
   | "shell_cmd"
   | "phase_marker"
+  | "pipeline_message"
   | "info";
 
 export interface RunEvent {
@@ -197,9 +208,347 @@ function findFirstUnresolvedMemoryEvent(events: RunEvent[]): number | undefined 
   return undefined;
 }
 
+// ── pi-agent JSONL detection ─────────────────────────────
+
+/**
+ * Detect whether a raw log contains pi-agent JSONL output.
+ * Checks for characteristic pi-agent event types in the first few JSON lines.
+ */
+export function isPiAgentJsonl(rawLog: string): boolean {
+  const lines = rawLog.split("\n");
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("{")) continue;
+    // Check for pi-agent-specific event types
+    if (
+      trimmed.includes('"type":"agent_start"') ||
+      trimmed.includes('"type":"session"') ||
+      trimmed.includes('"type":"message_start"') ||
+      trimmed.includes('"type":"turn_start"')
+    ) {
+      return true;
+    }
+    // Stop checking after finding a few non-JSON lines (pipeline output zone)
+    break;
+  }
+  // Also check deeper — pi-agent JSONL may start after pipeline $ commands
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (trimmed.startsWith("{") && trimmed.includes('"type":"agent_start"')) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// ── pi-agent JSONL content types ─────────────────────────
+interface PiToolCall {
+  id: string;
+  name: string;
+  arguments: Record<string, unknown>;
+}
+
+interface PiUsage {
+  input: number;
+  output: number;
+  cacheRead?: number;
+  cacheWrite?: number;
+  totalTokens: number;
+  cost?: { input: number; output: number; total: number };
+}
+
+/**
+ * Parse pi-agent JSONL output (--mode json) into RunEvent[].
+ * Handles mixed logs: pipeline shell commands + JSONL events.
+ *
+ * Event mapping:
+ * - message_start (assistant, first) → session_start with model/provider
+ * - message_update thinking_end → agent_thinking
+ * - message_update text_end → agent_thinking (assistant text shown as agent output)
+ * - message_end (assistant) with toolCall content → tool_call
+ * - message_end (toolResult) → attach result to matching tool_call
+ * - agent_end → info with cost/token summary
+ * - $ command lines → shell_cmd / phase_marker (unchanged regex)
+ */
+export function parsePiAgentJsonl(rawLog: string): RunEvent[] {
+  const lines = rawLog.split("\n");
+  const events: RunEvent[] = [];
+  let sessionEmitted = false;
+  // Map toolCallId → events index for matching tool results
+  const toolCallIndex = new Map<string, number>();
+  let toolCallCount = 0;
+  // Track cumulative usage across turns
+  let totalInput = 0;
+  let totalOutput = 0;
+  let totalCost = 0;
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+
+    // ── Pipeline shell commands (non-JSON lines) ──
+    if (!trimmed.startsWith("{")) {
+      // Shell command
+      const shellMatch = SHELL_CMD_RE.exec(trimmed);
+      if (shellMatch) {
+        const command = shellMatch[1];
+        let phase: string | undefined;
+        if (command.includes("git clone")) phase = "cloning";
+        else if (command.includes("pi -p") || command.includes("goose run") || command.includes("AGENT_COMMAND")) phase = "agent";
+        else if (command.includes("git push")) phase = "pushing";
+        else if (command.includes("git add") || command.includes("git commit")) phase = "committing";
+
+        events.push({
+          type: phase ? "phase_marker" : "shell_cmd",
+          index: 0,
+          progressPercent: 0,
+          command,
+          phase,
+          content: `$ ${command}`,
+        });
+        continue;
+      }
+      // App run header
+      const appRunMatch = APP_RUN_RE.exec(trimmed);
+      if (appRunMatch) {
+        events.push({ type: "info", index: 0, progressPercent: 0, content: trimmed });
+        continue;
+      }
+      // Pipeline status markers [pipeline] node: status
+      if (trimmed.startsWith("[pipeline]")) {
+        const pipelineText = trimmed.slice("[pipeline]".length).trim();
+        // Classify message: success, failure, warning, or neutral
+        let pipelineLevel: string = "info";
+        if (/\bsuccess\b|\bresolved\b/i.test(pipelineText)) pipelineLevel = "success";
+        else if (/\bfail|\berror\b|\bexhausted\b/i.test(pipelineText)) pipelineLevel = "error";
+        else if (/\bwarn|\bskip|\bno changes\b/i.test(pipelineText)) pipelineLevel = "warn";
+        events.push({
+          type: "pipeline_message",
+          index: 0,
+          progressPercent: 0,
+          content: pipelineText,
+          phase: pipelineLevel
+        });
+        continue;
+      }
+      // Skip other non-JSON noise
+      continue;
+    }
+
+    // ── Parse JSONL event ──
+    let event: Record<string, unknown>;
+    try {
+      event = JSON.parse(trimmed) as Record<string, unknown>;
+    } catch {
+      continue; // Skip malformed JSON
+    }
+
+    const eventType = event.type as string;
+
+    // ── session — emit session_start ──
+    if (eventType === "session" && !sessionEmitted) {
+      // Don't emit yet — wait for first assistant message_start which has model info
+      continue;
+    }
+
+    // ── message_start — extract model/provider from first assistant message ──
+    if (eventType === "message_start") {
+      const msg = event.message as Record<string, unknown> | undefined;
+      if (msg && msg.role === "assistant" && !sessionEmitted) {
+        const provider = (msg.provider as string) ?? "unknown";
+        const model = (msg.model as string) ?? "unknown";
+        sessionEmitted = true;
+        events.push({
+          type: "session_start",
+          index: 0,
+          progressPercent: 0,
+          provider,
+          model,
+          content: `Session started with ${provider} / ${model}`,
+        });
+      }
+      continue;
+    }
+
+    // ── message_update — extract completed thinking/text blocks ──
+    if (eventType === "message_update") {
+      const ame = event.assistantMessageEvent as Record<string, unknown> | undefined;
+      if (!ame) continue;
+
+      const subType = ame.type as string;
+
+      if (subType === "thinking_end") {
+        const content = (ame.content as string) ?? "";
+        if (content.trim()) {
+          events.push({
+            type: "agent_thinking",
+            index: 0,
+            progressPercent: 0,
+            content: content.trim(),
+          });
+        }
+      } else if (subType === "text_end") {
+        const content = (ame.content as string) ?? "";
+        if (content.trim()) {
+          events.push({
+            type: "agent_thinking",
+            index: 0,
+            progressPercent: 0,
+            content: content.trim(),
+          });
+        }
+      }
+      continue;
+    }
+
+    // ── message_end — extract tool calls and tool results ──
+    if (eventType === "message_end") {
+      const msg = event.message as Record<string, unknown> | undefined;
+      if (!msg) continue;
+
+      if (msg.role === "assistant") {
+        // Extract tool calls from content array
+        const content = msg.content as Array<Record<string, unknown>> | undefined;
+        if (!content || !Array.isArray(content)) continue;
+        for (const block of content) {
+          if (block.type === "toolCall") {
+            const toolName = (block.name as string) ?? "unknown";
+            const args = (block.arguments as Record<string, unknown>) ?? {};
+            const callId = (block.id as string) ?? "";
+            toolCallCount++;
+
+            // Build readable summary
+            let summary = toolName;
+            if (args.path) summary = `${toolName}: ${shortenPath(String(args.path))}`;
+            else if (args.command) summary = `${toolName}: ${String(args.command).slice(0, 100)}`;
+            else if (args.pattern) summary = `${toolName}: "${String(args.pattern).slice(0, 80)}"`;
+
+            // Truncate args for params display
+            const params: Record<string, string> = {};
+            for (const [k, v] of Object.entries(args)) {
+              params[k] = String(v).slice(0, 200);
+            }
+
+            const idx = events.length;
+            events.push({
+              type: "tool_call",
+              index: 0,
+              progressPercent: 0,
+              tool: toolName,
+              extension: "pi-agent",
+              params,
+              content: summary,
+            });
+            if (callId) toolCallIndex.set(callId, idx);
+          }
+        }
+
+        // Track usage from assistant message_end
+        const usage = msg.usage as PiUsage | undefined;
+        if (usage) {
+          totalInput += usage.input ?? 0;
+          totalOutput += usage.output ?? 0;
+          if (usage.cost) totalCost += usage.cost.total ?? 0;
+        }
+      } else if (msg.role === "toolResult") {
+        // Attach result to matching tool_call
+        const callId = (msg.toolCallId as string) ?? "";
+        const toolName = (msg.toolName as string) ?? "";
+        const resultContent = msg.content as Array<Record<string, unknown>> | undefined;
+
+        let resultText = "";
+        if (Array.isArray(resultContent)) {
+          for (const block of resultContent) {
+            if (block.type === "text") {
+              resultText += (block.text as string) ?? "";
+            }
+          }
+        }
+
+        // Truncate result for display
+        if (resultText.length > 300) {
+          resultText = resultText.slice(0, 300) + "...";
+        }
+
+        // Find matching tool call event
+        const matchIdx = toolCallIndex.get(callId);
+        if (matchIdx !== undefined && events[matchIdx]) {
+          events[matchIdx].result = resultText;
+        } else if (resultText && toolName) {
+          // Fallback: find last tool_call with matching name that has no result
+          for (let k = events.length - 1; k >= 0; k--) {
+            if (events[k].type === "tool_call" && events[k].tool === toolName && !events[k].result) {
+              events[k].result = resultText;
+              break;
+            }
+          }
+        }
+      }
+      continue;
+    }
+
+    // ── agent_end — extract final cost/token summary ──
+    if (eventType === "agent_end") {
+      const costStr = totalCost > 0 ? `$${totalCost.toFixed(4)}` : "";
+      const tokenStr = totalInput + totalOutput > 0
+        ? `${totalInput} in / ${totalOutput} out`
+        : "";
+      const parts = [costStr, tokenStr].filter(Boolean);
+
+      events.push({
+        type: "info",
+        index: 0,
+        progressPercent: 0,
+        content: parts.length > 0
+          ? `Agent complete — ${parts.join(", ")}`
+          : "Agent complete",
+      });
+      continue;
+    }
+  }
+
+  // Assign indices and progress
+  for (let idx = 0; idx < events.length; idx++) {
+    events[idx].index = idx;
+  }
+
+  // Progress: phase-based (same as Goose parser) + tool-based within agent phase
+  let currentPhasePercent = 0;
+  let agentToolsSeen = 0;
+  for (const ev of events) {
+    if (ev.type === "phase_marker") {
+      if (ev.phase === "cloning") currentPhasePercent = 5;
+      else if (ev.phase === "agent") currentPhasePercent = 10;
+      else if (ev.phase === "committing") currentPhasePercent = 85;
+      else if (ev.phase === "pushing") currentPhasePercent = 92;
+      ev.progressPercent = currentPhasePercent;
+    } else if (ev.type === "tool_call" && currentPhasePercent >= 10 && currentPhasePercent < 85) {
+      // Within agent phase: increment progress per tool call, cap at 80%
+      agentToolsSeen++;
+      currentPhasePercent = Math.min(10 + agentToolsSeen * 3, 80);
+      ev.progressPercent = currentPhasePercent;
+    } else {
+      ev.progressPercent = currentPhasePercent;
+    }
+  }
+
+  return events;
+}
+
 // ── Main parser ──────────────────────────────────────────
 
 export function parseRunLog(rawLog: string): RunEvent[] {
+  // Auto-detect pi-agent JSONL format
+  if (isPiAgentJsonl(rawLog)) {
+    return parsePiAgentJsonl(rawLog);
+  }
+
+  // Fall through to Goose regex parser
+  return parseGooseLog(rawLog);
+}
+
+/** Goose regex-based log parser (original implementation). */
+function parseGooseLog(rawLog: string): RunEvent[] {
   const lines = rawLog.split("\n");
   const events: RunEvent[] = [];
   let i = 0;
@@ -304,7 +653,7 @@ export function parseRunLog(rawLog: string): RunEvent[] {
       // Determine phase from command
       let phase: string | undefined;
       if (command.includes("git clone")) phase = "cloning";
-      else if (command.includes("goose run") || command.includes("AGENT_COMMAND")) phase = "agent";
+      else if (command.includes("goose run") || command.includes("pi -p") || command.includes("AGENT_COMMAND")) phase = "agent";
       else if (command.includes("git push")) phase = "pushing";
       else if (command.includes("git add") || command.includes("git commit")) phase = "committing";
 

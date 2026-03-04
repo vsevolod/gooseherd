@@ -125,9 +125,9 @@ async function resolveUrlPattern(
   deps: NodeDeps,
   logFile: string
 ): Promise<string | undefined> {
-  const pattern = nc.url_pattern;
+  const pattern = nc.url_pattern || deps.config.reviewAppUrlPattern;
   if (!pattern) {
-    await appendLog(logFile, "[deploy_preview] strategy 'url_pattern' requires 'url_pattern' in config\n");
+    await appendLog(logFile, "[deploy_preview] strategy 'url_pattern' requires 'url_pattern' in YAML config or REVIEW_APP_URL_PATTERN env var\n");
     return undefined;
   }
 

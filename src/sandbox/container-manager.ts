@@ -91,7 +91,13 @@ export class ContainerManager {
   async exec(
     containerId: string,
     command: string,
-    opts: { cwd?: string; login?: boolean; timeoutMs?: number; onStdout?: (chunk: string) => void; onStderr?: (chunk: string) => void } = {}
+    opts: {
+      cwd?: string;
+      login?: boolean;
+      timeoutMs?: number;
+      onStdout?: (chunk: string) => void;
+      onStderr?: (chunk: string) => void;
+    } = {}
   ): Promise<SandboxExecResult> {
     const container = this.docker.getContainer(containerId);
 
@@ -109,6 +115,21 @@ export class ContainerManager {
     return new Promise<SandboxExecResult>((resolve, reject) => {
       let settled = false;
       let timeoutHandle: NodeJS.Timeout | undefined;
+
+      const killAndResolve = async (reason: string, stream?: NodeJS.ReadableStream, stdoutSoFar?: string, stderrSoFar?: string) => {
+        if (settled) return;
+        settled = true;
+        if (timeoutHandle) clearTimeout(timeoutHandle);
+        if (stream && "destroy" in stream && typeof (stream as { destroy?: () => void }).destroy === "function") {
+          (stream as NodeJS.ReadableStream & { destroy: () => void }).destroy();
+        }
+        // Best-effort kill of processes inside the container
+        try {
+          const killExec = await container.exec({ Cmd: ["kill", "-9", "-1"] });
+          await killExec.start({});
+        } catch { /* container may already be gone */ }
+        resolve({ code: 137, stdout: stdoutSoFar ?? "", stderr: (stderrSoFar ?? "") + `\n[${reason}]\n` });
+      };
 
       exec.start({ hijack: true, stdin: false }, (err: Error | null, rawStream: NodeJS.ReadableStream | undefined) => {
         if (err || !rawStream) {
@@ -157,20 +178,10 @@ export class ContainerManager {
           reject(streamErr);
         });
 
-        // Timeout handling
+        // Hard timeout handling
         if (opts.timeoutMs && opts.timeoutMs > 0) {
-          timeoutHandle = setTimeout(async () => {
-            if (settled) return;
-            settled = true;
-            if ("destroy" in rawStream && typeof rawStream.destroy === "function") {
-              (rawStream as NodeJS.ReadableStream & { destroy: () => void }).destroy();
-            }
-            // Best-effort kill of processes inside the container
-            try {
-              const killExec = await container.exec({ Cmd: ["kill", "-9", "-1"] });
-              await killExec.start({});
-            } catch { /* container may already be gone */ }
-            resolve({ code: 137, stdout, stderr: stderr + "\n[timeout] command exceeded limit, killed\n" });
+          timeoutHandle = setTimeout(() => {
+            killAndResolve("timeout: command exceeded limit, killed", rawStream, stdout, stderr);
           }, opts.timeoutMs);
         }
       });
