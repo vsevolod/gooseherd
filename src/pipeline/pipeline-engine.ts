@@ -56,6 +56,7 @@ import { waitCiNode } from "./ci/wait-ci-node.js";
 import { fixCiNode } from "./ci/fix-ci-node.js";
 import { fixBrowserNode } from "./nodes/fix-browser.js";
 import { decideNextStepNode } from "./nodes/decide-next-step.js";
+import { isNonCodeFixFailure, type BrowserVerifyFailureCode } from "./quality-gates/browser-verify-routing.js";
 
 // ── Node handler registry ──
 
@@ -238,7 +239,12 @@ export class PipelineEngine {
     }
 
     const skipNodeIdSet = skipNodes && skipNodes.length > 0 ? new Set(skipNodes) : undefined;
-    const enableNodeIdSet = enableNodes && enableNodes.length > 0 ? new Set(enableNodes) : undefined;
+    let enableNodeIdSet = enableNodes && enableNodes.length > 0 ? new Set(enableNodes) : undefined;
+    if (enableNodeIdSet?.has("browser_verify")) {
+      // Recovery decision should follow browser_verify by default when browser verify is explicitly enabled.
+      enableNodeIdSet.add("decide_recovery");
+      await appendLog(logFile, "[pipeline] auto-enable: decide_recovery (browser_verify enabled)\n");
+    }
 
     let result;
     try {
@@ -367,15 +373,36 @@ export class PipelineEngine {
 
         // Support dynamic node skipping from decision nodes
         const dynamicSkips = result.outputs["_skipNodes"];
+        const decisionReason = typeof result.outputs["decisionReason"] === "string"
+          ? result.outputs["decisionReason"] as string
+          : undefined;
         if (Array.isArray(dynamicSkips)) {
           if (!skipNodeIds) {
             skipNodeIds = new Set<string>();
           }
+          const added: string[] = [];
           for (const id of dynamicSkips) {
             if (typeof id === "string") {
               skipNodeIds.add(id);
+              added.push(id);
             }
           }
+          if (added.length > 0) {
+            await eventLogger?.emit("artifact", {
+              nodeId: node.id,
+              artifact: `dynamic_skip:${node.id}:${added.join(",")}`
+            });
+            await appendLog(
+              deps.logFile,
+              `[pipeline] dynamic skip from ${node.id}: ${added.join(", ")}${decisionReason ? ` — ${decisionReason}` : ""}\n`
+            );
+          }
+        }
+        if (decisionReason) {
+          await eventLogger?.emit("artifact", {
+            nodeId: node.id,
+            artifact: `decision_reason:${node.id}:${decisionReason.slice(0, 200)}`
+          });
         }
       }
 
@@ -478,12 +505,36 @@ export class PipelineEngine {
     const agentHandler = this.getHandler(loopConfig.agent_node);
     const onExhausted = loopConfig.on_exhausted ?? "fail_run";
     const warnings: string[] = [];
+    const browserFailureCode = ctx.get<BrowserVerifyFailureCode>("browserVerifyFailureCode");
 
     await appendLog(deps.logFile, `\n[pipeline] entering fix loop for ${failedNode.id} (max ${String(maxRounds)} rounds)\n`);
     await eventLogger?.emit("artifact", {
       nodeId: failedNode.id,
       artifact: `loop_start:${failedNode.id}:${loopConfig.agent_node}:${String(maxRounds)}`
     });
+
+    if (failedNode.action === "browser_verify" && isNonCodeFixFailure(browserFailureCode)) {
+      const warning = `browser_verify loop bypassed for ${browserFailureCode} — not a code-fix-first failure`;
+      await appendLog(deps.logFile, `[pipeline] ${warning}\n`);
+      await eventLogger?.emit("artifact", {
+        nodeId: failedNode.id,
+        artifact: `loop_bypassed:${failedNode.id}:${browserFailureCode}`
+      });
+      if (onExhausted === "complete_with_warning") {
+        warnings.push(warning);
+        return { outcome: "completed_with_warnings", steps: [], warnings };
+      }
+      return {
+        outcome: "failure",
+        steps: [{
+          nodeId: failedNode.id,
+          outcome: "failure",
+          durationMs: 0,
+          error: warning
+        }],
+        warnings
+      };
+    }
 
     // Store the last failure's raw output for the fix agent
     if (failedResult.rawOutput) {
@@ -623,6 +674,7 @@ export class PipelineEngine {
       if (failedNode.action === "browser_verify") {
         ctx.append("browserVerifyFailureHistory", {
           round: attempt,
+          code: ctx.get("browserVerifyFailureCode"),
           verdict: retryResult.outputs?.browserVerifyVerdictReason ?? retryResult.error,
           actionsPath: ctx.get("actionsPath"),
           timestamp: Date.now()

@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm, mkdir, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, mkdir, writeFile, readFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { PipelineEngine } from "../src/pipeline/pipeline-engine.js";
+import { ContextBag } from "../src/pipeline/context-bag.js";
 import type { AppConfig } from "../src/config.js";
 import type { RunRecord } from "../src/types.js";
+import type { NodeConfig, NodeResult } from "../src/pipeline/types.js";
 
 // ── Helpers ──
 
@@ -60,12 +62,56 @@ function makeConfig(overrides?: Partial<AppConfig>): AppConfig {
     observerSmartTriageTimeoutMs: 10000,
     browserVerifyEnabled: false,
     browserVerifyModel: "anthropic/claude-haiku-4-5",
+    browserVerifyExecutionModel: undefined,
+    browserVerifyMaxSteps: 15,
+    browserVerifyExecTimeoutMs: 300_000,
     ciWaitEnabled: false,
     ciPollIntervalSeconds: 30,
     ciPatienceTimeoutSeconds: 300,
     ciMaxWaitSeconds: 1800,
     ciCheckFilter: [],
     ciMaxFixRounds: 2,
+    defaultLlmModel: "openrouter/z-ai/glm-5",
+    planTaskModel: "openrouter/z-ai/glm-5",
+    orchestratorModel: "openai/gpt-4.1-mini",
+    orchestratorTimeoutMs: 180_000,
+    orchestratorWallClockTimeoutMs: 480_000,
+    openrouterApiKey: undefined,
+    anthropicApiKey: undefined,
+    openaiApiKey: undefined,
+    reviewAppUrlPattern: undefined,
+    screenshotEnabled: false,
+    dashboardToken: undefined,
+    teamChannelMap: new Map(),
+    observerSlackWatchedChannels: [],
+    observerSlackBotAllowlist: [],
+    observerGithubWatchedRepos: [],
+    observerGithubWebhookSecret: undefined,
+    observerSentryWebhookSecret: undefined,
+    sentryAuthToken: undefined,
+    sentryOrgSlug: undefined,
+    githubToken: undefined,
+    githubAppId: undefined,
+    githubAppPrivateKey: undefined,
+    githubAppInstallationId: undefined,
+    githubDefaultOwner: undefined,
+    localTestCommand: "",
+    cemsTeamId: undefined,
+    mcpExtensions: [],
+    piAgentExtensions: [],
+    openrouterProviderPreferences: undefined,
+    sandboxEnabled: false,
+    sandboxImage: "gooseherd/sandbox:default",
+    sandboxHostWorkPath: "",
+    sandboxCpus: 2,
+    sandboxMemoryMb: 4096,
+    supervisorEnabled: true,
+    supervisorRunTimeoutSeconds: 7200,
+    supervisorNodeStaleSeconds: 1800,
+    supervisorWatchdogIntervalSeconds: 30,
+    supervisorMaxAutoRetries: 1,
+    supervisorRetryCooldownSeconds: 60,
+    supervisorMaxRetriesPerDay: 20,
     ...overrides
   } as AppConfig;
 }
@@ -110,4 +156,100 @@ test("PipelineEngine: tryLoadPipelineOverride rejects invalid names", async (t) 
 test("PipelineEngine: unified pipeline is the single pipeline file", () => {
   const resolved = "pipelines/pipeline.yml";
   assert.equal(resolved, "pipelines/pipeline.yml");
+});
+
+test("PipelineEngine: auto-enables decide_recovery when browser_verify is enabled", async (t) => {
+  const tmpDir = await mkdtemp(path.join(os.tmpdir(), "pe-auto-enable-"));
+  const workDir = path.join(tmpDir, "work");
+  await mkdir(workDir, { recursive: true });
+  const pipelinePath = path.join(tmpDir, "pipeline.yml");
+  await writeFile(
+    pipelinePath,
+    [
+      "version: 1",
+      "name: test-pipeline",
+      "nodes:",
+      "  - id: classify_task",
+      "    type: deterministic",
+      "    action: classify_task"
+    ].join("\n"),
+    "utf8"
+  );
+  t.after(async () => { await rm(tmpDir, { recursive: true, force: true }); });
+
+  const run = makeRun({ id: "test-run-auto-enable" });
+  const config = makeConfig({ workRoot: workDir, dryRun: true });
+  const engine = new PipelineEngine(config);
+
+  const result = await engine.execute(
+    run,
+    async () => {},
+    pipelinePath,
+    undefined,
+    undefined,
+    ["browser_verify"]
+  );
+
+  const log = await readFile(result.logsPath, "utf8");
+  assert.ok(
+    log.includes("[pipeline] auto-enable: decide_recovery (browser_verify enabled)"),
+    "Expected execute() to auto-enable decide_recovery when browser_verify is requested"
+  );
+});
+
+test("PipelineEngine: bypasses browser_verify fix loop for non-code failure classes", async (t) => {
+  const tmpDir = await mkdtemp(path.join(os.tmpdir(), "pe-loop-bypass-"));
+  const workDir = path.join(tmpDir, "work");
+  await mkdir(workDir, { recursive: true });
+  const runDir = path.join(workDir, "test-run-loop-bypass");
+  await mkdir(runDir, { recursive: true });
+  const logFile = path.join(runDir, "run.log");
+  await writeFile(logFile, "", "utf8");
+  t.after(async () => { await rm(tmpDir, { recursive: true, force: true }); });
+
+  const config = makeConfig({ workRoot: workDir, dryRun: true });
+  const engine = new PipelineEngine(config);
+  const run = makeRun({ id: "test-run-loop-bypass" });
+  const ctx = new ContextBag();
+  ctx.set("browserVerifyFailureCode", "auth_required");
+
+  const failedNode: NodeConfig = {
+    id: "browser_verify",
+    type: "deterministic",
+    action: "browser_verify",
+    on_failure: {
+      action: "loop",
+      agent_node: "fix_browser",
+      max_rounds: 2,
+      on_exhausted: "complete_with_warning"
+    }
+  };
+  const failedResult: NodeResult = {
+    outcome: "failure",
+    error: "Browser verification failed"
+  };
+  const deps = {
+    config,
+    run,
+    logFile,
+    workRoot: config.workRoot,
+    onPhase: async () => {}
+  };
+
+  const loopResult = await (engine as any).handleLoopFailure(
+    failedNode,
+    failedResult,
+    ctx,
+    deps,
+    { version: 1, name: "test", nodes: [] }
+  );
+
+  assert.equal(loopResult.outcome, "completed_with_warnings");
+  assert.ok(
+    loopResult.warnings.some((w: string) => w.includes("loop bypassed") && w.includes("auth_required")),
+    "Expected a warning that the browser_verify loop was bypassed"
+  );
+
+  const log = await readFile(logFile, "utf8");
+  assert.ok(log.includes("browser_verify loop bypassed for auth_required"));
 });

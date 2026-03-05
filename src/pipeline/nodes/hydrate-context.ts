@@ -68,13 +68,14 @@ export async function hydrateContextNode(
     sections.push("---", "");
   }
 
+  const taskType = ctx.get<string>("taskType") ?? "chore";
+
   // Build repo summary for codebase awareness
-  const repoSummary = await buildRepoSummary(repoDir, deps.logFile);
+  const repoSummary = await buildRepoSummary(repoDir, deps.logFile, run.task);
   if (repoSummary) {
     sections.push("## Repository Context", "", repoSummary, "");
   }
 
-  const taskType = ctx.get<string>("taskType") ?? "chore";
   const implementationPlan = ctx.get<string>("implementationPlan");
 
   sections.push(
@@ -129,13 +130,18 @@ const CONVENTION_FILES = [
   "ruff.toml", ".editorconfig", "biome.json", ".stylelintrc*",
 ];
 
-export async function buildRepoSummary(repoDir: string, logFile: string): Promise<string | undefined> {
+export async function buildRepoSummary(repoDir: string, logFile: string, taskText?: string): Promise<string | undefined> {
   try {
+    const uiHeavyTask = isUiHeavyTask(taskText ?? "");
+    const treeCap = uiHeavyTask ? 70 : 40;
+    const readmeLineCap = uiHeavyTask ? 80 : 30;
+    const readmeCharCap = uiHeavyTask ? 1600 : 700;
+
     const parts: string[] = [];
 
-    // 1. Directory tree (maxdepth 2, capped at 40)
+    // 1. Directory tree (maxdepth 2, adaptive cap)
     const treeResult = await runShellCapture(
-      `find . -maxdepth 2 -type d ${EXCLUDE_ARGS} | head -40`,
+      `find . -maxdepth 2 -type d ${EXCLUDE_ARGS} | head -${String(treeCap)}`,
       { cwd: repoDir, logFile }
     );
     if (treeResult.code === 0 && treeResult.stdout.trim()) {
@@ -156,10 +162,10 @@ export async function buildRepoSummary(repoDir: string, logFile: string): Promis
       parts.push(`### Tech stack: ${[...new Set(detected)].join(", ")}`);
     }
 
-    // 3. README excerpt (first 30 lines, capped at 500 chars)
+    // 3. README excerpt (adaptive cap by task type)
     try {
       const readmeContent = await readFile(path.join(repoDir, "README.md"), "utf8");
-      const excerpt = readmeContent.split("\n").slice(0, 30).join("\n").slice(0, 500);
+      const excerpt = readmeContent.split("\n").slice(0, readmeLineCap).join("\n").slice(0, readmeCharCap);
       if (excerpt.trim()) {
         parts.push("### README excerpt", excerpt.trim());
       }
@@ -233,6 +239,11 @@ export function buildAgentsMd(
   repoSummary: string | undefined
 ): string {
   const parts: string[] = [];
+  const taskType = ctx.get<string>("taskType") ?? "chore";
+  const taskHints = extractTaskHints(run.task);
+  const failureCode = ctx.get<string>("browserVerifyFailureCode");
+  const failureReason = ctx.get<string>("browserVerifyVerdictReason");
+  const failureHistory = ctx.get<Array<{ round: number; verdict?: string; code?: string }>>("browserVerifyFailureHistory");
 
   parts.push("# AGENTS.md — Gooseherd Context");
   parts.push("");
@@ -242,8 +253,14 @@ export function buildAgentsMd(
   parts.push(`- Run ID: ${run.id}`);
   parts.push(`- Repository: ${run.repoSlug}`);
   parts.push(`- Base branch: ${run.baseBranch}`);
-  const taskType = ctx.get<string>("taskType") ?? "chore";
   parts.push(`- Task type: ${taskType}`);
+  parts.push(`- Task summary: ${truncateSingleLine(run.task, 320)}`);
+  if (taskHints.routes.length > 0) {
+    parts.push(`- Route hints: ${taskHints.routes.join(", ")}`);
+  }
+  if (taskHints.authRequiredLikely) {
+    parts.push("- Auth likely required: yes (login/signup flows may be necessary for verification)");
+  }
   parts.push("");
 
   // CEMS memories (from onPromptEnrich hooks)
@@ -261,6 +278,38 @@ export function buildAgentsMd(
     parts.push("## Project Conventions");
     parts.push("");
     parts.push(repoSummary);
+    parts.push("");
+  }
+
+  if (failureCode || failureReason || (failureHistory && failureHistory.length > 0)) {
+    parts.push("## Recovery Memory");
+    parts.push("");
+    if (failureCode) {
+      parts.push(`- Latest browser verification failure class: \`${failureCode}\``);
+    }
+    if (failureReason) {
+      parts.push(`- Latest failure reason: ${truncateSingleLine(failureReason, 260)}`);
+    }
+    if (failureHistory && failureHistory.length > 0) {
+      const recent = failureHistory.slice(-3);
+      for (const item of recent) {
+        parts.push(`- Prior round ${String(item.round)}: ${item.code ? `[${item.code}] ` : ""}${truncateSingleLine(item.verdict ?? "unknown", 160)}`);
+      }
+    }
+    parts.push("");
+  }
+
+  if (taskHints.authRequiredLikely || taskHints.uiVerificationLikely) {
+    parts.push("## Verification Guidance");
+    parts.push("");
+    if (taskHints.authRequiredLikely) {
+      parts.push("- If verification is blocked by login and no credentials are provided, use signup when available.");
+      parts.push("- Do not guess random credentials unless explicitly instructed.");
+    }
+    if (taskHints.uiVerificationLikely) {
+      parts.push("- For UI tasks, verify rendered output in browser-visible routes before broad refactors.");
+    }
+    parts.push("- If the blocker is auth/provider/runtime related, do not patch unrelated application code.");
     parts.push("");
   }
 
@@ -300,4 +349,27 @@ async function getParentDiff(repoDir: string, logFile: string): Promise<string |
   } catch {
     return undefined;
   }
+}
+
+function isUiHeavyTask(task: string): boolean {
+  return /(ui|page|view|visual|browser|screenshot|css|html|slim|erb|frontend|layout)/i.test(task);
+}
+
+function truncateSingleLine(value: string, max: number): string {
+  const normalized = value.replace(/\s+/g, " ").trim();
+  if (normalized.length <= max) return normalized;
+  return normalized.slice(0, max) + "...";
+}
+
+function extractTaskHints(task: string): { routes: string[]; authRequiredLikely: boolean; uiVerificationLikely: boolean } {
+  const routes = new Set<string>();
+  const routeMatches = task.match(/\/[a-z0-9_/-]+/gi) ?? [];
+  for (const route of routeMatches) {
+    if (!/^\/(tmp|var|usr|etc|bin|dev|proc|sys)\b/i.test(route)) {
+      routes.add(route);
+    }
+  }
+  const authRequiredLikely = /(login|sign in|signup|sign up|authenticated|user edit|account|devise)/i.test(task);
+  const uiVerificationLikely = /(browser|screenshot|visual|ui|homepage|page|render)/i.test(task);
+  return { routes: [...routes].slice(0, 6), authRequiredLikely, uiVerificationLikely };
 }

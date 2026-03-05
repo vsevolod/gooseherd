@@ -3,6 +3,7 @@ import path from "node:path";
 import type { NodeConfig, NodeResult, NodeDeps } from "../types.js";
 import type { ContextBag } from "../context-bag.js";
 import { runShell, runShellCapture, shellEscape, renderTemplate, appendLog, mapToContainerPath, buildMcpFlags, buildPiExtensionFlags } from "../shell.js";
+import { isNonCodeFixFailure, type BrowserVerifyFailureCode } from "../quality-gates/browser-verify-routing.js";
 
 /**
  * Fix Browser node: "fat" agent node that fixes browser verification failures.
@@ -28,10 +29,16 @@ export async function fixBrowserNode(
 
   // Read browser verify failure context
   const verdictReason = ctx.get<string>("browserVerifyVerdictReason") ?? "Browser verification failed";
+  const failureCode = ctx.get<BrowserVerifyFailureCode>("browserVerifyFailureCode");
   const domFindings = ctx.get<string[]>("browserVerifyDomFindings") ?? [];
   const reviewAppUrl = ctx.get<string>("reviewAppUrl") ?? "";
   const task = run.task;
   const changedFiles = ctx.get<string[]>("changedFiles") ?? [];
+
+  if (isNonCodeFixFailure(failureCode)) {
+    await appendLog(logFile, `[browser:fix] skip: failure class '${failureCode}' is not code-fix-first\n`);
+    return { outcome: "failure", error: `Browser failure ${failureCode} should not run fix_browser` };
+  }
 
   // Read CDP artifacts for richer fix context
   const actionsPath = ctx.get<string>("actionsPath");
@@ -67,7 +74,7 @@ export async function fixBrowserNode(
   // Build fix prompt
   const fixPrompt = buildBrowserFixPrompt(
     task, verdictReason, domFindings, changedFiles, reviewAppUrl,
-    agentActions, consoleErrors, lastVisitedUrl, failureHistory
+    agentActions, consoleErrors, lastVisitedUrl, failureHistory, failureCode
   );
 
   // Write fix prompt to disk for the agent
@@ -158,7 +165,8 @@ export function buildBrowserFixPrompt(
   agentActions?: Array<{ type: string; reasoning?: string; pageUrl?: string }>,
   consoleErrors?: Array<{ level: string; text: string }>,
   lastVisitedUrl?: string,
-  failureHistory?: Array<{ round: number; verdict?: string }>
+  failureHistory?: Array<{ round: number; verdict?: string }>,
+  failureCode?: BrowserVerifyFailureCode
 ): string {
   const parts: string[] = [
     "# Browser Verification Fix Required\n",
@@ -169,6 +177,10 @@ export function buildBrowserFixPrompt(
 
   if (lastVisitedUrl) {
     parts.push(`### Last Visited URL\nThe browser was on \`${lastVisitedUrl}\` when the verification failed.\n`);
+  }
+
+  if (failureCode) {
+    parts.push(`### Failure Class\n\`${failureCode}\`\n`);
   }
 
   if (agentActions && agentActions.length > 0) {

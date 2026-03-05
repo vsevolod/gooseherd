@@ -2637,6 +2637,15 @@ function dashboardHtml(config: AppConfig): string {
           } else if (artifact.indexOf('loop_exhausted:') === 0) {
             var exhaustedParts = artifact.split(':');
             lines.push(ts + '  \u274C retry loop exhausted ' + (exhaustedParts[1] || '') + ' after ' + (exhaustedParts[2] || '?') + ' rounds');
+          } else if (artifact.indexOf('loop_bypassed:') === 0) {
+            var bypassParts = artifact.split(':');
+            lines.push(ts + '  \u23ED retry loop bypassed ' + (bypassParts[1] || '') + ' (' + (bypassParts[2] || 'unknown') + ')');
+          } else if (artifact.indexOf('dynamic_skip:') === 0) {
+            var skipParts = artifact.split(':');
+            lines.push(ts + '  \u{1F9E0} dynamic skip from ' + (skipParts[1] || '') + ' → ' + (skipParts[2] || ''));
+          } else if (artifact.indexOf('decision_reason:') === 0) {
+            var reasonParts = artifact.split(':');
+            lines.push(ts + '  \u{1F4A1} decision ' + (reasonParts[1] || '') + ': ' + (reasonParts.slice(2).join(':') || ''));
           }
         } else if (evt.type === 'error') {
           lines.push(ts + '  \u274C ' + (evt.error || ''));
@@ -3085,12 +3094,14 @@ function dashboardHtml(config: AppConfig): string {
       }
       el.chatCard.style.display = '';
       var threadMsgCount = 0;
+      var conversationAvailable = true;
       try {
         var [chainData, conversationData] = await Promise.all([
           fetchJson('/api/runs/' + encodeURIComponent(state.selectedId) + '/chain'),
           fetchJson('/api/runs/' + encodeURIComponent(state.selectedId) + '/conversation').catch(function() { return { messages: [] }; }),
         ]);
         var chain = chainData.chain || [];
+        conversationAvailable = conversationData.available !== false;
         var threadMessages = conversationData.messages || [];
         threadMsgCount = threadMessages.length;
         el.chatHistory.innerHTML = '';
@@ -3160,6 +3171,12 @@ function dashboardHtml(config: AppConfig): string {
 
             el.chatHistory.appendChild(bubble);
           });
+        } else if (!conversationAvailable) {
+          var unavailable = document.createElement('div');
+          unavailable.className = 'chat-time';
+          unavailable.style.margin = '8px 0 2px';
+          unavailable.textContent = 'Thread Q/A unavailable: conversation memory source is not attached for this process.';
+          el.chatHistory.appendChild(unavailable);
         }
 
         el.chatHistory.scrollTop = el.chatHistory.scrollHeight;
@@ -3173,6 +3190,8 @@ function dashboardHtml(config: AppConfig): string {
       var baseStatus = canContinue ? 'Ready for follow-up instructions.' : (selectedRun ? 'Waiting for run to finish...' : '');
       if (threadMsgCount > 0) {
         baseStatus += ' ' + threadMsgCount + ' thread messages visible.';
+      } else if (!conversationAvailable) {
+        baseStatus += ' Thread Q/A unavailable in this process.';
       }
       el.chatStatus.textContent = baseStatus;
     }

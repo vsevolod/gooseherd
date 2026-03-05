@@ -23,6 +23,9 @@ Respond ONLY with a JSON object:
 }
 
 ## Decision guidelines:
+- browserVerifyFailureCode=provider_mismatch|auth_required|auth_action_blocked|signup_failed means this is likely NOT a code-change bug.
+- For auth/provider failures, prefer skipping fix_browser and keep browser_verify enabled for strategy retries or explicit warning.
+- For feature_not_found, code fix may still be required.
 - If browser verification failed due to auth issues (login redirect, access denied), DO NOT skip browser_verify — the auth handling should retry.
 - If browser verification failed due to the feature genuinely not being visible, and fix_browser has already been tried, consider whether another fix attempt would help.
 - If the failure pattern is repeating (same verdict across rounds), suggest skipping browser_verify to avoid wasting resources.
@@ -43,7 +46,10 @@ export async function decideNextStepNode(
   const nc = nodeConfig.config as Record<string, unknown> | undefined;
 
   // Resolve model from node config or default
-  const model = (nc?.["model"] as string) ?? "openai/gpt-4.1-mini";
+  const configuredModel = (nc?.["model"] as string) ?? "z-ai/glm-5";
+  const model = normalizeOpenRouterModel(configuredModel);
+  const configuredFallbackModel = (nc?.["fallback_model"] as string) ?? "openai/gpt-4.1-mini";
+  const fallbackModel = normalizeOpenRouterModel(configuredFallbackModel);
 
   // Build state summary from context
   const contextKeys = Array.isArray(nc?.["context_keys"])
@@ -66,25 +72,17 @@ export async function decideNextStepNode(
   ].join("\n");
 
   // Resolve API key
-  const apiKey = deps.config.openrouterApiKey
-    ?? deps.config.openaiApiKey
-    ?? deps.config.anthropicApiKey;
+  const apiKey = deps.config.openrouterApiKey;
 
   if (!apiKey) {
-    await appendLog(logFile, "[decide] no API key available, skipping decision\n");
+    await appendLog(logFile, "[decide] OPENROUTER_API_KEY missing, skipping decision\n");
     return { outcome: "success", outputs: {} };
   }
 
   const llmConfig: LLMCallerConfig = { apiKey, defaultModel: model, defaultTimeoutMs: 15_000, providerPreferences: deps.config.openrouterProviderPreferences };
 
   try {
-    const { parsed } = await callLLMForJSON<DecisionOutput>(llmConfig, {
-      system: DECISION_SYSTEM_PROMPT,
-      userMessage,
-      maxTokens: 256,
-      timeoutMs: 15_000,
-      model
-    });
+    const { parsed } = await requestDecision(llmConfig, userMessage, model);
 
     const skipNodes = Array.isArray(parsed.skipNodes)
       ? parsed.skipNodes.filter(s => typeof s === "string")
@@ -102,8 +100,60 @@ export async function decideNextStepNode(
       }
     };
   } catch (err) {
-    const msg = err instanceof Error ? err.message : "unknown";
-    await appendLog(logFile, `[decide] LLM call failed: ${msg}, continuing without skipping\n`);
+    const firstError = err instanceof Error ? err.message : "unknown";
+    if (fallbackModel && fallbackModel !== model) {
+      try {
+        await appendLog(logFile, `[decide] primary model failed (${model}): ${firstError}; retrying with fallback ${fallbackModel}\n`);
+        const { parsed } = await requestDecision(llmConfig, userMessage, fallbackModel);
+
+        const skipNodes = Array.isArray(parsed.skipNodes)
+          ? parsed.skipNodes.filter(s => typeof s === "string")
+          : [];
+        const reasonBase = typeof parsed.reason === "string" ? parsed.reason : "No reason provided";
+        const reason = `${reasonBase} (fallback:${fallbackModel})`;
+        await appendLog(logFile, `[decide] fallback decision: skip=[${skipNodes.join(",")}] reason="${reason}"\n`);
+        logInfo("Decision node fallback", { skipNodes, reason, fallbackModel });
+
+        return {
+          outcome: "success",
+          outputs: {
+            _skipNodes: skipNodes,
+            decisionReason: reason
+          }
+        };
+      } catch (fallbackErr) {
+        const msg = fallbackErr instanceof Error ? fallbackErr.message : "unknown";
+        await appendLog(
+          logFile,
+          `[decide] fallback LLM call failed: ${msg} (primary error: ${firstError}), continuing without skipping\n`
+        );
+        return { outcome: "success", outputs: {} };
+      }
+    }
+
+    await appendLog(logFile, `[decide] LLM call failed: ${firstError}, continuing without skipping\n`);
     return { outcome: "success", outputs: {} };
   }
+}
+
+function normalizeOpenRouterModel(model: string): string {
+  const trimmed = model.trim();
+  if (trimmed.toLowerCase().startsWith("openrouter/")) {
+    return trimmed.slice("openrouter/".length);
+  }
+  return trimmed;
+}
+
+async function requestDecision(
+  llmConfig: LLMCallerConfig,
+  userMessage: string,
+  model: string
+): Promise<{ parsed: DecisionOutput }> {
+  return callLLMForJSON<DecisionOutput>(llmConfig, {
+    system: DECISION_SYSTEM_PROMPT,
+    userMessage,
+    maxTokens: 256,
+    timeoutMs: 15_000,
+    model
+  });
 }

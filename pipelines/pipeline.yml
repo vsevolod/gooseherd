@@ -125,11 +125,14 @@ nodes:
     type: conditional
     action: decide_next_step
     enabled: false
-    if: "ctx.browserVerifyVerdictReason != ''"
+    if: "ctx.browserVerifyFailureCode"
     config:
-      model: openai/gpt-4.1-mini
+      model: z-ai/glm-5
+      fallback_model: openai/gpt-4.1-mini
       context_keys:
+        - browserVerifyFailureCode
         - browserVerifyVerdictReason
+        - browserVerifyAuthSignals
         - browserVerifyDomFindings
         - browserVerifyFailureHistory
         - changedFiles

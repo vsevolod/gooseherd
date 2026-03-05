@@ -94,14 +94,16 @@ export function buildSmokeCheck(
 export function aggregateChecks(checks: BrowserCheck[]): BrowserVerifyResult {
   const featureCheck = checks.find(c => c.name === "feature_verification");
   const featurePassed = featureCheck?.passed === true;
+  const featureAuthBlocked = featureCheck?.passed === false
+    && /auth|login|sign in|sign up|without access to the authenticated|unable to log in|blocked/i.test(featureCheck.details);
 
   const errors: string[] = [];
   const warnings: string[] = [];
 
   for (const c of checks) {
     if (c.passed) continue;
-    if (c.name === "accessibility" && featurePassed) {
-      // Demote accessibility to warning when the feature itself passed
+    if (c.name === "accessibility" && (featurePassed || featureAuthBlocked)) {
+      // Demote accessibility to warning when feature passed OR auth flow blocked verification.
       warnings.push(`${c.name}: ${c.details}`);
     } else {
       errors.push(`${c.name}: ${c.details}`);
@@ -153,11 +155,10 @@ Respond with EXACTLY this JSON format (no markdown fences):
 {"passed": true/false, "confidence": "high"/"medium"/"low", "reasoning": "1-2 sentence explanation"}
 
 Guidelines:
-- PASSED = the screenshot or DOM results confirm the change was made
+- PASSED = the screenshot confirms the change was made on the correct page
 - FAILED = the evidence shows the change is missing, broken, or incorrect
-- DOM results (get_count, get_text, is_visible) are MORE RELIABLE than visual checks for small elements — trust them
-- If DOM shows element exists (count > 0) but screenshot doesn't clearly show it, PASS with high confidence
-- If the change is to a part of the page not visible in the screenshot and no DOM data, mark confidence "low" and pass=true with a note
+- CRITICAL: If the screenshot shows a login page, signup page, or authentication form, the verification FAILED — the target page was never reached
+- If the change is to a part of the page not visible in the screenshot, mark confidence "low" and pass=true with a note
 - Focus on what the task asked for — ignore unrelated page content
 - Be concise and specific in your reasoning`;
 

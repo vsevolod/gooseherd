@@ -62,6 +62,11 @@ Every run executes a single unified pipeline. You control what runs by skipping 
 - UI/visual changes → enableNodes: ["deploy_preview", "browser_verify", "summarize_changes", "upload_screenshot", "decide_recovery"]
 - Complex multi-file changes → enableNodes: ["plan_task"]
 
+### Browser verification auth guidance:
+- If the target page is auth-gated and the user did not provide credentials, verification can still proceed via signup.
+- Do not ask for credentials by default when signup/self-registration is explicitly possible.
+- If signup is blocked (captcha/email verification), mention that blocker clearly in the thread.
+
 ### When to skip nodes:
 - README/docs only → skipNodes: ["diff_gate", "security_scan", "wait_ci"]
 - Config/non-code → skipNodes: ["local_test", "validate"]

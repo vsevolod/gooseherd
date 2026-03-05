@@ -462,6 +462,18 @@ describe("Browser Verify", () => {
     assert.equal(result.errors.length, 2);
   });
 
+  test("aggregateChecks: auth-blocked feature fail demotes accessibility noise", () => {
+    const result = aggregateChecks([
+      { name: "smoke_test", passed: true, details: "HTTP 200" },
+      { name: "accessibility", passed: false, details: "289 accessibility errors" },
+      { name: "feature_verification", passed: false, details: "[high] Without access to the authenticated page, unable to verify feature." }
+    ]);
+    assert.equal(result.overallPass, false);
+    // feature error remains blocking, accessibility becomes warning-only
+    assert.equal(result.errors.length, 2);
+    assert.ok(result.errors[0].includes("feature_verification") || result.errors[1].includes("feature_verification"));
+  });
+
   test("aggregateChecks: smoke fail always blocks regardless of feature", () => {
     const result = aggregateChecks([
       { name: "smoke_test", passed: false, details: "HTTP 502" },

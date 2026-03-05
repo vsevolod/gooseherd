@@ -100,6 +100,7 @@ const envSchema = z.object({
   BROWSER_VERIFY_MODEL: z.string().optional(),
   BROWSER_VERIFY_EXECUTION_MODEL: z.string().optional(),
   BROWSER_VERIFY_MAX_STEPS: z.string().optional(),
+  BROWSER_VERIFY_EXEC_TIMEOUT_MS: z.string().optional(),
 
   CI_WAIT_ENABLED: z.string().optional(),
   CI_POLL_INTERVAL_SECONDS: z.string().optional(),
@@ -261,6 +262,7 @@ export interface AppConfig {
   browserVerifyModel: string;
   browserVerifyExecutionModel?: string;
   browserVerifyMaxSteps: number;
+  browserVerifyExecTimeoutMs: number;
 
   ciWaitEnabled: boolean;
   ciPollIntervalSeconds: number;
@@ -466,6 +468,7 @@ export function loadConfig(): AppConfig {
     browserVerifyModel: parsed.BROWSER_VERIFY_MODEL?.trim() || parsed.DEFAULT_LLM_MODEL?.trim() || "anthropic/claude-sonnet-4-6",
     browserVerifyExecutionModel: parsed.BROWSER_VERIFY_EXECUTION_MODEL?.trim() || undefined,
     browserVerifyMaxSteps: parseInteger(parsed.BROWSER_VERIFY_MAX_STEPS, 15),
+    browserVerifyExecTimeoutMs: parseInteger(parsed.BROWSER_VERIFY_EXEC_TIMEOUT_MS, 300_000),
 
     ciWaitEnabled: parseBoolean(parsed.CI_WAIT_ENABLED, false),
     ciPollIntervalSeconds: parseInteger(parsed.CI_POLL_INTERVAL_SECONDS, 30),

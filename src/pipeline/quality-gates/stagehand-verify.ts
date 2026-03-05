@@ -39,11 +39,37 @@ Determine whether the requested feature/change was implemented correctly on the 
 3. Use JavaScript evaluation for precise DOM queries: element text, counts, visibility, computed styles.
 4. Take screenshots to capture visual evidence.
 
+## Pre-Done Verification Checklist (MANDATORY before calling done with passed=true)
+Before reporting PASSED, you MUST verify ALL of the following:
+1. **URL check**: Confirm you are on the correct page — check the current URL matches the target page, NOT a login/signup/error page.
+2. **DOM evidence**: Use JavaScript evaluation to confirm the expected DOM element or text actually exists on the page.
+3. **Form verification**: If you submitted any forms (login, signup, etc.), verify they succeeded — check for error messages, check the URL changed from the form page.
+4. **Requirement coverage**: Verify each specific requirement from the task description has evidence.
+If ANY requirement is unmet or uncertain, you MUST report FAILED honestly. Do NOT fabricate success.
+
 ## Authentication
 If the page shows a login/signup form instead of the expected feature:
 1. Look for "Sign in" or "Log in" links.
-2. Use provided test credentials, or try: admin@admin.com / password
-3. After login, navigate to the target page.
+2. If test credentials are provided, use them to sign in.
+3. If no credentials are provided and signup is available, create a temporary account via signup.
+4. Never use placeholder emails like @example.com unless explicitly instructed.
+5. If signup returns validation errors, inspect the exact error text and retry with corrected inputs.
+6. After authentication, navigate to the target page.
+7. If blocked by CAPTCHA/email verification or disabled inputs, report the specific blocker.
+
+## Error Recovery
+- After form submission, check page for error messages (red text, .error, .alert, .flash elements).
+- If signup fails: read the exact error text, switch to backup email, retry up to 3 times.
+- If login fails: verify credentials were actually submitted (not just filled), check for POST requests.
+- If stuck on auth wall after multiple attempts: report auth_required — do NOT fabricate success.
+
+## Loop Detection
+- If the same action fails 2-3 times, try a different approach.
+- Track what you have tried — do not repeat failed approaches.
+- If you are stuck on the same page after 3+ actions, reassess your strategy.
+
+## Navigation Mandate
+If Navigation Hints are provided in the instruction, you MUST navigate to those pages to verify the change. If you cannot reach them after authentication attempts, report FAILED with the specific blocker.
 
 ## Evidence
 - Trust DOM evaluation results over visual impressions for text/element assertions.
@@ -143,7 +169,17 @@ export function buildInstruction(
   task: string,
   changedFiles: string[],
   credentials?: { email: string; password: string },
-  changeSummary?: string
+  changeSummary?: string,
+  authStrategy?: {
+    allowSignup?: boolean;
+    preferSignupWithoutCredentials?: boolean;
+  },
+  signupProfile?: {
+    fullName: string;
+    preferredEmail: string;
+    backupEmails: string[];
+    password: string;
+  }
 ): string {
   const fileList = changedFiles.length > 0
     ? changedFiles.map(f => `  - ${f}`).join("\n")
@@ -162,7 +198,19 @@ export function buildInstruction(
   }
 
   if (credentials) {
-    instruction += `\n\nTest account credentials: email="${credentials.email}", password="${credentials.password}". Use these to log in if you encounter a login form.`;
+    instruction += `\n\n## Authentication credentials\nUse these to log in: email="%email%", password="%password%".\nIMPORTANT: When filling login forms, use the variable syntax %email% and %password% as the values in fillForm — do NOT type literal email addresses.`;
+  } else if (authStrategy?.allowSignup) {
+    instruction += "\n\nNo test credentials were provided. If the target page requires authentication, use signup to create a temporary account and continue verification.";
+    if (authStrategy.preferSignupWithoutCredentials) {
+      instruction += "\nPrefer signup over guessing default credentials.";
+    }
+    if (signupProfile) {
+      instruction += `\n\n## Signup credentials (MUST USE — do NOT use @example.com)\nWhen filling signup forms, use these variable values:\n- Email field: use %signup_email% as the value\n- Password fields: use %signup_password% as the value\n- Name field (if present): use %signup_name% as the value\nIf the first email is rejected, use %backup_email_1%, then %backup_email_2%.`;
+      instruction += `\nThe actual values: email="${signupProfile.preferredEmail}", password="${signupProfile.password}"`;
+      instruction += "\nIMPORTANT: When calling fillForm, put %signup_email% in the value field, NOT a literal email. The system will substitute the actual email.";
+      instruction += "\nIf signup returns validation errors, read the exact inline error text and retry up to 3 times.";
+      instruction += "\nRetry policy: 1) if email invalid/taken, switch to %backup_email_1% then %backup_email_2%; 2) if password is too weak, strengthen password; 3) if form remains blocked, report blocker explicitly.";
+    }
   }
 
   instruction += `\n\nNavigate to the relevant page, interact with elements to test the feature, and determine whether the task was implemented correctly. Provide your verdict.`;
@@ -195,7 +243,18 @@ export async function runStagehandVerification(
   changeSummary?: string,
   baseURL?: string,
   executionModel?: string,
-  maxSteps?: number
+  maxSteps?: number,
+  executionTimeoutMs?: number,
+  authStrategy?: {
+    allowSignup?: boolean;
+    preferSignupWithoutCredentials?: boolean;
+  },
+  signupProfile?: {
+    fullName: string;
+    preferredEmail: string;
+    backupEmails: string[];
+    password: string;
+  }
 ): Promise<StagehandVerifyResult> {
   const screenshotsDir = path.join(runDir, "screenshots");
   await mkdir(screenshotsDir, { recursive: true });
@@ -312,7 +371,7 @@ export async function runStagehandVerification(
     await page.screenshot({ path: initialScreenshot, fullPage: true });
 
     // Build instruction and create agent
-    const instruction = buildInstruction(task, changedFiles, credentials, changeSummary);
+    const instruction = buildInstruction(task, changedFiles, credentials, changeSummary, authStrategy, signupProfile);
 
     // Build agent options:
     // - When using OpenRouter: don't pass model (use injected llmClient), but DO pass executionModel
@@ -334,17 +393,49 @@ export async function runStagehandVerification(
     const agent = stagehand.agent(agentOpts);
 
     const effectiveMaxSteps = maxSteps ?? 15;
-    await appendLog(logFile, `[gate:browser_verify] stagehand: executing agent (maxSteps=${String(effectiveMaxSteps)})\n`);
+    const effectiveExecutionTimeoutMs = executionTimeoutMs ?? 300_000;
+    await appendLog(
+      logFile,
+      `[gate:browser_verify] stagehand: executing agent (maxSteps=${String(effectiveMaxSteps)}, timeoutMs=${String(effectiveExecutionTimeoutMs)}, allowSignup=${String(authStrategy?.allowSignup ?? false)})\n`
+    );
 
-    // Execute with timeout via AbortSignal (120s total)
+    // Build variables for form filling — these are injected into fillForm's value field
+    // so the model can use %email%, %password% etc. instead of guessing/hallucinating
+    const agentVariables: Record<string, { value: string; description: string }> = {};
+    if (credentials) {
+      agentVariables.email = { value: credentials.email, description: "Login email address" };
+      agentVariables.password = { value: credentials.password, description: "Login password" };
+    } else if (signupProfile) {
+      agentVariables.signup_email = { value: signupProfile.preferredEmail, description: "Email for signup form" };
+      agentVariables.signup_password = { value: signupProfile.password, description: "Password for signup form" };
+      agentVariables.signup_name = { value: signupProfile.fullName, description: "Full name for signup form" };
+      if (signupProfile.backupEmails.length > 0) {
+        agentVariables.backup_email_1 = { value: signupProfile.backupEmails[0]!, description: "Backup email if first is rejected" };
+      }
+      if (signupProfile.backupEmails.length > 1) {
+        agentVariables.backup_email_2 = { value: signupProfile.backupEmails[1]!, description: "Second backup email" };
+      }
+    }
+
+    // Execute with timeout via AbortSignal (configurable, defaults to 300s)
     const result = await agent.execute({
       instruction,
       maxSteps: effectiveMaxSteps,
       output: VerdictSchema,
-      signal: AbortSignal.timeout(120_000)
+      signal: AbortSignal.timeout(effectiveExecutionTimeoutMs),
+      ...(Object.keys(agentVariables).length > 0 ? { variables: agentVariables } : {})
     });
 
-    await appendLog(logFile, `[gate:browser_verify] stagehand: agent done — success=${String(result.success)}, completed=${String(result.completed)}, actions=${String(result.actions.length)}\n`);
+    // Capture final URL BEFORE anything else — this is ground truth
+    const finalUrl = page.url();
+    await appendLog(logFile, `[gate:browser_verify] stagehand: agent done — success=${String(result.success)}, completed=${String(result.completed)}, actions=${String(result.actions.length)}, finalUrl=${finalUrl}\n`);
+
+    // Hard check: is the browser stuck on an auth page?
+    const authPagePattern = /\/(login|signin|sign_in|signup|sign_up|users\/sign_in|users\/sign_up|register|auth)\b/i;
+    const stuckOnAuth = authPagePattern.test(new URL(finalUrl).pathname);
+    if (stuckOnAuth) {
+      await appendLog(logFile, `[gate:browser_verify] HARD FAIL: agent ended on auth page ${finalUrl} — overriding any verdict\n`);
+    }
 
     // Take final screenshot
     const finalScreenshot = path.join(screenshotsDir, "final.png");
@@ -363,7 +454,7 @@ export async function runStagehandVerification(
       ? { input: result.usage.input_tokens, output: result.usage.output_tokens }
       : undefined;
 
-    // Extract verdict — try structured output first, fall back to message parsing, then vision
+    // Step A: Extract agent's verdict — structured output first, then message parsing
     let verifyResult: VisualVerifyResult | undefined;
 
     if (result.output) {
@@ -383,7 +474,6 @@ export async function runStagehandVerification(
       }
     }
 
-    // Fallback: try to extract verdict JSON from agent's message text
     if (!verifyResult && result.message) {
       const extracted = extractJSON<{ passed: boolean; confidence: string; reasoning: string }>(result.message);
       if (extracted && typeof extracted.passed === "boolean") {
@@ -403,23 +493,50 @@ export async function runStagehandVerification(
       }
     }
 
-    // Last fallback: vision verdict on the screenshot
-    if (!verifyResult) {
-      await appendLog(logFile, "[gate:browser_verify] falling back to vision verdict\n");
-      const visionConfig: LLMCallerConfig = { apiKey, defaultModel: model, defaultTimeoutMs: 30_000 };
-      try {
-        verifyResult = await verifyFeatureVisually(
-          visionConfig,
-          finalScreenshot,
-          task,
-          changedFiles,
-          model,
-          domFindings.length > 0 ? domFindings : undefined
-        );
-      } catch (error) {
-        const msg = error instanceof Error ? error.message : "Unknown error";
-        await appendLog(logFile, `[gate:browser_verify] vision verdict failed: ${msg}\n`);
+    // Step B: Always run vision as independent cross-check
+    // CRITICAL: Do NOT pass domFindings here — they come from the agent's own reasoning
+    // and would poison the independent check. Vision must judge from screenshot alone.
+    const visionConfig: LLMCallerConfig = { apiKey, defaultModel: model, defaultTimeoutMs: 30_000 };
+    let visionVerdict: VisualVerifyResult | undefined;
+    try {
+      visionVerdict = await verifyFeatureVisually(
+        visionConfig,
+        finalScreenshot,
+        task,
+        changedFiles,
+        model
+      );
+      await appendLog(logFile, `[gate:browser_verify] vision cross-check: ${visionVerdict.passed ? "PASS" : "FAIL"} (${visionVerdict.confidence}) — ${visionVerdict.reasoning}\n`);
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : "Unknown error";
+      await appendLog(logFile, `[gate:browser_verify] vision cross-check failed: ${msg}\n`);
+    }
+
+    // Step C: Reconcile verdicts — hard checks first, then cross-check
+    if (stuckOnAuth) {
+      // Hard override: browser is on an auth page — verification definitively failed
+      verifyResult = {
+        passed: false,
+        confidence: "high",
+        reasoning: `Agent ended on auth page (${finalUrl}) — never reached the target page to verify the change`,
+        inputTokens: verifyResult?.inputTokens ?? 0,
+        outputTokens: verifyResult?.outputTokens ?? 0
+      };
+    } else if (verifyResult) {
+      // Agent produced a verdict — cross-check with vision
+      if (verifyResult.passed && visionVerdict && !visionVerdict.passed && visionVerdict.confidence !== "low") {
+        await appendLog(logFile, `[gate:browser_verify] OVERRIDE: agent claimed PASS but vision disagrees (${visionVerdict.confidence})\n`);
+        verifyResult = {
+          ...verifyResult,
+          passed: false,
+          confidence: visionVerdict.confidence,
+          reasoning: `Evidence contradiction: agent claimed PASS but vision says: ${visionVerdict.reasoning}`
+        };
       }
+    } else if (visionVerdict) {
+      // Agent failed to produce verdict — use vision as the verdict
+      verifyResult = visionVerdict;
+      await appendLog(logFile, "[gate:browser_verify] using vision verdict (agent produced no verdict)\n");
     }
 
     // Stop CDP captures and save BEFORE closing Stagehand (close kills CDP connection)

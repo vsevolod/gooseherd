@@ -140,7 +140,7 @@ function buildDeps(
 
     getConfig: async (key?: string) => {
       const safeKeys = [
-        "browserVerifyModel", "browserVerifyMaxSteps", "pipelineFile",
+        "browserVerifyModel", "browserVerifyMaxSteps", "browserVerifyExecTimeoutMs", "pipelineFile",
         "orchestratorModel", "planTaskModel", "agentTimeoutSeconds",
         "maxValidationRounds", "ciMaxFixRounds"
       ];
