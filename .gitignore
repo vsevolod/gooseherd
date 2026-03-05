@@ -6,3 +6,5 @@ data/runs.json
 *.log
 !tests/fixtures/*.log
 docker-compose.override.yml
+.work-live
+.data-live
