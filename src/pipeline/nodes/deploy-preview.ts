@@ -4,9 +4,9 @@
  * Exactly ONE strategy is configured per pipeline YAML (no fallback chain):
  *
  * - **url_pattern**: Construct URL from template using PR number, branch,
- *   or repo slug (e.g. `https://{{prNumber}}.stg.epicpxls.com`).
+ *   or repo slug (e.g. `https://{{prNumber}}.stg.example.com`).
  * - **github_deployment_api**: Poll GitHub deployment statuses for
- *   environment_url matching a pattern (Vercel, Netlify, Hubstaff review).
+ *   environment_url matching a pattern (Vercel, Netlify, review apps).
  * - **command**: Run a shell command and extract URL from stdout.
  *
  * Once a URL is obtained, polls it until it responds with any HTTP status.
@@ -15,7 +15,7 @@
 
 import type { NodeConfig, NodeResult, NodeDeps } from "../types.js";
 import type { ContextBag } from "../context-bag.js";
-import { runShellCapture, appendLog } from "../shell.js";
+import { runShellCapture, appendLog, sleep } from "../shell.js";
 import { parseRepoSlug } from "../../github.js";
 
 type Strategy = "url_pattern" | "github_deployment_api" | "command";
@@ -375,8 +375,4 @@ async function waitForUrlReady(
   }
 
   return { ready: false, elapsedMs: Date.now() - startTime, lastStatus };
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise(resolve => setTimeout(resolve, ms));
 }

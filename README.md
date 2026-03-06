@@ -1,223 +1,129 @@
 # [Gooseherd](https://goose-herd.com)
 
-Self-hosted AI coding agent orchestrator — herds [Goose](https://github.com/block/goose) agents via Slack and opens PRs.
+[![CI](https://github.com/chocksy/gooseherd/actions/workflows/ci.yml/badge.svg)](https://github.com/chocksy/gooseherd/actions/workflows/ci.yml)
+[![Docker](https://img.shields.io/badge/ghcr.io-gooseherd-blue)](https://github.com/chocksy/gooseherd/pkgs/container/gooseherd)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-In this first version it:
+Self-hosted AI coding agent orchestrator. Turn Slack messages into tested, reviewed PRs with pipeline automation, browser verification, and cost tracking.
 
-1. Accepts commands from Slack (Socket Mode, no public webhook needed).
-2. Enqueues a run with task + repo target.
-3. Clones repo, runs a configurable agent command (Goose-compatible template), and optional validation.
-4. Commits/pushes a branch and opens a GitHub PR (unless `DRY_RUN=true`).
-5. Reports live status back in Slack via an updatable run card (phase + elapsed + heartbeat).
-6. Exposes an optional local dashboard to inspect runs, logs, changed files, and operator feedback.
-7. Auto-recovers interrupted runs on restart by re-queuing them.
-
-## Architecture
-
-See **[docs/architecture.md](docs/architecture.md)** for the full system diagram — how the pipeline engine works, what each of the 18 node handlers does, how pipelines are composed from YAML (like GitHub Actions), and how the observer auto-trigger system works.
-
-## Why this project
-
-This is intentionally a low-infra build you can run locally or on one VM before Kubernetes/Temporal.
-
-## Command syntax
-
-Mention the bot in Slack:
-
-- `@gooseherd help`
-- `@gooseherd run owner/repo[@base-branch] | Fix flaky billing spec`
-- `@gooseherd status` or `@gooseherd status <run-id-or-prefix>`
-- `@gooseherd tail` or `@gooseherd tail <run-id-or-prefix>`
-- In an existing run thread: `@gooseherd <follow-up instruction>` (reuses repo from latest run in that thread)
-
-Note: command hint text is configurable via `SLACK_COMMAND_NAME` in `.env`.
-
-Examples:
-
-- `@gooseherd run hubstaff/hubstaff-server | Fix failing transferwise banner spec`
-- `@gooseherd run hubstaff/hubstaff-server@staging | Add guard for nil organization on billing page`
-- `@gooseherd run epiccoders/pxls@master | MVP dry run: tweak footer width`
-- Thread follow-up: `@gooseherd branch is master retry`
-- Thread follow-up: `@gooseherd base=master retry`
-
-## Quick start
-
-1. Copy env file and fill secrets:
+## Quick Start (Docker)
 
 ```bash
-cp .env.example .env
+docker pull ghcr.io/chocksy/gooseherd:latest
+cp .env.example .env   # edit with your tokens
+docker compose up -d
+open http://localhost:8787
 ```
 
-2. Install deps and run:
+## Quick Start (npm)
 
 ```bash
+git clone https://github.com/chocksy/gooseherd.git
+cd gooseherd
 npm install
+cp .env.example .env   # edit with your tokens
 npm run dev
+open http://localhost:8787
 ```
 
-3. In Slack, mention your bot with a `run` command.
+## How It Works
 
-4. (Optional) Open dashboard:
+1. **Command via Slack** — mention the bot with a task and target repo.
+2. **Pipeline runs** — clones repo, runs your AI agent, validates, commits, pushes.
+3. **PR opens** — with changed files, cost tracking, and optional browser verification.
 
-```bash
-open http://127.0.0.1:8787
+### Command Syntax
+
+```
+@gooseherd run owner/repo | Fix the flaky billing spec
+@gooseherd run owner/repo@staging | Add nil guard on billing page
+@gooseherd status
+@gooseherd tail
 ```
 
-### Local trigger (no Slack)
-
-Use terminal trigger for deterministic testing:
-
-```bash
-npm run local:trigger -- epiccoders/pxls@master "make footer full width"
+Thread follow-ups reuse the repo from the latest run in that thread:
+```
+@gooseherd retry
+@gooseherd base=main retry
 ```
 
-This writes state to `data/runs.json` and logs to `.work/<run-id>/run.log`.
-
-## Slack app setup (Socket Mode)
+## Slack App Setup
 
 1. Create app at https://api.slack.com/apps
-2. Enable **Socket Mode**.
-3. OAuth scopes (bot token):
-- `app_mentions:read`
-- `channels:history`
-- `chat:write`
-4. Install app to your Slack workspace.
+2. Enable **Socket Mode** (no public webhook needed).
+3. Add bot token scopes: `app_mentions:read`, `channels:history`, `chat:write`
+4. Install to your workspace.
 5. Copy tokens into `.env`:
-- `SLACK_BOT_TOKEN` (`xoxb-...`)
-- `SLACK_APP_TOKEN` (`xapp-...`)
-- `SLACK_SIGNING_SECRET`
+   - `SLACK_BOT_TOKEN` (`xoxb-...`)
+   - `SLACK_APP_TOKEN` (`xapp-...`)
+   - `SLACK_SIGNING_SECRET`
 
-## GitHub setup
+## GitHub Setup
 
-For `DRY_RUN=false`, provide `GITHUB_TOKEN` with repo write + PR permissions.
+Provide `GITHUB_TOKEN` with repo write + PR permissions (for `DRY_RUN=false`).
 
 Optional controls:
+- `REPO_ALLOWLIST=yourorg/yourrepo` — restrict which repos the bot can target
+- `GITHUB_DEFAULT_OWNER=yourorg` — default owner when only repo name is given
 
-- `REPO_ALLOWLIST=hubstaff/hubstaff-server`
-- `GITHUB_DEFAULT_OWNER=hubstaff`
+## Agent Configuration
 
-## Goose integration
+`AGENT_COMMAND_TEMPLATE` is fully configurable. Placeholders are shell-escaped:
 
-`AGENT_COMMAND_TEMPLATE` is fully configurable. Placeholders are shell-escaped for safety:
+| Placeholder | Description |
+|-------------|-------------|
+| `{{repo_dir}}` | Cloned repo directory |
+| `{{prompt_file}}` | Task file path |
+| `{{task_file}}` | Same as prompt_file |
+| `{{run_id}}` | Unique run identifier |
+| `{{repo_slug}}` | `owner/repo` |
 
-- `{{repo_dir}}`
-- `{{prompt_file}}` (same as task file)
-- `{{task_file}}`
-- `{{run_id}}`
-- `{{repo_slug}}`
-
-Default command uses `scripts/dummy-agent.sh` for safe testing.
-
-To switch to Goose, replace with your command wrapper, for example:
+Default uses `scripts/dummy-agent.sh` for safe testing. Switch to your agent:
 
 ```bash
+# Goose
 AGENT_COMMAND_TEMPLATE='cd {{repo_dir}} && goose run --no-session -i {{prompt_file}}'
+
+# pi-agent
+AGENT_COMMAND_TEMPLATE='cd {{repo_dir}} && pi -p @{{prompt_file}} --no-session --mode json'
 ```
-
-For non-interactive OpenRouter setup, set these env vars too:
-
-```bash
-OPENROUTER_API_KEY=...
-GOOSE_PROVIDER=openrouter
-GOOSE_MODEL=<openrouter-model-id>
-AGENT_TIMEOUT_SECONDS=1200
-AGENT_COMMAND_TEMPLATE='cd {{repo_dir}} && goose run --no-session --no-profile --with-builtin developer,todo --debug --max-turns 60 --max-tool-repetitions 6 --provider openrouter --model $GOOSE_MODEL -i {{prompt_file}}'
-```
-
-If your Goose CLI syntax differs, keep a wrapper script and point the template to it.
-
-Use `@gooseherd tail` (or `@gooseherd tail <run-id>`) to view recent in-progress logs directly in Slack.
-
-Runs now include a live status card in-thread. If a run is actively progressing, the card updates every heartbeat interval.
 
 ## Dashboard
 
-The built-in dashboard is useful when you want a Stripe-like run inspector without leaving local dev.
+Built-in run inspector at `http://localhost:8787`:
+- Live run status and phase tracking
+- Tail logs, changed files view
+- Run feedback (`+1/-1` + notes)
+- One-click retry for failed runs
+- Cost tracking per run
 
-- URL: `http://<DASHBOARD_HOST>:<DASHBOARD_PORT>`
-Features:
-- Runs list with live status/phase
-- Tail logs view
-- Changed files view
-- Run feedback capture (`👍/👎 + note`)
-- One-click retry for failed/completed runs
+## Local Trigger (No Slack)
 
-Relevant env vars:
+```bash
+npm run local:trigger -- yourorg/yourrepo@main "make footer full width"
+```
 
-- `SLACK_COMMAND_NAME=gooseherd`
-- `DASHBOARD_ENABLED=true|false`
-- `DASHBOARD_HOST=127.0.0.1`
-- `DASHBOARD_PORT=8787`
-- `SLACK_PROGRESS_HEARTBEAT_SECONDS=20`
+## Architecture
 
-## Branding
-
-Branding is fully configurable via the `APP_NAME` environment variable. Set `APP_NAME=Hubble` to run as "Hubble", or leave the default for "Gooseherd". Everything derives from this single variable: dashboard title, commit prefix, branch prefix, bot name, git author.
-
-## Workflow Files
-
-Multi-agent/validator workflow definitions are versioned under `workflows/`:
-
-- `workflows/gooseherd-team.workflow.yml`
-- `workflows/validators.workflow.yml`
-
-These files define stage ownership and validation gates (`check`, `build`, `test`) for repeatable delivery.
+See **[docs/architecture.md](docs/architecture.md)** for the full system diagram — pipeline engine, 19 node handlers, YAML pipeline composition, and the observer auto-trigger system.
 
 ## Testing
 
-Run the verification suite:
-
 ```bash
-npm run check
-npm run build
-npm test
+npm run check    # TypeScript type check
+npm run build    # Compile
+npm test         # Run test suite
 ```
 
-## Validation strategy for large Rails repos
-
-Set `VALIDATION_COMMAND` to a fast gate instead of full suite. Example:
-
+Or use the Makefile:
 ```bash
-VALIDATION_COMMAND='bash scripts/validate-fast-example.sh {{repo_dir}}'
+make test
 ```
 
-Use full matrix/coverage in CI after PR creation.
+## Contributing
 
-## Single VM deployment
+See [CONTRIBUTING.md](CONTRIBUTING.md).
 
-1. Provision Ubuntu VM.
-2. Run bootstrap:
+## License
 
-```bash
-bash scripts/bootstrap-vm.sh
-```
-
-3. Deploy service:
-
-```bash
-cp .env.example .env
-# fill .env
-npm install
-npm run build
-npm start
-```
-
-Or Docker:
-
-```bash
-docker compose up --build -d
-```
-
-## Known limitations
-
-- Single-process queue only (no distributed orchestration).
-- File-based state store.
-- No sandbox isolation yet (runs on host runtime).
-- No policy engine yet (repo/task restrictions are basic allowlists).
-
-## Next iteration
-
-1. Move run execution into ephemeral containers/VM workers.
-2. Add PostgreSQL for durable run state.
-3. Add policy checks for high-risk paths.
-4. Add staged validation profiles by risk level.
+[MIT](LICENSE)

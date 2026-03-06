@@ -14,26 +14,38 @@ import { appendLog } from "../shell.js";
 import { logInfo } from "../../logger.js";
 
 const DECISION_SYSTEM_PROMPT = `You are a pipeline orchestrator deciding what to do next.
-Given the current pipeline state and available actions, decide which nodes to skip and whether to modify the recovery approach.
+Given the current pipeline state, decide which nodes to skip and optionally jump to a different node.
 
 Respond ONLY with a JSON object:
 {
   "skipNodes": ["node_ids_to_skip"],
+  "goto": "node_id_to_jump_to_or_null",
   "reason": "one-line explanation of your decision"
 }
 
+Rules for "goto":
+- Set to a node ID to jump execution to that node (e.g. jump back to "implement" for a second pass).
+- Set to null or omit if execution should continue normally.
+- Only jump to nodes that exist in the available_nodes list.
+
 ## Decision guidelines:
+
+### Browser verification failures:
 - browserVerifyFailureCode=provider_mismatch|auth_required|auth_action_blocked|signup_failed means this is likely NOT a code-change bug.
-- For auth/provider failures, prefer skipping fix_browser and keep browser_verify enabled for strategy retries or explicit warning.
+- For auth/provider failures, prefer skipping fix_browser and keep browser_verify enabled for strategy retries.
 - For feature_not_found, code fix may still be required.
-- If browser verification failed due to auth issues (login redirect, access denied), DO NOT skip browser_verify — the auth handling should retry.
-- If browser verification failed due to the feature genuinely not being visible, and fix_browser has already been tried, consider whether another fix attempt would help.
-- If the failure pattern is repeating (same verdict across rounds), suggest skipping browser_verify to avoid wasting resources.
+- If the failure pattern is repeating (same verdict across rounds), suggest skipping browser_verify.
 - If the issue is clearly a CSS/layout problem, recommend retrying fix_browser.
-- Default to empty skipNodes (let everything run).`;
+
+### General pipeline decisions:
+- If validation passed but tests failed, consider jumping back to implement for a targeted fix.
+- If the task classification suggests docs-only changes but code changes were made, skip deploy_preview/browser_verify.
+- If scope_judge flagged the changes as out-of-scope, consider skipping push/create_pr.
+- Default to empty skipNodes and null goto (let everything run normally).`;
 
 interface DecisionOutput {
   skipNodes: string[];
+  goto?: string | null;
   reason: string;
 }
 
@@ -82,45 +94,53 @@ export async function decideNextStepNode(
   const llmConfig: LLMCallerConfig = { apiKey, defaultModel: model, defaultTimeoutMs: 15_000, providerPreferences: deps.config.openrouterProviderPreferences };
 
   try {
-    const { parsed } = await requestDecision(llmConfig, userMessage, model);
+    const { parsed, raw } = await requestDecision(llmConfig, userMessage, model);
 
     const skipNodes = Array.isArray(parsed.skipNodes)
       ? parsed.skipNodes.filter(s => typeof s === "string")
       : [];
+    const gotoTarget = typeof parsed.goto === "string" ? parsed.goto : undefined;
     const reason = typeof parsed.reason === "string" ? parsed.reason : "No reason provided";
 
-    await appendLog(logFile, `[decide] decision: skip=[${skipNodes.join(",")}] reason="${reason}"\n`);
-    logInfo("Decision node", { skipNodes, reason });
+    await appendLog(logFile, `[decide] decision: skip=[${skipNodes.join(",")}]${gotoTarget ? ` goto=${gotoTarget}` : ""} reason="${reason}"\n`);
+    logInfo("Decision node", { skipNodes, gotoTarget, reason });
 
-    return {
-      outcome: "success",
-      outputs: {
-        _skipNodes: skipNodes,
-        decisionReason: reason
-      }
+    const outputs: Record<string, unknown> = {
+      _skipNodes: skipNodes,
+      decisionReason: reason,
+      _tokenUsage_decide: { input: raw.inputTokens, output: raw.outputTokens, model: raw.model }
     };
+    if (gotoTarget) {
+      outputs["_goto"] = gotoTarget;
+    }
+
+    return { outcome: "success", outputs };
   } catch (err) {
     const firstError = err instanceof Error ? err.message : "unknown";
     if (fallbackModel && fallbackModel !== model) {
       try {
         await appendLog(logFile, `[decide] primary model failed (${model}): ${firstError}; retrying with fallback ${fallbackModel}\n`);
-        const { parsed } = await requestDecision(llmConfig, userMessage, fallbackModel);
+        const { parsed, raw } = await requestDecision(llmConfig, userMessage, fallbackModel);
 
         const skipNodes = Array.isArray(parsed.skipNodes)
           ? parsed.skipNodes.filter(s => typeof s === "string")
           : [];
+        const gotoTarget = typeof parsed.goto === "string" ? parsed.goto : undefined;
         const reasonBase = typeof parsed.reason === "string" ? parsed.reason : "No reason provided";
         const reason = `${reasonBase} (fallback:${fallbackModel})`;
-        await appendLog(logFile, `[decide] fallback decision: skip=[${skipNodes.join(",")}] reason="${reason}"\n`);
-        logInfo("Decision node fallback", { skipNodes, reason, fallbackModel });
+        await appendLog(logFile, `[decide] fallback decision: skip=[${skipNodes.join(",")}]${gotoTarget ? ` goto=${gotoTarget}` : ""} reason="${reason}"\n`);
+        logInfo("Decision node fallback", { skipNodes, gotoTarget, reason, fallbackModel });
 
-        return {
-          outcome: "success",
-          outputs: {
-            _skipNodes: skipNodes,
-            decisionReason: reason
-          }
+        const outputs: Record<string, unknown> = {
+          _skipNodes: skipNodes,
+          decisionReason: reason,
+          _tokenUsage_decide: { input: raw.inputTokens, output: raw.outputTokens, model: raw.model }
         };
+        if (gotoTarget) {
+          outputs["_goto"] = gotoTarget;
+        }
+
+        return { outcome: "success", outputs };
       } catch (fallbackErr) {
         const msg = fallbackErr instanceof Error ? fallbackErr.message : "unknown";
         await appendLog(
@@ -148,7 +168,7 @@ async function requestDecision(
   llmConfig: LLMCallerConfig,
   userMessage: string,
   model: string
-): Promise<{ parsed: DecisionOutput }> {
+): Promise<{ parsed: DecisionOutput; raw: import("../../llm/caller.js").LLMResponse }> {
   return callLLMForJSON<DecisionOutput>(llmConfig, {
     system: DECISION_SYSTEM_PROMPT,
     userMessage,

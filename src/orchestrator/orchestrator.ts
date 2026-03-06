@@ -20,7 +20,7 @@ function buildTools(deps: HandleMessageDeps): ToolDefinition[] {
           properties: {
             repo: {
               type: "string",
-              description: "Repository slug in owner/repo format (e.g. 'epiccoders/pxls')"
+              description: "Repository slug in owner/repo format (e.g. 'yourorg/yourrepo')"
             },
             task: {
               type: "string",
@@ -39,6 +39,10 @@ function buildTools(deps: HandleMessageDeps): ToolDefinition[] {
             continueFromThread: {
               type: "boolean",
               description: "Set to true to continue from the latest run in this thread (reuse branch). Use when the user wants follow-up changes."
+            },
+            pipeline: {
+              type: "string",
+              description: "Pipeline preset to use. Options: 'pipeline' (default, full), 'docs-only' (lightweight, no validation), 'ui-change' (with deploy preview + browser verify), 'hotfix' (minimal, fast), 'complex' (with planning + scope judge + extra validation). Omit to use the default."
             }
           },
           required: ["repo", "task"]
@@ -342,6 +346,7 @@ async function executeTask(
     ? (args["enableNodes"] as unknown[]).filter(s => typeof s === "string") as string[]
     : undefined;
   const continueFromThread = args["continueFromThread"] === true;
+  const pipeline = typeof args["pipeline"] === "string" ? args["pipeline"] : undefined;
 
   const continueFrom = continueFromThread && request.existingRunId
     ? request.existingRunId
@@ -351,7 +356,8 @@ async function executeTask(
     const run = await deps.enqueueRun(repo, task, {
       skipNodes,
       enableNodes,
-      continueFrom
+      continueFrom,
+      pipeline
     });
     runsQueued.push(run);
     const continuation = continueFrom ? ` (continuing from previous run)` : "";

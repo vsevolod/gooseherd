@@ -69,7 +69,7 @@ export async function summarizeChangesNode(
   try {
     const llmConfig: LLMCallerConfig = {
       apiKey: config.openrouterApiKey,
-      defaultModel: "anthropic/claude-sonnet-4-6",
+      defaultModel: config.defaultLlmModel,
       defaultTimeoutMs: 15_000,
       providerPreferences: config.openrouterProviderPreferences
     };
@@ -91,7 +91,8 @@ export async function summarizeChangesNode(
         changeSummary: summary,
         _tokenUsage_summarizeChanges: {
           input: response.inputTokens,
-          output: response.outputTokens
+          output: response.outputTokens,
+          model: response.model
         }
       }
     };

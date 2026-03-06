@@ -136,6 +136,7 @@ function buildHandleMessageDeps(
         threadTs: "",
         skipNodes: opts.skipNodes,
         enableNodes: opts.enableNodes,
+        pipelineHint: opts.pipeline,
         teamId: undefined
       });
       return { id: run.id, branchName: run.branchName, repoSlug: run.repoSlug };
@@ -237,7 +238,7 @@ export function buildHelpBlocks(config: AppConfig): Array<Record<string, unknown
         text: [
           `*Mention the bot* in any allowed channel to get help with code.`,
           "",
-          `\`@${config.slackCommandName} fix the login timeout in epiccoders/pxls\``,
+          `\`@${config.slackCommandName} fix the login timeout in yourorg/yourrepo\``,
           "",
           `The agent understands natural language — just describe what you need.`,
           `It can answer questions, make code changes, and check run status.`
@@ -274,7 +275,7 @@ export function buildHelpBlocks(config: AppConfig): Array<Record<string, unknown
         text: [
           "Just talk naturally in threads. The bot understands context:",
           "",
-          `\`@${config.slackCommandName} fix the login timeout in epiccoders/pxls\` — starts a run`,
+          `\`@${config.slackCommandName} fix the login timeout in yourorg/yourrepo\` — starts a run`,
           `\`@${config.slackCommandName} also fix the tests\` — follow-up in same thread`,
           `\`@${config.slackCommandName} what model does browser verify use?\` — answers questions`,
           `\`@${config.slackCommandName} retry\` — retry the last run`,
@@ -317,7 +318,11 @@ export async function startSlackApp(
 
   // Conversation memory — persists full LLM history per thread
   const conversationStore = sharedConversationStore ?? new ConversationStore();
-  setInterval(() => conversationStore.cleanup(24 * 60 * 60 * 1000), 60 * 60 * 1000);
+  if (!sharedConversationStore) {
+    // Only start a fallback cleanup if no shared store was provided
+    // (shared store already has its own cleanup timer from index.ts)
+    setInterval(() => conversationStore.cleanup(24 * 60 * 60 * 1000), 60 * 60 * 1000);
+  }
 
   /** Wrapper around say() that always includes username override */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -674,6 +679,7 @@ export async function startSlackApp(
           threadTs: replyThreadTs,
           skipNodes: opts.skipNodes,
           enableNodes: opts.enableNodes,
+          pipelineHint: opts.pipeline,
           teamId: resolveTeamFromChannel(event.channel, config.teamChannelMap)
         });
         return { id: run.id, branchName: run.branchName, repoSlug: run.repoSlug };

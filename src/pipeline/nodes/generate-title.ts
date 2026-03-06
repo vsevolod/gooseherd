@@ -33,7 +33,7 @@ export async function generateTitleNode(
   try {
     const llmConfig: LLMCallerConfig = {
       apiKey: config.openrouterApiKey,
-      defaultModel: "anthropic/claude-sonnet-4-6",
+      defaultModel: config.defaultLlmModel,
       defaultTimeoutMs: 10_000,
       providerPreferences: config.openrouterProviderPreferences
     };
@@ -53,7 +53,8 @@ export async function generateTitleNode(
         generatedTitle: result.title,
         _tokenUsage_generateTitle: {
           input: result.inputTokens,
-          output: result.outputTokens
+          output: result.outputTokens,
+          model: result.model
         }
       }
     };

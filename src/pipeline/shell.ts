@@ -123,9 +123,25 @@ export async function appendLog(logFile: string, content: string): Promise<void>
 
 export function sanitizeForLogs(input: string): string {
   let output = input;
+  // GitHub access tokens in URLs
   output = output.replace(/x-access-token:[^@'\s]+@/g, "x-access-token:***@");
+  // GitHub PATs (ghp_, gho_, ghu_, ghs_, ghr_)
   output = output.replace(/\b(gh[pousr]_[A-Za-z0-9_]+)\b/g, "***");
+  // Anthropic API keys (sk-ant-api...)
+  output = output.replace(/\bsk-ant-[A-Za-z0-9_-]+\b/g, "***");
+  // OpenAI API keys (sk-proj-..., sk-...)
+  output = output.replace(/\bsk-proj-[A-Za-z0-9_-]+\b/g, "***");
+  output = output.replace(/\bsk-[A-Za-z0-9]{20,}\b/g, "***");
+  // Slack tokens (xoxb-, xoxp-, xoxa-, xoxo-, xoxs-, xoxr-)
+  output = output.replace(/\bxox[bpaosr]-[A-Za-z0-9-]+\b/g, "***");
+  // Generic long bearer/api tokens (catch-all for OpenRouter and others)
+  output = output.replace(/\b(Bearer\s+)[A-Za-z0-9_-]{30,}\b/g, "$1***");
   return output;
+}
+
+/** Shared sleep utility for polling loops. */
+export function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 // ── Shell execution functions ──

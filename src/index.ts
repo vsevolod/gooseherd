@@ -1,5 +1,6 @@
 import dotenv from "dotenv";
 dotenv.config({ override: true });
+import path from "node:path";
 import { loadConfig } from "./config.js";
 import { RunStore } from "./store.js";
 import { GitHubService } from "./github.js";
@@ -75,13 +76,16 @@ async function main(): Promise<void> {
   const pipelineEngine = new PipelineEngine(config, githubService, hooks, containerManager);
   logInfo("Pipeline engine ready", { pipelineFile: config.pipelineFile });
 
-  // Slack Web API client is created internally by Bolt, but RunManager needs a client.
-  // We instantiate a temporary manager with a lightweight client via dynamic import below.
+  // Slack Web API client — only created when Slack tokens are configured.
   const { WebClient } = await import("@slack/web-api");
-  const webClient = new WebClient(config.slackBotToken);
+  const webClient = config.slackBotToken ? new WebClient(config.slackBotToken) : undefined;
 
   const runManager = new RunManager(config, store, pipelineEngine, webClient, hooks);
-  const conversationStore = new ConversationStore();
+  const conversationStore = new ConversationStore({
+    persistDir: path.join(config.dataDir, "conversations")
+  });
+  await conversationStore.load();
+  conversationStore.startCleanupTimer();
   if (recoveredRuns.length > 0) {
     const runsToRequeue = recoveredRuns.filter((run) => run.channelId !== "local");
     for (const run of runsToRequeue) {
@@ -137,7 +141,12 @@ async function main(): Promise<void> {
     startDashboardServer(config, store, runManager, globalRefs.observer, conversationStore);
   }
 
-  await startSlackApp(config, runManager, globalRefs.observer, memoryProvider, githubService, conversationStore);
+  const slackConfigured = Boolean(config.slackBotToken && config.slackAppToken && config.slackSigningSecret);
+  if (slackConfigured) {
+    await startSlackApp(config, runManager, globalRefs.observer, memoryProvider, githubService, conversationStore);
+  } else {
+    logInfo("Slack tokens not configured — running in dashboard-only mode");
+  }
 }
 
 main().catch((error) => {

@@ -312,14 +312,16 @@ export async function browserVerifyNode(
   const reasons = result.errors;
 
   // Token usage from LLM verification
-  const tokenUsage: Record<string, { input: number; output: number }> = {};
+  const browserModel = config.browserVerifyModel;
+  const tokenUsage: Record<string, { input: number; output: number; model?: string }> = {};
   if (planTokenUsage) {
-    tokenUsage._tokenUsage_browserVerifyPlan = planTokenUsage;
+    tokenUsage._tokenUsage_browserVerifyPlan = { ...planTokenUsage, model: browserModel };
   }
   if (verifyResult) {
     tokenUsage._tokenUsage_browserVerifyVision = {
       input: verifyResult.inputTokens,
-      output: verifyResult.outputTokens
+      output: verifyResult.outputTokens,
+      model: browserModel
     };
   }
 

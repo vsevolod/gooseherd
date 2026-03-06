@@ -1,11 +1,14 @@
 node_modules
 dist
 .work
+.work-live
 data
+.data-live
 .env
 .env.*
 !.env.example
 .git
+.github
 .research
 .claude
 *.log
@@ -16,3 +19,6 @@ findings.md
 progress.md
 task_plan.md
 docker-compose.override.yml
+website
+Makefile
+logs

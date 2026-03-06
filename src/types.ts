@@ -24,6 +24,8 @@ export interface TokenUsage {
   qualityGateOutputTokens: number;
   agentInputTokens?: number;
   agentOutputTokens?: number;
+  /** Estimated cost in USD (computed from token counts × model prices). */
+  costUsd?: number;
 }
 
 export interface RunFeedback {

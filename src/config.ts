@@ -3,9 +3,9 @@ import { z } from "zod";
 const envSchema = z.object({
   APP_NAME: z.string().optional(),
 
-  SLACK_BOT_TOKEN: z.string().min(1),
-  SLACK_APP_TOKEN: z.string().min(1),
-  SLACK_SIGNING_SECRET: z.string().min(1),
+  SLACK_BOT_TOKEN: z.string().optional(),
+  SLACK_APP_TOKEN: z.string().optional(),
+  SLACK_SIGNING_SECRET: z.string().optional(),
   SLACK_COMMAND_NAME: z.string().optional(),
   SLACK_ALLOWED_CHANNELS: z.string().optional(),
 
@@ -161,9 +161,9 @@ export interface AppConfig {
   appName: string;
   appSlug: string;
 
-  slackBotToken: string;
-  slackAppToken: string;
-  slackSigningSecret: string;
+  slackBotToken?: string;
+  slackAppToken?: string;
+  slackSigningSecret?: string;
   slackCommandName: string;
   slackAllowedChannels: string[];
 
@@ -369,9 +369,9 @@ export function loadConfig(): AppConfig {
     appName,
     appSlug,
 
-    slackBotToken: parsed.SLACK_BOT_TOKEN,
-    slackAppToken: parsed.SLACK_APP_TOKEN,
-    slackSigningSecret: parsed.SLACK_SIGNING_SECRET,
+    slackBotToken: parsed.SLACK_BOT_TOKEN?.trim() || undefined,
+    slackAppToken: parsed.SLACK_APP_TOKEN?.trim() || undefined,
+    slackSigningSecret: parsed.SLACK_SIGNING_SECRET?.trim() || undefined,
     slackCommandName: parsed.SLACK_COMMAND_NAME?.trim() || appSlug,
     slackAllowedChannels: parseList(parsed.SLACK_ALLOWED_CHANNELS),
 

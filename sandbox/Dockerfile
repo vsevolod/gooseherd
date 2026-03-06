@@ -52,11 +52,19 @@ RUN curl -LsSf https://astral.sh/uv/install.sh | sh \
   && uv tool install "cems @ git+https://github.com/chocksy/cems.git" --force \
   && ln -sf $HOME/.local/bin/cems-mcp /usr/local/bin/cems-mcp \
   && cems-mcp --help || true
+# uv installs to /root/.local/bin during build; cems-mcp is symlinked to /usr/local/bin
+# Keep path for any uv-managed tools still referenced from root install
 ENV PATH="/root/.local/bin:$PATH"
 
 # Copy sandbox-compatible dummy agent for E2E testing
 COPY sandbox-dummy-agent.sh /usr/local/bin/sandbox-dummy-agent.sh
 RUN chmod +x /usr/local/bin/sandbox-dummy-agent.sh
+
+# Run as non-root user for security
+RUN useradd -m -s /bin/bash gooseherd \
+  && mkdir -p /work \
+  && chown gooseherd:gooseherd /work
+USER gooseherd
 
 WORKDIR /work
 

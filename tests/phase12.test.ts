@@ -15,10 +15,10 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 
 describe("dashboard auth", () => {
   // Import dynamically to avoid loading the whole dashboard server
-  let checkAuth: typeof import("../src/dashboard-server.js").checkAuth;
+  let checkAuth: typeof import("../src/dashboard/auth.js").checkAuth;
 
   test("load checkAuth", async () => {
-    const mod = await import("../src/dashboard-server.js");
+    const mod = await import("../src/dashboard/auth.js");
     checkAuth = mod.checkAuth;
   });
 

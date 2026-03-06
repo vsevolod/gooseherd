@@ -19,15 +19,17 @@ export async function composeRunInput(
   event: TriggerEvent,
   rule: TriggerRule,
   config: AppConfig,
-  webClient: WebClient
+  webClient?: WebClient
 ): Promise<NewRunInput> {
   const repoSlug = event.repoSlug ?? rule.repoSlug ?? "";
   const baseBranch = event.baseBranch ?? rule.baseBranch ?? config.defaultBaseBranch;
   const task = buildTask(event, rule);
   const channelId = rule.notificationChannel ?? config.observerAlertChannelId;
 
-  // Post seed message to get a real threadTs
-  const threadTs = await postSeedMessage(webClient, channelId, event, repoSlug, task);
+  // Post seed message to get a real threadTs (or generate one when Slack is absent)
+  const threadTs = webClient
+    ? await postSeedMessage(webClient, channelId, event, repoSlug, task)
+    : `obs-${Date.now()}`;
 
   return {
     repoSlug,

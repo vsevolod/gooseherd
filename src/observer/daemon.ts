@@ -7,8 +7,8 @@
 
 import type { WebClient } from "@slack/web-api";
 import type { AppConfig } from "../config.js";
-import type { RunManager } from "../run-manager.js";
-import { logError, logInfo } from "../logger.js";
+import type { RunEnqueuer } from "./run-enqueuer.js";
+import { logError, logInfo, logWarn } from "../logger.js";
 import { ObserverStateStore } from "./state-store.js";
 import { loadTriggerRules, matchTriggerRule } from "./trigger-rules.js";
 import { buildDedupKey, getDedupTtl, runSafetyChecks } from "./safety.js";
@@ -35,8 +35,8 @@ export class ObserverDaemon {
 
   constructor(
     private readonly config: AppConfig,
-    private readonly runManager: RunManager,
-    private readonly webClient: WebClient,
+    private readonly runManager: RunEnqueuer,
+    private readonly webClient: WebClient | undefined,
     private readonly tokenGetter?: () => Promise<string>
   ) {
     this.stateStore = new ObserverStateStore(config.dataDir);
@@ -399,8 +399,8 @@ export class ObserverDaemon {
     try {
       const runInput = await composeRunInput(event, rule, this.config, this.webClient);
 
-      // 4. Approval gate (if rule requires it)
-      if (rule.requiresApproval) {
+      // 4. Approval gate (if rule requires it and Slack is available)
+      if (rule.requiresApproval && this.webClient) {
         logInfo("Observer: event requires approval, posting for review", {
           eventId: event.id,
           ruleId: rule.id
@@ -418,6 +418,11 @@ export class ObserverDaemon {
           outcome: "approval_required", reason: "Rule requires approval", processedAt: now
         });
         return;
+      }
+      if (rule.requiresApproval && !this.webClient) {
+        logWarn("Observer: approval required but Slack not configured — auto-approving", {
+          ruleId: rule.id, eventId: event.id
+        });
       }
 
       // 5. Enqueue the run
@@ -471,7 +476,7 @@ export class ObserverDaemon {
       "React to approve or reject this auto-fix:"
     ].join("\n");
 
-    await this.webClient.chat.postMessage({
+    await this.webClient!.chat.postMessage({
       channel: runInput.channelId,
       thread_ts: runInput.threadTs,
       text,

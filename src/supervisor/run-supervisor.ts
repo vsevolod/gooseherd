@@ -33,7 +33,7 @@ export class RunSupervisor {
     private readonly runManager: RunManager,
     private readonly pipelineEngine: PipelineEngine,
     private readonly store: RunStore,
-    private readonly slackClient: WebClient
+    private readonly slackClient?: WebClient
   ) {}
 
   start(): void {
@@ -280,8 +280,8 @@ export class RunSupervisor {
   }
 
   private async postSlackReply(channelId: string, threadTs: string, text: string): Promise<void> {
-    // Don't post to non-Slack channels (e.g. "local")
-    if (!/^[CGD][A-Z0-9]+$/.test(channelId)) return;
+    // Don't post to non-Slack channels (e.g. "local") or when Slack is not configured
+    if (!this.slackClient || !/^[CGD][A-Z0-9]+$/.test(channelId)) return;
 
     try {
       await this.slackClient.chat.postMessage({

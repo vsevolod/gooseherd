@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile, rename } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 import type { NewRunInput, RunFeedback, RunRecord, RunStatus } from "./types.js";
@@ -10,6 +10,8 @@ interface RunStateFile {
 export class RunStore {
   private readonly filePath: string;
   private lock: Promise<void> = Promise.resolve();
+  /** In-memory cache — loaded once on init(), write-through on mutations. */
+  private cache: RunStateFile | undefined;
 
   constructor(dataDir: string) {
     this.filePath = path.join(dataDir, "runs.json");
@@ -18,10 +20,13 @@ export class RunStore {
   async init(): Promise<void> {
     await mkdir(path.dirname(this.filePath), { recursive: true });
     try {
-      await readFile(this.filePath, "utf8");
+      const raw = await readFile(this.filePath, "utf8");
+      const parsed = JSON.parse(raw) as RunStateFile;
+      this.cache = Array.isArray(parsed.runs) ? parsed : { runs: [] };
     } catch {
       const initial: RunStateFile = { runs: [] };
-      await writeFile(this.filePath, JSON.stringify(initial, null, 2), "utf8");
+      await this.writeStateAtomic(initial);
+      this.cache = initial;
     }
   }
 
@@ -312,17 +317,25 @@ export class RunStore {
     }
   }
 
-  private async readState(): Promise<RunStateFile> {
-    const raw = await readFile(this.filePath, "utf8");
-    const parsed = JSON.parse(raw) as RunStateFile;
-    if (!Array.isArray(parsed.runs)) {
-      return { runs: [] };
+  private readState(): RunStateFile {
+    if (!this.cache) {
+      throw new Error("RunStore not initialized — call init() first");
     }
-    return parsed;
+    // Return a shallow copy so callers inside withLock can mutate
+    // without affecting concurrent lock-free reads (e.g. findRunByIdentifier).
+    return { runs: [...this.cache.runs] };
+  }
+
+  /** Atomic write: temp file + rename to prevent corruption on crash. */
+  private async writeStateAtomic(state: RunStateFile): Promise<void> {
+    const tmpPath = this.filePath + ".tmp";
+    await writeFile(tmpPath, JSON.stringify(state, null, 2), "utf8");
+    await rename(tmpPath, this.filePath);
   }
 
   private async writeState(state: RunStateFile): Promise<void> {
-    await writeFile(this.filePath, JSON.stringify(state, null, 2), "utf8");
+    await this.writeStateAtomic(state);
+    this.cache = state;
   }
 }
 

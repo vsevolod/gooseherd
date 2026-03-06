@@ -1,7 +1,7 @@
 import type { NodeConfig, NodeResult, NodeDeps } from "../types.js";
 import type { ContextBag } from "../context-bag.js";
 import { parseRepoSlug, type CICheckRun } from "../../github.js";
-import { appendLog } from "../shell.js";
+import { appendLog, sleep } from "../shell.js";
 import { appendGateReport } from "../quality-gates/gate-report.js";
 import {
   aggregateConclusions,
@@ -200,8 +200,4 @@ async function evaluateConclusion(
     rawOutput: rawParts.join("\n"),
     outputs: { ciConclusion: "failure", ciFailedCheckCount: failedCheckCount }
   };
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise(resolve => setTimeout(resolve, ms));
 }

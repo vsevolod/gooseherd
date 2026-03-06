@@ -2,7 +2,8 @@ import { writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { NodeConfig, NodeResult, NodeDeps } from "../types.js";
 import type { ContextBag } from "../context-bag.js";
-import { runShell, renderTemplate, appendLog, mapToContainerPath, buildMcpFlags, buildPiExtensionFlags } from "../shell.js";
+import { runShell, appendLog } from "../shell.js";
+import { buildAgentCommand } from "../agent-command.js";
 import { parseErrors } from "../error-parser.js";
 
 /**
@@ -42,21 +43,7 @@ export async function fixValidationNode(
   await writeFile(fixPromptFile, fixPrompt, "utf8");
 
   // Re-run agent with fix prompt
-  const template = isFollowUp && config.agentFollowUpTemplate
-    ? config.agentFollowUpTemplate
-    : config.agentCommandTemplate;
-
-  const agentCommand = renderTemplate(template, {
-    repo_dir: mapToContainerPath(repoDir),
-    prompt_file: mapToContainerPath(fixPromptFile),
-    task_file: mapToContainerPath(fixPromptFile),
-    run_id: run.id,
-    repo_slug: run.repoSlug,
-    parent_run_id: run.parentRunId ?? ""
-  }, {
-    mcp_flags: buildMcpFlags(config.mcpExtensions),
-    pi_extensions: buildPiExtensionFlags(config.piAgentExtensions)
-  });
+  const agentCommand = buildAgentCommand(config, run, repoDir, fixPromptFile, isFollowUp);
 
   await runShell(agentCommand, {
     cwd: path.resolve("."),

@@ -50,6 +50,47 @@ function isAbortError(error: unknown): boolean {
   return /operation was aborted|aborted/i.test(error.message);
 }
 
+const RETRYABLE_STATUS_CODES = new Set([429, 502, 503]);
+const MAX_RETRIES = 3;
+const BASE_DELAY_MS = 1000;
+
+async function fetchWithRetry(
+  url: string,
+  init: RequestInit,
+  timeoutMs: number
+): Promise<Response> {
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+    try {
+      const response = await fetch(url, { ...init, signal: controller.signal });
+      if (RETRYABLE_STATUS_CODES.has(response.status) && attempt < MAX_RETRIES) {
+        const retryAfter = response.headers.get("retry-after");
+        const delayMs = retryAfter
+          ? Math.min(Number(retryAfter) * 1000, 30_000)
+          : BASE_DELAY_MS * Math.pow(2, attempt);
+        await new Promise(r => setTimeout(r, delayMs));
+        continue;
+      }
+      return response;
+    } catch (error) {
+      if (isAbortError(error)) {
+        throw new Error(`LLM request timed out after ${String(timeoutMs)}ms`);
+      }
+      if (attempt < MAX_RETRIES) {
+        await new Promise(r => setTimeout(r, BASE_DELAY_MS * Math.pow(2, attempt)));
+        continue;
+      }
+      throw error;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  // unreachable, but satisfies TS
+  throw new Error("fetchWithRetry: max retries exceeded");
+}
+
 /**
  * Call the OpenRouter Chat Completions API with timeout support.
  * Returns the text content from the first choice.
@@ -63,62 +104,50 @@ export async function callLLM(
   const maxTokens = request.maxTokens ?? 1024;
   const timeoutMs = request.timeoutMs ?? config.defaultTimeoutMs;
 
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const response = await fetchWithRetry(
+    "https://openrouter.ai/api/v1/chat/completions",
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${config.apiKey}`
+      },
+      body: JSON.stringify({
+        model,
+        max_tokens: maxTokens,
+        messages: [
+          { role: "system", content: request.system },
+          { role: "user", content: request.userMessage }
+        ],
+        ...(request.jsonMode ? { response_format: { type: "json_object" } } : {}),
+        ...(config.providerPreferences ? { provider: config.providerPreferences } : {})
+      })
+    },
+    timeoutMs
+  );
 
-  try {
-    let response: Awaited<ReturnType<typeof fetch>>;
-    try {
-      response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${config.apiKey}`
-        },
-        body: JSON.stringify({
-          model,
-          max_tokens: maxTokens,
-          messages: [
-            { role: "system", content: request.system },
-            { role: "user", content: request.userMessage }
-          ],
-          ...(request.jsonMode ? { response_format: { type: "json_object" } } : {}),
-          ...(config.providerPreferences ? { provider: config.providerPreferences } : {})
-        }),
-        signal: controller.signal
-      });
-    } catch (error) {
-      if (isAbortError(error)) {
-        throw new Error(`LLM request timed out after ${String(timeoutMs)}ms`);
-      }
-      throw error;
-    }
-
-    if (!response.ok) {
-      const body = await response.text().catch(() => "");
-      throw new Error(`OpenRouter API ${String(response.status)}: ${body.slice(0, 200)}`);
-    }
-
-    const data = await response.json() as {
-      choices: Array<{ message: { content: string } }>;
-      model: string;
-      usage: { prompt_tokens: number; completion_tokens: number };
-    };
-
-    const content = data.choices?.[0]?.message?.content;
-    if (!content) {
-      throw new Error("No text content in API response");
-    }
-
-    return {
-      content,
-      model: data.model,
-      inputTokens: data.usage.prompt_tokens,
-      outputTokens: data.usage.completion_tokens
-    };
-  } finally {
-    clearTimeout(timer);
+  if (!response.ok) {
+    const body = await response.text().catch(() => "");
+    throw new Error(`OpenRouter API ${String(response.status)}: ${body.slice(0, 200)}`);
   }
+
+  const data = await response.json() as {
+    choices: Array<{ message: { content: string } }>;
+    model: string;
+    usage: { prompt_tokens: number; completion_tokens: number };
+  };
+
+  const content = data.choices?.[0]?.message?.content;
+  if (!content) {
+    throw new Error("No text content in API response");
+  }
+
+  return {
+    content,
+    model: data.model,
+    inputTokens: data.usage.prompt_tokens,
+    outputTokens: data.usage.completion_tokens
+  };
 }
 
 /**
@@ -133,62 +162,50 @@ export async function callLLMVision(
   const maxTokens = request.maxTokens ?? 1024;
   const timeoutMs = request.timeoutMs ?? config.defaultTimeoutMs;
 
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const response = await fetchWithRetry(
+    "https://openrouter.ai/api/v1/chat/completions",
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${config.apiKey}`
+      },
+      body: JSON.stringify({
+        model,
+        max_tokens: maxTokens,
+        messages: [
+          { role: "system", content: request.system },
+          { role: "user", content: request.userContent }
+        ],
+        ...(request.jsonMode ? { response_format: { type: "json_object" } } : {}),
+        ...(config.providerPreferences ? { provider: config.providerPreferences } : {})
+      })
+    },
+    timeoutMs
+  );
 
-  try {
-    let response: Awaited<ReturnType<typeof fetch>>;
-    try {
-      response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${config.apiKey}`
-        },
-        body: JSON.stringify({
-          model,
-          max_tokens: maxTokens,
-          messages: [
-            { role: "system", content: request.system },
-            { role: "user", content: request.userContent }
-          ],
-          ...(request.jsonMode ? { response_format: { type: "json_object" } } : {}),
-          ...(config.providerPreferences ? { provider: config.providerPreferences } : {})
-        }),
-        signal: controller.signal
-      });
-    } catch (error) {
-      if (isAbortError(error)) {
-        throw new Error(`LLM request timed out after ${String(timeoutMs)}ms`);
-      }
-      throw error;
-    }
-
-    if (!response.ok) {
-      const body = await response.text().catch(() => "");
-      throw new Error(`OpenRouter API ${String(response.status)}: ${body.slice(0, 200)}`);
-    }
-
-    const data = await response.json() as {
-      choices: Array<{ message: { content: string } }>;
-      model: string;
-      usage: { prompt_tokens: number; completion_tokens: number };
-    };
-
-    const content = data.choices?.[0]?.message?.content;
-    if (!content) {
-      throw new Error("No text content in API response");
-    }
-
-    return {
-      content,
-      model: data.model,
-      inputTokens: data.usage.prompt_tokens,
-      outputTokens: data.usage.completion_tokens
-    };
-  } finally {
-    clearTimeout(timer);
+  if (!response.ok) {
+    const body = await response.text().catch(() => "");
+    throw new Error(`OpenRouter API ${String(response.status)}: ${body.slice(0, 200)}`);
   }
+
+  const data = await response.json() as {
+    choices: Array<{ message: { content: string } }>;
+    model: string;
+    usage: { prompt_tokens: number; completion_tokens: number };
+  };
+
+  const content = data.choices?.[0]?.message?.content;
+  if (!content) {
+    throw new Error("No text content in API response");
+  }
+
+  return {
+    content,
+    model: data.model,
+    inputTokens: data.usage.prompt_tokens,
+    outputTokens: data.usage.completion_tokens
+  };
 }
 
 /**
@@ -198,7 +215,7 @@ export async function callLLMVision(
 export async function summarizeTitle(
   config: LLMCallerConfig,
   task: string
-): Promise<{ title: string; inputTokens: number; outputTokens: number }> {
+): Promise<{ title: string; inputTokens: number; outputTokens: number; model: string }> {
   const response = await callLLM(config, {
     system: "You are a title generator. Given a task description, produce a concise title of 5-8 words. " +
       "Output ONLY the title, nothing else. No quotes, no punctuation at the end. " +
@@ -224,7 +241,8 @@ export async function summarizeTitle(
   return {
     title,
     inputTokens: response.inputTokens,
-    outputTokens: response.outputTokens
+    outputTokens: response.outputTokens,
+    model: response.model
   };
 }
 
@@ -356,50 +374,38 @@ export async function callLLMWithTools(
       }
     }
 
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
-
     let data: {
       choices: Array<{ message: { role: string; content: string | null; tool_calls?: ToolCall[] } }>;
       model: string;
       usage: { prompt_tokens: number; completion_tokens: number };
     };
 
-    try {
-      let response: Awaited<ReturnType<typeof fetch>>;
-      try {
-        response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "Authorization": `Bearer ${config.apiKey}`
-          },
-          body: JSON.stringify({
-            model,
-            max_tokens: maxTokens,
-            messages,
-            tools: request.tools,
-            parallel_tool_calls: false,
-            ...(config.providerPreferences ? { provider: config.providerPreferences } : {})
-          }),
-          signal: controller.signal
-        });
-      } catch (error) {
-        if (isAbortError(error)) {
-          throw new Error(`LLM request timed out after ${String(timeoutMs)}ms (turn ${String(turn + 1)})`);
-        }
-        throw error;
-      }
+    const response = await fetchWithRetry(
+      "https://openrouter.ai/api/v1/chat/completions",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${config.apiKey}`
+        },
+        body: JSON.stringify({
+          model,
+          max_tokens: maxTokens,
+          messages,
+          tools: request.tools,
+          parallel_tool_calls: false,
+          ...(config.providerPreferences ? { provider: config.providerPreferences } : {})
+        })
+      },
+      timeoutMs
+    );
 
-      if (!response.ok) {
-        const body = await response.text().catch(() => "");
-        throw new Error(`OpenRouter API ${String(response.status)}: ${body.slice(0, 200)}`);
-      }
-
-      data = await response.json() as typeof data;
-    } finally {
-      clearTimeout(timer);
+    if (!response.ok) {
+      const body = await response.text().catch(() => "");
+      throw new Error(`OpenRouter API ${String(response.status)}: ${body.slice(0, 200)}`);
     }
+
+    data = await response.json() as typeof data;
 
     totalInputTokens += data.usage?.prompt_tokens ?? 0;
     totalOutputTokens += data.usage?.completion_tokens ?? 0;

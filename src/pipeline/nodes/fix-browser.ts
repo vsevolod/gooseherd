@@ -2,7 +2,9 @@ import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { NodeConfig, NodeResult, NodeDeps } from "../types.js";
 import type { ContextBag } from "../context-bag.js";
-import { runShell, runShellCapture, shellEscape, renderTemplate, appendLog, mapToContainerPath, buildMcpFlags, buildPiExtensionFlags } from "../shell.js";
+import { runShell, runShellCapture, appendLog, sleep } from "../shell.js";
+import { buildAgentCommand } from "../agent-command.js";
+import { commitCaptureAndPush } from "../git-ops.js";
 import { isNonCodeFixFailure, type BrowserVerifyFailureCode } from "../quality-gates/browser-verify-routing.js";
 
 /**
@@ -84,21 +86,7 @@ export async function fixBrowserNode(
 
   // Run the coding agent
   const isFollowUp = ctx.get<boolean>("isFollowUp") ?? false;
-  const template = isFollowUp && config.agentFollowUpTemplate
-    ? config.agentFollowUpTemplate
-    : config.agentCommandTemplate;
-
-  const agentCommand = renderTemplate(template, {
-    repo_dir: mapToContainerPath(repoDir),
-    prompt_file: mapToContainerPath(fixPromptFile),
-    task_file: mapToContainerPath(fixPromptFile),
-    run_id: run.id,
-    repo_slug: run.repoSlug,
-    parent_run_id: run.parentRunId ?? ""
-  }, {
-    mcp_flags: buildMcpFlags(config.mcpExtensions),
-    pi_extensions: buildPiExtensionFlags(config.piAgentExtensions)
-  });
+  const agentCommand = buildAgentCommand(config, run, repoDir, fixPromptFile, isFollowUp);
 
   await runShell(agentCommand, {
     cwd: path.resolve("."),
@@ -113,34 +101,11 @@ export async function fixBrowserNode(
     return { outcome: "failure", error: "Fix agent made no changes" };
   }
 
-  // Commit the fix
-  await runShell("git add -A", { cwd: repoDir, logFile });
-
+  // Commit, capture SHA + changed files, and push
   const commitMsg = `${config.appSlug}: fix browser verification (attempt ${String(attempt)})`;
-  await runShell(`git commit -m ${shellEscape(commitMsg)}`, { cwd: repoDir, logFile });
-
-  // Capture new commit SHA
-  const shaResult = await runShellCapture("git rev-parse HEAD", { cwd: repoDir, logFile });
-  const newSha = shaResult.stdout.trim().split("\n").pop()?.trim() ?? "";
-
-  // Push the fix
-  await runShell(`git push origin ${shellEscape(run.branchName)}`, {
-    cwd: repoDir,
-    logFile
-  });
-
-  // Update commitSha so downstream nodes see the new commit
-  ctx.set("commitSha", newSha);
-
-  // Update changed files
-  const filesResult = await runShellCapture("git show --name-only --pretty='' HEAD", { cwd: repoDir, logFile });
-  if (filesResult.code === 0) {
-    const newChangedFiles = filesResult.stdout
-      .split("\n")
-      .map(f => f.trim())
-      .filter(f => f.length > 0 && !f.startsWith("---"));
-    ctx.set("changedFiles", newChangedFiles);
-  }
+  const { commitSha: newSha, changedFiles: newChangedFiles } = await commitCaptureAndPush(
+    repoDir, commitMsg, logFile, run.branchName
+  );
 
   await appendLog(logFile, `\n[browser:fix] pushed fix commit ${newSha.slice(0, 8)}\n`);
 
@@ -152,7 +117,7 @@ export async function fixBrowserNode(
 
   return {
     outcome: "success",
-    outputs: { commitSha: newSha }
+    outputs: { commitSha: newSha, changedFiles: newChangedFiles }
   };
 }
 
@@ -277,10 +242,6 @@ async function waitForPreviewRedeploy(
   }
 
   await appendLog(logFile, `[browser:fix] redeploy wait timed out after ${String(Math.floor(timeoutMs / 1000))}s\n`);
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 function normalizeConsoleText(entry: { text?: string; message?: string }): string {

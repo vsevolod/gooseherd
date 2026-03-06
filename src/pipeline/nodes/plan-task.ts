@@ -84,7 +84,8 @@ export async function planTaskNode(
 
     ctx.set("_tokenUsage_plan_task", {
       input: response.inputTokens,
-      output: response.outputTokens
+      output: response.outputTokens,
+      model: response.model
     });
 
     return {

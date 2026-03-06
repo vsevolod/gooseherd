@@ -1,6 +1,7 @@
 import type { NodeConfig, NodeResult, NodeDeps } from "../types.js";
 import type { ContextBag } from "../context-bag.js";
-import { runShell, runShellCapture, shellEscape } from "../shell.js";
+import { runShellCapture } from "../shell.js";
+import { commitCaptureAndPush } from "../git-ops.js";
 
 /**
  * Commit node: assert changes, git add + commit, capture SHA + changed files.
@@ -25,34 +26,11 @@ export async function commitNode(
     };
   }
 
-  // Stage all changes
-  await runShell("git add -A", { cwd: repoDir, logFile });
-
-  // Build commit message
+  // Commit and capture SHA + changed files (no push — push node handles that)
   const taskSummary = (isFollowUp ? run.feedbackNote ?? run.task : run.task).slice(0, 72);
   const commitMsg = `${config.appSlug}: ${taskSummary}`;
 
-  await runShell(`git commit -m ${shellEscape(commitMsg)}`, { cwd: repoDir, logFile });
-
-  // Capture commit SHA
-  const commitShaResult = await runShellCapture("git rev-parse HEAD", { cwd: repoDir, logFile });
-  if (commitShaResult.code !== 0) {
-    return { outcome: "failure", error: "Failed to determine commit SHA." };
-  }
-  const commitSha = commitShaResult.stdout.trim().split("\n").pop()?.trim() ?? "";
-
-  // Capture changed files
-  const changedFilesResult = await runShellCapture("git show --name-only --pretty='' HEAD", { cwd: repoDir, logFile });
-  if (changedFilesResult.code !== 0) {
-    return { outcome: "failure", error: "Failed to determine changed files." };
-  }
-  const changedFiles = changedFilesResult.stdout
-    .split("\n")
-    .map((entry) => entry.trim())
-    .filter((entry) => entry.length > 0 && !entry.startsWith("---"));
-
-  ctx.set("commitSha", commitSha);
-  ctx.set("changedFiles", changedFiles);
+  const { commitSha, changedFiles } = await commitCaptureAndPush(repoDir, commitMsg, logFile);
 
   return {
     outcome: "success",

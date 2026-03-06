@@ -1,5 +1,22 @@
-import { readFile, writeFile, rename, mkdir } from "node:fs/promises";
+import { readFile, writeFile, rename, mkdir, chmod } from "node:fs/promises";
 import path from "node:path";
+
+/** Keys that should never be serialized to checkpoint files */
+const SENSITIVE_KEYS = new Set([
+  "browserVerifyProviderResolution",
+  "browserVerifyCredentials",
+  "apiKey",
+  "githubToken",
+  "openrouterApiKey",
+  "anthropicApiKey",
+  "openaiApiKey",
+  "slackBotToken",
+  "slackAppToken",
+  "slackSigningSecret",
+  "sentryWebhookSecret",
+  "githubWebhookSecret",
+  "dashboardToken",
+]);
 
 /**
  * Typed key-value store passed between pipeline nodes.
@@ -98,6 +115,16 @@ export class ContextBag {
     return obj;
   }
 
+  /** Get data as a plain object with sensitive keys filtered out (for checkpoints/serialization) */
+  toSafeObject(): Record<string, unknown> {
+    const obj: Record<string, unknown> = {};
+    for (const [key, value] of this.data.entries()) {
+      if (SENSITIVE_KEYS.has(key)) continue;
+      obj[key] = value;
+    }
+    return obj;
+  }
+
   /** Set the directory for checkpoint files */
   setCheckpointDir(dir: string): void {
     this.checkpointDir = dir;
@@ -112,7 +139,7 @@ export class ContextBag {
     const checkpoint = {
       completedNodeId,
       timestamp: new Date().toISOString(),
-      data: this.toObject()
+      data: this.toSafeObject()
     };
 
     // Atomic write: write to temp file then rename to prevent corruption on crash
@@ -120,6 +147,8 @@ export class ContextBag {
     const tmpPath = path.join(this.checkpointDir, "checkpoint.json.tmp");
     await writeFile(tmpPath, JSON.stringify(checkpoint, null, 2), "utf8");
     await rename(tmpPath, filePath);
+    // Restrict checkpoint file permissions (contains run state)
+    await chmod(filePath, 0o600).catch(() => {});
   }
 
   /** Resume from a checkpoint file. Returns the last completed node ID. */

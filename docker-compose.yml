@@ -11,15 +11,16 @@
 
 services:
   gooseherd:
+    image: ghcr.io/chocksy/gooseherd:latest
     build: .
     environment:
       # ── Branding ──
       - APP_NAME=${APP_NAME:-Gooseherd}
 
-      # ── Required (Slack) ──
-      - SLACK_BOT_TOKEN=${SLACK_BOT_TOKEN:?}
-      - SLACK_APP_TOKEN=${SLACK_APP_TOKEN:?}
-      - SLACK_SIGNING_SECRET=${SLACK_SIGNING_SECRET:?}
+      # ── Slack (optional — omit for dashboard-only mode) ──
+      - SLACK_BOT_TOKEN=${SLACK_BOT_TOKEN:-}
+      - SLACK_APP_TOKEN=${SLACK_APP_TOKEN:-}
+      - SLACK_SIGNING_SECRET=${SLACK_SIGNING_SECRET:-}
       - SLACK_COMMAND_NAME=${SLACK_COMMAND_NAME:-gooseherd}
       - SLACK_ALLOWED_CHANNELS=${SLACK_ALLOWED_CHANNELS:-}
 

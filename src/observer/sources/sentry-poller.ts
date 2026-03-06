@@ -145,7 +145,8 @@ async function fetchNewIssues(
     headers: {
       Authorization: `Bearer ${config.authToken}`,
       "Content-Type": "application/json"
-    }
+    },
+    signal: AbortSignal.timeout(15_000)
   });
 
   if (!response.ok) {
@@ -165,7 +166,8 @@ async function fetchLatestEventContext(
       headers: {
         Authorization: `Bearer ${config.authToken}`,
         "Content-Type": "application/json"
-      }
+      },
+      signal: AbortSignal.timeout(15_000)
     });
 
     if (!response.ok) return "";

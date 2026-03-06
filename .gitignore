@@ -8,3 +8,8 @@ data/runs.json
 docker-compose.override.yml
 .work-live
 .data-live
+logs
+.research
+task_plan.md
+findings.md
+progress.md

@@ -45,7 +45,11 @@ COPY scripts/ scripts/
 COPY pipelines/ pipelines/
 COPY extensions/ extensions/
 
-RUN mkdir -p .work data
+# Run as non-root user for security
+RUN useradd -m -s /bin/bash gooseherd \
+  && mkdir -p .work data \
+  && chown -R gooseherd:gooseherd .work data
+USER gooseherd
 
 # Dashboard must bind to all interfaces inside a container
 ENV DASHBOARD_HOST=0.0.0.0

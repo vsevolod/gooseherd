@@ -80,6 +80,7 @@ export async function scopeJudgeNode(
   let result: ScopeJudgeResult;
   let totalInputTokens = 0;
   let totalOutputTokens = 0;
+  let usedModel = model;
   try {
     const { parsed, raw } = await callLLMForJSON<Record<string, unknown>>(llmConfig, {
       system: systemPrompt,
@@ -90,6 +91,7 @@ export async function scopeJudgeNode(
     result = parseScopeJudgeResponse(parsed);
     totalInputTokens += raw.inputTokens;
     totalOutputTokens += raw.outputTokens;
+    usedModel = raw.model;
   } catch (err) {
     const msg = err instanceof Error ? err.message : "unknown";
     logError("scope_judge: LLM call failed, fail-open", { error: msg });
@@ -117,6 +119,7 @@ export async function scopeJudgeNode(
       result = parseScopeJudgeResponse(parsed);
       totalInputTokens += raw.inputTokens;
       totalOutputTokens += raw.outputTokens;
+      usedModel = raw.model;
     } catch (err) {
       // Keep original result on escalation failure
       const msg = err instanceof Error ? err.message : "unknown";
@@ -126,7 +129,8 @@ export async function scopeJudgeNode(
 
   ctx.set("_tokenUsage_scope_judge", {
     input: totalInputTokens,
-    output: totalOutputTokens
+    output: totalOutputTokens,
+    model: usedModel
   });
 
   // Apply decision

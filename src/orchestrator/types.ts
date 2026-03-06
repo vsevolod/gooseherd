@@ -14,7 +14,7 @@ export interface HandleMessageDeps {
   enqueueRun: (
     repo: string,
     task: string,
-    opts: { skipNodes?: string[]; enableNodes?: string[]; continueFrom?: string }
+    opts: { skipNodes?: string[]; enableNodes?: string[]; continueFrom?: string; pipeline?: string }
   ) => Promise<{ id: string; branchName: string; repoSlug: string }>;
   listRuns: (repoSlug?: string) => Promise<string>;
   getConfig: (key?: string) => Promise<string>;

@@ -13,6 +13,7 @@ import type {
   NodeEventListener
 } from "./types.js";
 import { EventLogger } from "./event-logger.js";
+import { computeCostUsd } from "../llm/model-prices.js";
 import type { ExecutionResult, RunRecord, TokenUsage } from "../types.js";
 import type { AppConfig } from "../config.js";
 import type { GitHubService } from "../github.js";
@@ -25,69 +26,8 @@ import { logInfo, logError } from "../logger.js";
 import type { ContainerManager } from "../sandbox/container-manager.js";
 import type { SandboxHandle } from "../sandbox/types.js";
 
-// Node handler imports
-import { cloneNode } from "./nodes/clone.js";
-import { hydrateContextNode } from "./nodes/hydrate-context.js";
-import { implementNode } from "./nodes/implement.js";
-import { lintFixNode } from "./nodes/lint-fix.js";
-import { validateNode } from "./nodes/validate.js";
-import { fixValidationNode } from "./nodes/fix-validation.js";
-import { commitNode } from "./nodes/commit.js";
-import { pushNode } from "./nodes/push.js";
-import { createPrNode } from "./nodes/create-pr.js";
-import { notifyNode } from "./nodes/notify.js";
-import { planTaskNode } from "./nodes/plan-task.js";
-import { localTestNode } from "./nodes/local-test.js";
-import { uploadScreenshotNode } from "./nodes/upload-screenshot.js";
-import { generateTitleNode } from "./nodes/generate-title.js";
-import { summarizeChangesNode } from "./nodes/summarize-changes.js";
-
-// Quality gate node imports
-import { classifyTaskNode } from "./quality-gates/classify-task-node.js";
-import { diffGateNode } from "./quality-gates/diff-gate-node.js";
-import { forbiddenFilesNode } from "./quality-gates/forbidden-files-node.js";
-import { securityScanNode } from "./quality-gates/security-scan-node.js";
-import { scopeJudgeNode } from "./quality-gates/scope-judge-node.js";
-import { browserVerifyNode } from "./quality-gates/browser-verify-node.js";
-
-// Deploy + CI node imports
-import { deployPreviewNode } from "./nodes/deploy-preview.js";
-import { waitCiNode } from "./ci/wait-ci-node.js";
-import { fixCiNode } from "./ci/fix-ci-node.js";
-import { fixBrowserNode } from "./nodes/fix-browser.js";
-import { decideNextStepNode } from "./nodes/decide-next-step.js";
+import { NODE_HANDLERS } from "./node-registry.js";
 import { isNonCodeFixFailure, type BrowserVerifyFailureCode } from "./quality-gates/browser-verify-routing.js";
-
-// ── Node handler registry ──
-
-const NODE_HANDLERS: Record<string, NodeHandler> = {
-  clone: cloneNode,
-  hydrate_context: hydrateContextNode,
-  implement: implementNode,
-  lint_fix: lintFixNode,
-  validate: validateNode,
-  fix_validation: fixValidationNode,
-  commit: commitNode,
-  push: pushNode,
-  create_pr: createPrNode,
-  notify: notifyNode,
-  classify_task: classifyTaskNode,
-  diff_gate: diffGateNode,
-  forbidden_files: forbiddenFilesNode,
-  security_scan: securityScanNode,
-  wait_ci: waitCiNode,
-  fix_ci: fixCiNode,
-  fix_browser: fixBrowserNode,
-  scope_judge: scopeJudgeNode,
-  deploy_preview: deployPreviewNode,
-  browser_verify: browserVerifyNode,
-  plan_task: planTaskNode,
-  local_test: localTestNode,
-  upload_screenshot: uploadScreenshotNode,
-  generate_title: generateTitleNode,
-  summarize_changes: summarizeChangesNode,
-  decide_next_step: decideNextStepNode
-};
 
 export type PipelinePhase = "cloning" | "agent" | "validating" | "pushing" | "awaiting_ci" | "ci_fixing";
 
@@ -127,7 +67,8 @@ export class PipelineEngine {
     pipelineFile?: string,
     onDetail?: (detail: string) => Promise<void>,
     skipNodes?: string[],
-    enableNodes?: string[]
+    enableNodes?: string[],
+    abortSignal?: AbortSignal
   ): Promise<ExecutionResult> {
     const yamlPath = pipelineFile ?? path.resolve("pipelines/pipeline.yml");
     const pipeline = await loadPipeline(yamlPath);
@@ -253,10 +194,10 @@ export class PipelineEngine {
         // within this async tree route through the correct container.
         // Concurrent pipeline executions each get their own context.
         result = await runInSandboxContext(sandbox.containerId, run.id, () =>
-          this.executePipeline(pipeline, ctx, deps, startIndex, false, eventLogger, skipNodeIdSet, enableNodeIdSet)
+          this.executePipeline(pipeline, ctx, deps, startIndex, false, eventLogger, skipNodeIdSet, enableNodeIdSet, abortSignal)
         );
       } else {
-        result = await this.executePipeline(pipeline, ctx, deps, startIndex, false, eventLogger, skipNodeIdSet, enableNodeIdSet);
+        result = await this.executePipeline(pipeline, ctx, deps, startIndex, false, eventLogger, skipNodeIdSet, enableNodeIdSet, abortSignal);
       }
     } finally {
       if (sandbox && this.containerManager) {
@@ -266,7 +207,7 @@ export class PipelineEngine {
     }
 
     // Aggregate token usage from all _tokenUsage_* context bag keys
-    const tokenUsage = aggregateTokenUsage(ctx);
+    const tokenUsage = aggregateTokenUsage(ctx, this.config.defaultLlmModel);
     if (tokenUsage) {
       ctx.set("tokenUsage", tokenUsage);
     }
@@ -301,12 +242,23 @@ export class PipelineEngine {
     pipelineSwitched = false,
     eventLogger?: EventLogger,
     skipNodeIds?: Set<string>,
-    enableNodeIds?: Set<string>
+    enableNodeIds?: Set<string>,
+    abortSignal?: AbortSignal,
+    subPipelineDepth = 0
   ): Promise<PipelineResult> {
+    const MAX_SUB_PIPELINE_DEPTH = 3;
     const steps: PipelineStepResult[] = [];
     const warnings: string[] = [];
+    const maxGotos = 10;
+    let gotoCount = 0;
 
     for (let i = startIndex; i < pipeline.nodes.length; i++) {
+      // Check abort signal before each node
+      if (abortSignal?.aborted) {
+        await appendLog(deps.logFile, "\n[pipeline] run cancelled by user\n");
+        return { outcome: "failure", steps: [...steps, { nodeId: "cancelled", outcome: "failure", durationMs: 0, error: "Run cancelled" }], warnings };
+      }
+
       const node = pipeline.nodes[i] as NodeConfig;
 
       // Check skipNodeIds first (explicit skip always wins)
@@ -404,6 +356,59 @@ export class PipelineEngine {
             artifact: `decision_reason:${node.id}:${decisionReason.slice(0, 200)}`
           });
         }
+
+        // Support goto/jump — a decision node can send execution to a different node
+        // Only process goto on success/soft_fail — never let a failed node bypass failure handling
+        const gotoTarget = result.outputs["_goto"];
+        if (typeof gotoTarget === "string" && result.outcome !== "failure") {
+          const targetIdx = pipeline.nodes.findIndex(n => n.id === gotoTarget);
+          if (targetIdx < 0) {
+            await appendLog(deps.logFile, `[pipeline] _goto target '${gotoTarget}' not found, ignoring\n`);
+          } else {
+            gotoCount++;
+            if (gotoCount > maxGotos) {
+              await appendLog(deps.logFile, `[pipeline] _goto limit exceeded (${String(maxGotos)}), ignoring jump to '${gotoTarget}'\n`);
+            } else {
+              await appendLog(deps.logFile, `[pipeline] _goto → ${gotoTarget} (jump ${String(gotoCount)}/${String(maxGotos)})\n`);
+              await eventLogger?.emit("artifact", {
+                nodeId: node.id,
+                artifact: `goto:${node.id}:${gotoTarget}:${String(gotoCount)}`
+              });
+              // Record the step and checkpoint before jumping
+              steps.push({ nodeId: node.id, outcome: result.outcome, durationMs });
+              await ctx.checkpoint(node.id);
+              i = targetIdx - 1; // -1 because loop will i++
+              continue;
+            }
+          }
+        }
+
+        // Support sub-pipeline invocation — run a named pipeline inline, sharing context
+        const subPipelineName = result.outputs["_runSubPipeline"];
+        if (typeof subPipelineName === "string") {
+          if (subPipelineDepth >= MAX_SUB_PIPELINE_DEPTH) {
+            await appendLog(deps.logFile, `[pipeline] sub-pipeline depth limit (${String(MAX_SUB_PIPELINE_DEPTH)}) reached, ignoring '${subPipelineName}'\n`);
+          } else {
+            const subPipeline = await this.tryLoadPipelineOverride(subPipelineName, deps.logFile);
+            if (subPipeline) {
+              await appendLog(deps.logFile, `[pipeline] running sub-pipeline '${subPipelineName}' (${String(subPipeline.nodes.length)} nodes)\n`);
+              await eventLogger?.emit("artifact", {
+                nodeId: node.id,
+                artifact: `sub_pipeline:${node.id}:${subPipelineName}`
+              });
+              const subResult = await this.executePipeline(
+                subPipeline, ctx, deps, 0, true, eventLogger, skipNodeIds, enableNodeIds, abortSignal, subPipelineDepth + 1
+              );
+              steps.push(...subResult.steps);
+              warnings.push(...subResult.warnings);
+              if (subResult.outcome === "failure") {
+                // Record the triggering node before returning failure
+                steps.push({ nodeId: node.id, outcome: "success", durationMs });
+                return { outcome: "failure", steps, warnings };
+              }
+            }
+          }
+        }
       }
 
       // Handle failure with loop construct
@@ -467,7 +472,7 @@ export class PipelineEngine {
             if (newPipeline) {
               const currentIdx = newPipeline.nodes.findIndex(n => n.id === node.id);
               if (currentIdx >= 0) {
-                const tailResult = await this.executePipeline(newPipeline, ctx, deps, currentIdx + 1, true, eventLogger, skipNodeIds, enableNodeIds);
+                const tailResult = await this.executePipeline(newPipeline, ctx, deps, currentIdx + 1, true, eventLogger, skipNodeIds, enableNodeIds, abortSignal);
                 steps.push(...tailResult.steps);
                 warnings.push(...tailResult.warnings);
                 return { outcome: tailResult.outcome, steps, warnings };
@@ -788,22 +793,36 @@ export class PipelineEngine {
 }
 
 /** Aggregate all _tokenUsage_* context bag entries into a single TokenUsage. */
-export function aggregateTokenUsage(ctx: ContextBag): TokenUsage | null {
+export function aggregateTokenUsage(ctx: ContextBag, defaultModel?: string): TokenUsage | null {
   let gateInput = 0;
   let gateOutput = 0;
+  const entries: Array<{ input: number; output: number; model?: string }> = [];
 
   for (const key of ctx.keys()) {
     if (!key.startsWith("_tokenUsage_")) continue;
-    const entry = ctx.get<{ input: number; output: number }>(key);
+    const entry = ctx.get<{ input: number; output: number; model?: string }>(key);
     if (!entry) continue;
     gateInput += entry.input;
     gateOutput += entry.output;
+    entries.push(entry);
   }
 
-  if (gateInput === 0 && gateOutput === 0) return null;
+  // Include pi-agent cost if present (from implement node)
+  const agentCost = ctx.get<{ inputTokens: number; outputTokens: number; totalCost: number }>("agentCost");
+  const agentIn = agentCost?.inputTokens ?? 0;
+  const agentOut = agentCost?.outputTokens ?? 0;
+  const agentDollarCost = agentCost?.totalCost ?? 0;
+
+  if (gateInput === 0 && gateOutput === 0 && agentIn === 0) return null;
+
+  // Compute cost from gate token entries using price table
+  const gateCostUsd = computeCostUsd(entries, defaultModel);
+  const totalCostUsd = gateCostUsd + agentDollarCost;
 
   return {
     qualityGateInputTokens: gateInput,
-    qualityGateOutputTokens: gateOutput
+    qualityGateOutputTokens: gateOutput,
+    ...(agentIn > 0 ? { agentInputTokens: agentIn, agentOutputTokens: agentOut } : {}),
+    ...(totalCostUsd > 0 ? { costUsd: Math.round(totalCostUsd * 10000) / 10000 } : {})
   };
 }

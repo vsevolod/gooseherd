@@ -49,6 +49,20 @@ const ERROR_PATTERNS: Array<{ test: RegExp; result: ClassifiedError }> = [
   },
 ];
 
+/**
+ * Resolve a pipeline hint (e.g. "ui-change") to a full YAML file path.
+ * Falls back to the default pipeline file if hint is missing or invalid.
+ */
+function resolvePipelineFile(hint: string | undefined, defaultFile: string): string {
+  if (!hint) return defaultFile;
+  // Validate: alphanumeric, hyphens, underscores only (prevent path traversal)
+  if (!/^[a-zA-Z0-9_-]+$/.test(hint)) {
+    logInfo("Invalid pipelineHint, using default", { hint });
+    return defaultFile;
+  }
+  return path.resolve("pipelines", `${hint}.yml`);
+}
+
 export function classifyError(message: string): ClassifiedError {
   for (const { test, result } of ERROR_PATTERNS) {
     if (test.test(message)) return result;
@@ -141,15 +155,28 @@ export type RunTerminalCallback = (runId: string, status: string) => void;
 export class RunManager {
   private readonly queue: PQueue;
   private readonly terminalCallbacks: RunTerminalCallback[] = [];
+  /** AbortControllers for in-progress runs — enables cancellation. */
+  private readonly runAbortControllers = new Map<string, AbortController>();
 
   constructor(
     private readonly config: AppConfig,
     private readonly store: RunStore,
     private readonly pipelineEngine: PipelineEngine,
-    private readonly slackClient: WebClient,
+    private readonly slackClient: WebClient | undefined,
     private readonly hooks?: RunLifecycleHooks
   ) {
     this.queue = new PQueue({ concurrency: config.runnerConcurrency });
+  }
+
+  /**
+   * Cancel an in-progress run. Sends abort signal to the pipeline execution.
+   * Returns true if the run was found and cancellation was requested.
+   */
+  cancelRun(runId: string): boolean {
+    const controller = this.runAbortControllers.get(runId);
+    if (!controller) return false;
+    controller.abort();
+    return true;
   }
 
   /** Register a callback that fires when any run reaches terminal status. */
@@ -423,9 +450,12 @@ export class RunManager {
         await upsertRunCard();
       };
 
-      const pipelineFile = this.config.pipelineFile;
-      const result = await this.pipelineEngine.execute(run, phaseCallback, pipelineFile, onDetail, run.skipNodes, run.enableNodes);
+      const pipelineFile = resolvePipelineFile(run.pipelineHint, this.config.pipelineFile);
+      const abortController = new AbortController();
+      this.runAbortControllers.set(stableRunId, abortController);
+      const result = await this.pipelineEngine.execute(run, phaseCallback, pipelineFile, onDetail, run.skipNodes, run.enableNodes, abortController.signal);
       stopHeartbeat();
+      this.runAbortControllers.delete(stableRunId);
 
       run = await this.store.updateRun(stableRunId, {
         status: "completed",
@@ -461,6 +491,7 @@ export class RunManager {
       this.fireTerminalCallbacks(run.id, "completed");
     } catch (error) {
       stopHeartbeat();
+      this.runAbortControllers.delete(stableRunId);
       const message = error instanceof Error ? error.message : "Unknown error";
       const failed = await this.store.updateRun(stableRunId, {
         status: "failed",
@@ -557,7 +588,7 @@ export class RunManager {
         return;
       }
 
-      await this.slackClient.chat.postMessage({
+      await this.slackClient!.chat.postMessage({
         channel: run.channelId,
         thread_ts: run.threadTs,
         text: lines.join("\n"),
@@ -585,7 +616,7 @@ export class RunManager {
     const text = this.formatRunCardText(run, args);
     const blocks = this.formatRunCardBlocks(run, args);
     if (args.statusMessageTs) {
-      await this.slackClient.chat.update({
+      await this.slackClient!.chat.update({
         channel: run.channelId,
         ts: args.statusMessageTs,
         text,
@@ -594,7 +625,7 @@ export class RunManager {
       return args.statusMessageTs;
     }
 
-    const response = await this.slackClient.chat.postMessage({
+    const response = await this.slackClient!.chat.postMessage({
       channel: run.channelId,
       thread_ts: run.threadTs,
       text,
@@ -752,6 +783,6 @@ export class RunManager {
   }
 
   private shouldPostToSlack(run: RunRecord): boolean {
-    return isSlackChannelId(run.channelId);
+    return Boolean(this.slackClient) && isSlackChannelId(run.channelId);
   }
 }
