@@ -68,5 +68,10 @@ USER gooseherd
 
 WORKDIR /work
 
+# OCI labels — links GHCR package to repo (shows README on package page)
+LABEL org.opencontainers.image.source="https://github.com/chocksy/gooseherd"
+LABEL org.opencontainers.image.description="Sandbox container for Gooseherd — isolated environment for AI agent runs"
+LABEL org.opencontainers.image.licenses="MIT"
+
 # Keep container alive for exec commands
 CMD ["sleep", "infinity"]
