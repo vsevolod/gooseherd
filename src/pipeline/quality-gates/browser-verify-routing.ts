@@ -8,10 +8,45 @@ export type BrowserVerifyFailureCode =
   | "auth_required"
   | "auth_action_blocked"
   | "signup_failed"
+  | "auth_exhausted"
   | "feature_not_found"
   | "accessibility_noise"
   | "verify_inconclusive"
   | "unknown";
+
+export type AuthErrorType =
+  | "email_rejected"
+  | "password_too_weak"
+  | "captcha_required"
+  | "form_error"
+  | "unknown";
+
+/**
+ * Detect the specific type of auth error from DOM findings, agent actions,
+ * and reasoning text. Used by the auth retry loop to decide the next action
+ * (e.g. rotate email domain, strengthen password, or give up on captcha).
+ */
+export function detectAuthErrorType(
+  domFindings: string[],
+  actions: AgentActionEntry[],
+  reasoning: string
+): AuthErrorType {
+  const combined = [...domFindings, reasoning, ...actions.map(a => a.reasoning ?? "")].join(" ").toLowerCase();
+
+  if (/already been taken|already registered|email.*taken|not allowed|blocked|invalid email|email.*invalid/.test(combined)) {
+    return "email_rejected";
+  }
+  if (/too short|password.*weak|password.*policy|minimum.*characters/.test(combined)) {
+    return "password_too_weak";
+  }
+  if (/recaptcha|captcha|hcaptcha/.test(combined)) {
+    return "captcha_required";
+  }
+  if (/validation|error|invalid|failed/.test(combined)) {
+    return "form_error";
+  }
+  return "unknown";
+}
 
 export interface StagehandProviderResolution {
   ok: boolean;
@@ -338,9 +373,8 @@ export function classifyBrowserVerifyFailure(input: {
 export function isNonCodeFixFailure(code: BrowserVerifyFailureCode | undefined): boolean {
   if (!code) return false;
   return code === "provider_mismatch"
-    || code === "auth_required"
+    || code === "auth_exhausted"
     || code === "auth_action_blocked"
-    || code === "signup_failed"
     || code === "accessibility_noise"
     || code === "verify_inconclusive";
 }

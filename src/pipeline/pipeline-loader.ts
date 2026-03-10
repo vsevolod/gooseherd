@@ -13,19 +13,13 @@ export class PipelineLoadError extends Error {
 }
 
 /**
- * Load and validate a pipeline YAML file.
+ * Parse and validate a pipeline from a YAML string.
+ * Used by both file loading and the pipeline store API.
  */
-export async function loadPipeline(yamlPath: string): Promise<PipelineConfig> {
-  let raw: string;
-  try {
-    raw = await readFile(yamlPath, "utf8");
-  } catch {
-    throw new PipelineLoadError(`Pipeline file not found: ${yamlPath}`);
-  }
-
+export function loadPipelineFromString(yaml: string): PipelineConfig {
   let parsed: unknown;
   try {
-    parsed = parseYaml(raw);
+    parsed = parseYaml(yaml);
   } catch (err) {
     const msg = err instanceof Error ? err.message : "unknown";
     throw new PipelineLoadError(`Invalid YAML in pipeline file: ${msg}`);
@@ -118,4 +112,17 @@ export async function loadPipeline(yamlPath: string): Promise<PipelineConfig> {
     context: config["context"] as Record<string, unknown> | undefined,
     nodes: nodes as unknown as NodeConfig[]
   };
+}
+
+/**
+ * Load and validate a pipeline YAML file.
+ */
+export async function loadPipeline(yamlPath: string): Promise<PipelineConfig> {
+  let raw: string;
+  try {
+    raw = await readFile(yamlPath, "utf8");
+  } catch {
+    throw new PipelineLoadError(`Pipeline file not found: ${yamlPath}`);
+  }
+  return loadPipelineFromString(raw);
 }

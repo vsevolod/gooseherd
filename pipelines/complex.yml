@@ -10,6 +10,11 @@ nodes:
     type: deterministic
     action: clone
 
+  - id: setup_sandbox
+    type: deterministic
+    action: setup_sandbox
+    if: "config.sandboxEnabled"
+
   - id: classify_task
     type: deterministic
     action: classify_task

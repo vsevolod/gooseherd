@@ -31,18 +31,23 @@ import {
   type VisualVerifyResult,
   type BrowserCheck
 } from "./browser-verify.js";
+import type { AppConfig } from "../../config.js";
 import type { LLMCallerConfig } from "../../llm/caller.js";
 import { runStagehandVerification } from "./stagehand-verify.js";
 import {
   classifyBrowserVerifyFailure,
   deriveAuthSignals,
+  detectAuthErrorType,
   resolveStagehandProvider,
   type AgentActionEntry,
+  type AuthErrorType,
   type BrowserAuthSignals,
   type BrowserVerifyFailureCode,
   type NetworkEntry,
   type StagehandProviderResolution
 } from "./browser-verify-routing.js";
+import { AuthCredentialStore } from "./auth-credential-store.js";
+import { getDb } from "../../db/index.js";
 
 export async function browserVerifyNode(
   nodeConfig: NodeConfig,
@@ -192,87 +197,177 @@ export async function browserVerifyNode(
     }
   }
 
+  // Track whether auth retry loop exhausted all attempts
+  let authExhausted = false;
+
   if (smokeCheck.passed && providerResolution?.ok && providerResolution.apiKey) {
-    // Get credentials (persisted across fix_browser retries)
+    // Load credential store for auth retry
+    const credStore = new AuthCredentialStore(getDb(), config.encryptionKey);
+    await credStore.load();
+
+    const domain = new URL(reviewAppUrl).hostname;
+    const storedCreds = await credStore.getForDomain(domain);
+
+    // Get credentials from context (persisted across fix_browser retries)
     const savedCreds = ctx.get<{ email: string; password: string }>("browserVerifyCredentials");
-    const signupProfile = !savedCreds && allowSignup
-      ? buildSignupProfile(reviewAppUrl, deps.run.repoSlug, deps.run.id)
-      : undefined;
-    if (signupProfile) {
-      ctx.set("browserVerifySignupProfile", signupProfile);
-      await appendLog(
-        logFile,
-        `[gate:browser_verify] signup profile prepared: preferred=${signupProfile.preferredEmail} backups=${signupProfile.backupEmails.join(",")}\n`
-      );
-    }
 
-    try {
-      const result = await runStagehandVerification(
-        reviewAppUrl,
-        deps.run.task,
-        ctx.get<string[]>("changedFiles") ?? [],
-        runDir,
-        providerResolution.apiKey,
-        config.browserVerifyModel,
-        logFile,
-        savedCreds ?? undefined,
-        ctx.get<string>("changeSummary"),
-        providerResolution.baseURL,
-        config.browserVerifyExecutionModel,
-        config.browserVerifyMaxSteps,
-        config.browserVerifyExecTimeoutMs,
-        {
-          allowSignup,
-          preferSignupWithoutCredentials: !savedCreds && preferSignupWithoutCredentials
-        },
-        signupProfile
-      );
-      screenshotPath = result.screenshotPath;
-      verifyResult = result.verifyResult;
-      planTokenUsage = result.planTokens;
-      domFindings = result.domFindings;
+    // Auth retry loop: attempts stored creds, then rotates signup profiles
+    const maxAuthAttempts = 3;
 
-      if (result.videoPath) {
-        ctx.set("videoPath", result.videoPath);
-        logInfo("browser_verify: video recorded", { path: result.videoPath });
-      }
-      if (result.consolePath) {
-        ctx.set("consolePath", result.consolePath);
-      }
-      if (result.networkPath) {
-        ctx.set("networkPath", result.networkPath);
-      }
-      if (result.actionsPath) {
-        ctx.set("actionsPath", result.actionsPath);
-      }
-      authSignals = await collectAuthSignals(result.actionsPath, result.networkPath, verifyResult?.reasoning);
-      ctx.set("browserVerifyAuthSignals", authSignals);
-    } catch (error) {
-      // Stagehand failed — fall back to screenshot + vision
-      const msg = error instanceof Error ? error.message : "Unknown error";
-      stagehandErrorMessage = msg;
-      await appendLog(logFile, `[gate:browser_verify] stagehand failed, falling back to screenshot: ${msg}\n`);
+    for (let authAttempt = 0; authAttempt < maxAuthAttempts; authAttempt++) {
+      // Determine credentials for this attempt
+      let attemptCreds = savedCreds ?? undefined;
 
-      screenshotPath = await captureScreenshotFallback(reviewAppUrl, runDir, logFile);
-      if (screenshotPath && providerResolution.apiKey) {
-        const llmConfig: LLMCallerConfig = {
-          apiKey: config.openrouterApiKey ?? providerResolution.apiKey,
-          defaultModel: config.browserVerifyModel,
-          defaultTimeoutMs: 30_000,
-          providerPreferences: config.openrouterProviderPreferences
-        };
-        try {
-          verifyResult = await verifyFeatureVisually(
-            llmConfig,
-            screenshotPath,
-            deps.run.task,
-            ctx.get<string[]>("changedFiles") ?? [],
-            config.browserVerifyModel
-          );
-        } catch (visionError) {
-          const visionMsg = visionError instanceof Error ? visionError.message : "Unknown error";
-          await appendLog(logFile, `[gate:browser_verify] vision fallback also failed: ${visionMsg}\n`);
+      // Attempt 0: try stored credentials from credential store (if no context creds)
+      if (!attemptCreds && storedCreds?.loginSuccessful && authAttempt === 0) {
+        attemptCreds = { email: storedCreds.email, password: storedCreds.password };
+        await credStore.touch(domain);
+        await appendLog(logFile, `[gate:browser_verify] auth attempt ${authAttempt}: using stored credentials for ${domain}\n`);
+      }
+
+      // Build signup profile for this attempt (rotating email domains)
+      let signupProfile: SignupProfile | undefined;
+      if (!attemptCreds && allowSignup) {
+        signupProfile = buildSignupProfileForAttempt(
+          reviewAppUrl, deps.run.repoSlug, deps.run.id, authAttempt, config
+        );
+        ctx.set("browserVerifySignupProfile", signupProfile);
+        await appendLog(
+          logFile,
+          `[gate:browser_verify] auth attempt ${authAttempt}: signup profile preferred=${signupProfile.preferredEmail} backups=${signupProfile.backupEmails.join(",")}\n`
+        );
+      }
+
+      if (authAttempt > 0) {
+        await appendLog(logFile, `[gate:browser_verify] auth retry attempt ${authAttempt}/${maxAuthAttempts - 1}\n`);
+      }
+
+      try {
+        const result = await runStagehandVerification(
+          reviewAppUrl,
+          deps.run.task,
+          ctx.get<string[]>("changedFiles") ?? [],
+          runDir,
+          providerResolution.apiKey,
+          config.browserVerifyModel,
+          logFile,
+          attemptCreds,
+          ctx.get<string>("changeSummary"),
+          providerResolution.baseURL,
+          config.browserVerifyExecutionModel,
+          config.browserVerifyMaxSteps,
+          config.browserVerifyExecTimeoutMs,
+          {
+            allowSignup,
+            preferSignupWithoutCredentials: !attemptCreds && preferSignupWithoutCredentials
+          },
+          signupProfile
+        );
+        screenshotPath = result.screenshotPath;
+        verifyResult = result.verifyResult;
+        planTokenUsage = result.planTokens;
+        domFindings = result.domFindings;
+
+        if (result.videoPath) {
+          ctx.set("videoPath", result.videoPath);
+          logInfo("browser_verify: video recorded", { path: result.videoPath });
         }
+        if (result.consolePath) {
+          ctx.set("consolePath", result.consolePath);
+        }
+        if (result.networkPath) {
+          ctx.set("networkPath", result.networkPath);
+        }
+        if (result.actionsPath) {
+          ctx.set("actionsPath", result.actionsPath);
+        }
+        authSignals = await collectAuthSignals(result.actionsPath, result.networkPath, verifyResult?.reasoning);
+        ctx.set("browserVerifyAuthSignals", authSignals);
+
+        // Check if verification passed — no need to retry
+        if (verifyResult?.passed) {
+          // Save successful credentials to store
+          if (signupProfile) {
+            await credStore.save(domain, {
+              email: signupProfile.preferredEmail,
+              password: signupProfile.password,
+              createdAt: new Date().toISOString(),
+              lastUsedAt: new Date().toISOString(),
+              loginSuccessful: true
+            });
+            // Persist in context for fix_browser retries
+            ctx.set("browserVerifyCredentials", {
+              email: signupProfile.preferredEmail,
+              password: signupProfile.password
+            });
+          } else if (attemptCreds && !savedCreds) {
+            // Stored creds worked — update lastUsedAt (touch already called above)
+          }
+          break; // success — exit retry loop
+        }
+
+        // Verification failed — check if it's an auth-related failure worth retrying
+        const isAuthRelated = authSignals?.authGateLikely
+          || authSignals?.signupPageSeen
+          || authSignals?.loginPageSeen;
+
+        if (!isAuthRelated) {
+          // Not an auth problem — don't retry, it's a genuine feature failure
+          break;
+        }
+
+        // Detect the specific auth error type
+        const actions = await readJsonArray<AgentActionEntry>(result.actionsPath);
+        const authErrorType: AuthErrorType = detectAuthErrorType(
+          domFindings ?? [],
+          actions,
+          verifyResult?.reasoning ?? ""
+        );
+        await appendLog(logFile, `[gate:browser_verify] auth error type: ${authErrorType}\n`);
+
+        if (authErrorType === "captcha_required") {
+          authExhausted = true;
+          await appendLog(logFile, "[gate:browser_verify] captcha detected — auth exhausted\n");
+          break;
+        }
+
+        // Last attempt — don't retry further
+        if (authAttempt >= maxAuthAttempts - 1) {
+          authExhausted = true;
+          await appendLog(logFile, "[gate:browser_verify] auth retry attempts exhausted\n");
+          break;
+        }
+
+        // Otherwise continue to next attempt (email_rejected → rotate domain,
+        // password_too_weak → next profile has stronger password, form_error/unknown → retry)
+      } catch (error) {
+        // Stagehand failed — fall back to screenshot + vision (no retry)
+        const msg = error instanceof Error ? error.message : "Unknown error";
+        stagehandErrorMessage = msg;
+        await appendLog(logFile, `[gate:browser_verify] stagehand failed, falling back to screenshot: ${msg}\n`);
+
+        screenshotPath = await captureScreenshotFallback(reviewAppUrl, runDir, logFile);
+        if (screenshotPath && providerResolution.apiKey) {
+          const llmConfig: LLMCallerConfig = {
+            apiKey: config.openrouterApiKey ?? providerResolution.apiKey,
+            defaultModel: config.browserVerifyModel,
+            defaultTimeoutMs: 30_000,
+            providerPreferences: config.openrouterProviderPreferences
+          };
+          try {
+            verifyResult = await verifyFeatureVisually(
+              llmConfig,
+              screenshotPath,
+              deps.run.task,
+              ctx.get<string[]>("changedFiles") ?? [],
+              config.browserVerifyModel
+            );
+          } catch (visionError) {
+            const visionMsg = visionError instanceof Error ? visionError.message : "Unknown error";
+            await appendLog(logFile, `[gate:browser_verify] vision fallback also failed: ${visionMsg}\n`);
+          }
+        }
+        break; // Don't retry on stagehand init failures
       }
     }
 
@@ -329,13 +424,15 @@ export async function browserVerifyNode(
     const verdictReason = verifyResult
       ? `[${verifyResult.confidence}] ${verifyResult.reasoning}`
       : reasons.join("; ");
-    const failureCode: BrowserVerifyFailureCode = classifyBrowserVerifyFailure({
+    const classifiedCode = classifyBrowserVerifyFailure({
       checks,
       verifyReason: verdictReason,
       authSignals,
       preflightFailureCode
     });
-    await appendLog(logFile, `[gate:browser_verify] failure_class: ${failureCode}\n`);
+    // Override to auth_exhausted when the retry loop gave up on all auth attempts
+    const failureCode: BrowserVerifyFailureCode = authExhausted ? "auth_exhausted" : classifiedCode;
+    await appendLog(logFile, `[gate:browser_verify] failure_class: ${failureCode}${authExhausted ? " (auth retry exhausted)" : ""}\n`);
 
     appendGateReport(ctx, "browser_verify", "failure", reasons);
     return {
@@ -456,15 +553,25 @@ interface SignupProfile {
 }
 
 /** @internal Exported for testing */
-export function buildSignupProfile(reviewAppUrl: string, repoSlug: string, runId: string): SignupProfile {
+export function buildSignupProfile(
+  reviewAppUrl: string,
+  repoSlug: string,
+  runId: string,
+  configEmailDomains?: string[]
+): SignupProfile {
   const slug = normalizeSlug(repoSlug.split("/")[1] ?? repoSlug);
   const token = `${Date.now().toString(36)}${runId.replace(/-/g, "").slice(0, 6)}`;
   const preferredDomain = deriveProjectDomain(reviewAppUrl);
+
+  // Use config-provided domains if available, otherwise fall back to defaults
+  const fallbackDomains = configEmailDomains && configEmailDomains.length > 0
+    ? configEmailDomains
+    : ["gmail.com", "outlook.com"];
+
   const domains = Array.from(
     new Set([
       preferredDomain,
-      "gmail.com",
-      "outlook.com"
+      ...fallbackDomains
     ].filter((value): value is string => Boolean(value)))
   );
 
@@ -482,6 +589,52 @@ export function buildSignupProfile(reviewAppUrl: string, repoSlug: string, runId
     preferredEmail,
     backupEmails,
     password: `Qa!${token}#2026`
+  };
+}
+
+/**
+ * Build a signup profile for a specific auth retry attempt.
+ * Each attempt rotates through different email domain combinations
+ * to handle cases where a domain is rejected or already registered.
+ */
+export function buildSignupProfileForAttempt(
+  reviewAppUrl: string,
+  repoSlug: string,
+  runId: string,
+  attempt: number,
+  config: Pick<AppConfig, "browserVerifyTestEmail" | "browserVerifyTestPassword" | "browserVerifyEmailDomains">
+): SignupProfile {
+  // If config provides explicit test email/password, use those (attempt 0 only)
+  if (attempt === 0 && config.browserVerifyTestEmail && config.browserVerifyTestPassword) {
+    return {
+      fullName: "QA Browser Verify",
+      preferredEmail: config.browserVerifyTestEmail,
+      backupEmails: [],
+      password: config.browserVerifyTestPassword
+    };
+  }
+
+  // Build profile with domain rotation based on attempt number
+  const base = buildSignupProfile(reviewAppUrl, repoSlug, runId, config.browserVerifyEmailDomains);
+
+  if (attempt === 0) {
+    return base;
+  }
+
+  // Rotate: attempt 1 uses backup_1 as preferred, attempt 2 uses backup_2
+  const allEmails = [base.preferredEmail, ...base.backupEmails];
+  const rotatedIndex = Math.min(attempt, allEmails.length - 1);
+  const rotatedPreferred = allEmails[rotatedIndex] ?? base.preferredEmail;
+  const rotatedBackups = allEmails.filter((_, i) => i !== rotatedIndex);
+
+  // Strengthen password on retry (add more complexity)
+  const strengthenedPassword = `${base.password}!X${String(attempt)}`;
+
+  return {
+    fullName: base.fullName,
+    preferredEmail: rotatedPreferred,
+    backupEmails: rotatedBackups,
+    password: strengthenedPassword
   };
 }
 

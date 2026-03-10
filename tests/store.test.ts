@@ -1,22 +1,18 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
-import os from "node:os";
-import path from "node:path";
 import test from "node:test";
 import { mapPhaseToRunStatus, RunStore } from "../src/store.js";
+import { createTestDb } from "./helpers/test-db.js";
 
-async function createStore(prefix = "gooseherd-test-"): Promise<{ store: RunStore; dir: string }> {
-  const dir = await mkdtemp(path.join(os.tmpdir(), prefix));
-  const store = new RunStore(dir);
+async function createStore(): Promise<{ store: RunStore; cleanup: () => Promise<void> }> {
+  const testDb = await createTestDb();
+  const store = new RunStore(testDb.db);
   await store.init();
-  return { store, dir };
+  return { store, cleanup: testDb.cleanup };
 }
 
 test("createRun stores queued phase and metadata updates persist", async (t) => {
-  const { store, dir } = await createStore();
-  t.after(async () => {
-    await rm(dir, { recursive: true, force: true });
-  });
+  const { store, cleanup } = await createStore();
+  t.after(cleanup);
 
   const run = await store.createRun(
     {
@@ -52,10 +48,8 @@ test("createRun stores queued phase and metadata updates persist", async (t) => 
 });
 
 test("listRuns returns newest first and feedback is saved", async (t) => {
-  const { store, dir } = await createStore("gooseherd-test-list-");
-  t.after(async () => {
-    await rm(dir, { recursive: true, force: true });
-  });
+  const { store, cleanup } = await createStore();
+  t.after(cleanup);
 
   const first = await store.createRun(
     {
@@ -106,10 +100,8 @@ test("mapPhaseToRunStatus handles phase mapping", () => {
 });
 
 test("recoverInProgressRuns requeues interrupted runs", async (t) => {
-  const { store, dir } = await createStore("gooseherd-test-recover-");
-  t.after(async () => {
-    await rm(dir, { recursive: true, force: true });
-  });
+  const { store, cleanup } = await createStore();
+  t.after(cleanup);
 
   const run = await store.createRun(
     {

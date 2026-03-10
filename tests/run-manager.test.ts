@@ -1,13 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import path from "node:path";
 import { RunManager, classifyError } from "../src/run-manager.js";
 import { RunStore } from "../src/store.js";
 import type { AppConfig } from "../src/config.js";
 import type { PipelineEngine } from "../src/pipeline/pipeline-engine.js";
 import type { RunRecord, ExecutionResult } from "../src/types.js";
+import { createTestDb, type TestDb } from "./helpers/test-db.js";
 
 // ── Mock factories ─────────────────────────────────────
 
@@ -115,27 +113,27 @@ function makeMockPipelineEngineFailing(errorMessage: string): PipelineEngine {
 
 // ── Test helpers ────────────────────────────────────────
 
-async function setupTestStore(): Promise<{ store: RunStore; tmpDir: string }> {
-  const tmpDir = await mkdtemp(path.join(tmpdir(), "gooseherd-test-"));
-  const store = new RunStore(tmpDir);
+async function setupTestStore(): Promise<{ store: RunStore; testDb: TestDb }> {
+  const testDb = await createTestDb();
+  const store = new RunStore(testDb.db);
   await store.init();
-  return { store, tmpDir };
+  return { store, testDb };
 }
 
-async function cleanupTestStore(tmpDir: string): Promise<void> {
-  // Small delay to let async queue operations finish writing
-  await new Promise((resolve) => setTimeout(resolve, 100));
-  try {
-    await rm(tmpDir, { recursive: true, force: true });
-  } catch {
-    // Ignore cleanup errors — OS will clean up temp dirs
+/** Poll until a run reaches a terminal status (completed/failed) or timeout. */
+async function waitForRunDone(store: RunStore, runId: string, timeoutMs = 5000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const run = await store.getRun(runId);
+    if (run && (run.status === "completed" || run.status === "failed")) return;
+    await new Promise((r) => setTimeout(r, 50));
   }
 }
 
 // ── enqueueRun ─────────────────────────────────────────
 
 test("enqueueRun creates a run record and returns it", async () => {
-  const { store, tmpDir } = await setupTestStore();
+  const { store, testDb } = await setupTestStore();
   const mockClient = makeMockSlackClient();
   const mockPipeline = makeMockPipelineEngine();
   const config = makeConfig();
@@ -157,13 +155,14 @@ test("enqueueRun creates a run record and returns it", async () => {
   assert.equal(run.task, "fix the bug");
   assert.ok(run.branchName.startsWith("testherd/"));
 
-  await cleanupTestStore(tmpDir);
+  await waitForRunDone(store, run.id);
+  await testDb.cleanup();
 });
 
 // ── retryRun ───────────────────────────────────────────
 
 test("retryRun creates a new run from a completed run", async () => {
-  const { store, tmpDir } = await setupTestStore();
+  const { store, testDb } = await setupTestStore();
   const mockClient = makeMockSlackClient();
   const mockPipeline = makeMockPipelineEngine();
   const config = makeConfig();
@@ -179,8 +178,8 @@ test("retryRun creates a new run from a completed run", async () => {
     threadTs: "1234567890.000000"
   });
 
-  // Mark as completed so retryRun allows retry (status guard)
-  await store.updateRun(original.id, { status: "completed" });
+  // Wait for background processRun to complete first
+  await waitForRunDone(store, original.id);
 
   const retried = await manager.retryRun(original.id, "U5678");
   assert.ok(retried, "Retry should return a new run");
@@ -191,51 +190,53 @@ test("retryRun creates a new run from a completed run", async () => {
   // retryRun does NOT set parentRunId
   assert.equal(retried!.parentRunId, undefined);
 
-  await cleanupTestStore(tmpDir);
+  await waitForRunDone(store, retried!.id);
+  await testDb.cleanup();
 });
 
 test("retryRun returns undefined for queued/running run", async () => {
-  const { store, tmpDir } = await setupTestStore();
+  const { store, testDb } = await setupTestStore();
   const mockClient = makeMockSlackClient();
   const mockPipeline = makeMockPipelineEngine();
   const config = makeConfig();
 
   const manager = new RunManager(config, store, mockPipeline, mockClient as any);
 
-  const run = await manager.enqueueRun({
+  // Create run directly via store to avoid triggering background processRun
+  const run = await store.createRun({
     repoSlug: "org/repo",
     task: "still running",
     baseBranch: "main",
     requestedBy: "U1234",
     channelId: "C1234",
     threadTs: "1234567890.000000"
-  });
+  }, "testherd");
 
   // Run is in "queued" status — retry should be blocked
   const result = await manager.retryRun(run.id, "U5678");
   assert.equal(result, undefined, "Should not retry a queued run");
 
-  await cleanupTestStore(tmpDir);
+  await testDb.cleanup();
 });
 
 test("retryRun returns undefined for non-existent run", async () => {
-  const { store, tmpDir } = await setupTestStore();
+  const { store, testDb } = await setupTestStore();
   const mockClient = makeMockSlackClient();
   const mockPipeline = makeMockPipelineEngine();
   const config = makeConfig();
 
   const manager = new RunManager(config, store, mockPipeline, mockClient as any);
 
-  const result = await manager.retryRun("nonexistent-id", "U1234");
+  const result = await manager.retryRun("00000000-0000-0000-0000-000000000000", "U1234");
   assert.equal(result, undefined);
 
-  await cleanupTestStore(tmpDir);
+  await testDb.cleanup();
 });
 
 // ── continueRun ────────────────────────────────────────
 
 test("continueRun creates a chained run with parentRunId", async () => {
-  const { store, tmpDir } = await setupTestStore();
+  const { store, testDb } = await setupTestStore();
   const mockClient = makeMockSlackClient();
   const mockPipeline = makeMockPipelineEngine();
   const config = makeConfig();
@@ -261,34 +262,36 @@ test("continueRun creates a chained run with parentRunId", async () => {
   // Should reuse parent's branch
   assert.equal(continued!.branchName, parent.branchName);
 
-  await cleanupTestStore(tmpDir);
+  await waitForRunDone(store, parent.id);
+  await waitForRunDone(store, continued!.id);
+  await testDb.cleanup();
 });
 
 test("continueRun returns undefined for non-existent parent", async () => {
-  const { store, tmpDir } = await setupTestStore();
+  const { store, testDb } = await setupTestStore();
   const mockClient = makeMockSlackClient();
   const mockPipeline = makeMockPipelineEngine();
   const config = makeConfig();
 
   const manager = new RunManager(config, store, mockPipeline, mockClient as any);
 
-  const result = await manager.continueRun("nonexistent", "new instructions", "U1234");
+  const result = await manager.continueRun("00000000-0000-0000-0000-000000000000", "new instructions", "U1234");
   assert.equal(result, undefined);
 
-  await cleanupTestStore(tmpDir);
+  await testDb.cleanup();
 });
 
 // ── processRun (via enqueueRun) ────────────────────────
 
 test("processRun posts status card and summary on success", async () => {
-  const { store, tmpDir } = await setupTestStore();
+  const { store, testDb } = await setupTestStore();
   const mockClient = makeMockSlackClient();
   const mockPipeline = makeMockPipelineEngine();
   const config = makeConfig();
 
   const manager = new RunManager(config, store, mockPipeline, mockClient as any);
 
-  await manager.enqueueRun({
+  const run = await manager.enqueueRun({
     repoSlug: "org/repo",
     task: "add feature",
     baseBranch: "main",
@@ -297,8 +300,7 @@ test("processRun posts status card and summary on success", async () => {
     threadTs: "1234567890.000000"
   });
 
-  // Wait for the async queue to process
-  await new Promise((resolve) => setTimeout(resolve, 200));
+  await waitForRunDone(store, run.id);
 
   // Should have posted messages: initial card + heartbeat updates + final card + summary
   const postMessages = mockClient._calls.filter((c) => c.method === "chat.postMessage");
@@ -317,18 +319,18 @@ test("processRun posts status card and summary on success", async () => {
   // Summary should have username override
   assert.equal(summary.args.username, "testherd");
 
-  await cleanupTestStore(tmpDir);
+  await testDb.cleanup();
 });
 
 test("processRun posts failure summary on error", async () => {
-  const { store, tmpDir } = await setupTestStore();
+  const { store, testDb } = await setupTestStore();
   const mockClient = makeMockSlackClient();
   const mockPipeline = makeMockPipelineEngineFailing("Agent timed out");
   const config = makeConfig();
 
   const manager = new RunManager(config, store, mockPipeline, mockClient as any);
 
-  await manager.enqueueRun({
+  const run = await manager.enqueueRun({
     repoSlug: "org/repo",
     task: "fix the bug",
     baseBranch: "main",
@@ -337,8 +339,7 @@ test("processRun posts failure summary on error", async () => {
     threadTs: "1234567890.000000"
   });
 
-  // Wait for the async queue to process
-  await new Promise((resolve) => setTimeout(resolve, 200));
+  await waitForRunDone(store, run.id);
 
   const postMessages = mockClient._calls.filter((c) => c.method === "chat.postMessage");
   const summary = postMessages.findLast((c) => {
@@ -351,11 +352,11 @@ test("processRun posts failure summary on error", async () => {
   assert.ok(summaryText.includes("Agent timed out"), "Summary should include error");
   assert.ok(summaryText.includes("retry"), "Summary should suggest retry");
 
-  await cleanupTestStore(tmpDir);
+  await testDb.cleanup();
 });
 
 test("processRun with local channel skips Slack posts and still completes", async () => {
-  const { store, tmpDir } = await setupTestStore();
+  const { store, testDb } = await setupTestStore();
   const mockClient = makeMockSlackClient();
   const mockPipeline = makeMockPipelineEngine();
   const config = makeConfig();
@@ -371,27 +372,27 @@ test("processRun with local channel skips Slack posts and still completes", asyn
     threadTs: "local"
   });
 
-  await new Promise((resolve) => setTimeout(resolve, 200));
+  await waitForRunDone(store, run.id);
 
   const stored = await store.getRun(run.id);
   assert.equal(stored?.status, "completed");
   assert.equal(stored?.phase, "completed");
   assert.equal(mockClient._calls.length, 0, "No Slack API calls should be made for local runs");
 
-  await cleanupTestStore(tmpDir);
+  await testDb.cleanup();
 });
 
 // ── username override ──────────────────────────────────
 
 test("postOrUpdateRunCard includes username on postMessage", async () => {
-  const { store, tmpDir } = await setupTestStore();
+  const { store, testDb } = await setupTestStore();
   const mockClient = makeMockSlackClient();
   const mockPipeline = makeMockPipelineEngine();
   const config = makeConfig({ slackCommandName: "mybot" });
 
   const manager = new RunManager(config, store, mockPipeline, mockClient as any);
 
-  await manager.enqueueRun({
+  const run = await manager.enqueueRun({
     repoSlug: "org/repo",
     task: "test username",
     baseBranch: "main",
@@ -400,8 +401,7 @@ test("postOrUpdateRunCard includes username on postMessage", async () => {
     threadTs: "1234567890.000000"
   });
 
-  // Wait for processing
-  await new Promise((resolve) => setTimeout(resolve, 200));
+  await waitForRunDone(store, run.id);
 
   // First postMessage should be the status card
   const firstPost = mockClient._calls.find((c) => c.method === "chat.postMessage");
@@ -414,13 +414,13 @@ test("postOrUpdateRunCard includes username on postMessage", async () => {
     assert.equal(update.args.username, undefined, "chat.update should not include username");
   }
 
-  await cleanupTestStore(tmpDir);
+  await testDb.cleanup();
 });
 
 // ── formatRunStatus ────────────────────────────────────
 
 test("formatRunStatus returns message when no run found", async () => {
-  const { store, tmpDir } = await setupTestStore();
+  const { store, testDb } = await setupTestStore();
   const mockClient = makeMockSlackClient();
   const mockPipeline = makeMockPipelineEngine();
   const config = makeConfig();
@@ -430,11 +430,11 @@ test("formatRunStatus returns message when no run found", async () => {
   const status = await manager.formatRunStatus(undefined, "C1234");
   assert.ok(status.includes("No run found"), "Should say no run found");
 
-  await cleanupTestStore(tmpDir);
+  await testDb.cleanup();
 });
 
 test("formatRunStatus returns not found for bad ID", async () => {
-  const { store, tmpDir } = await setupTestStore();
+  const { store, testDb } = await setupTestStore();
   const mockClient = makeMockSlackClient();
   const mockPipeline = makeMockPipelineEngine();
   const config = makeConfig();
@@ -444,20 +444,20 @@ test("formatRunStatus returns not found for bad ID", async () => {
   const status = await manager.formatRunStatus("nonexistent", "C1234");
   assert.ok(status.includes("not found"), "Should say run not found");
 
-  await cleanupTestStore(tmpDir);
+  await testDb.cleanup();
 });
 
 // ── getLatestRunForThread ──────────────────────────────
 
 test("getLatestRunForThread returns the most recent run", async () => {
-  const { store, tmpDir } = await setupTestStore();
+  const { store, testDb } = await setupTestStore();
   const mockClient = makeMockSlackClient();
   const mockPipeline = makeMockPipelineEngine();
   const config = makeConfig();
 
   const manager = new RunManager(config, store, mockPipeline, mockClient as any);
 
-  await manager.enqueueRun({
+  const first = await manager.enqueueRun({
     repoSlug: "org/repo",
     task: "first",
     baseBranch: "main",
@@ -479,13 +479,15 @@ test("getLatestRunForThread returns the most recent run", async () => {
   assert.ok(latest, "Should find a run");
   assert.equal(latest!.id, second.id, "Should return the most recent run");
 
-  await cleanupTestStore(tmpDir);
+  await waitForRunDone(store, first.id);
+  await waitForRunDone(store, second.id);
+  await testDb.cleanup();
 });
 
 // ── getRunChain ────────────────────────────────────────
 
 test("getRunChain returns all runs in a thread sorted by creation", async () => {
-  const { store, tmpDir } = await setupTestStore();
+  const { store, testDb } = await setupTestStore();
   const mockClient = makeMockSlackClient();
   const mockPipeline = makeMockPipelineEngine();
   const config = makeConfig();
@@ -519,13 +521,15 @@ test("getRunChain returns all runs in a thread sorted by creation", async () => 
   const other = await manager.getRunChain("C1234", "9999999999.000000");
   assert.equal(other.length, 0);
 
-  await cleanupTestStore(tmpDir);
+  await waitForRunDone(store, first.id);
+  await waitForRunDone(store, second.id);
+  await testDb.cleanup();
 });
 
 // ── summary message content ────────────────────────────
 
 test("summary includes task preview when task is long", async () => {
-  const { store, tmpDir } = await setupTestStore();
+  const { store, testDb } = await setupTestStore();
   const mockClient = makeMockSlackClient();
   const longTask = "a".repeat(200);
   const mockPipeline = makeMockPipelineEngine();
@@ -533,7 +537,7 @@ test("summary includes task preview when task is long", async () => {
 
   const manager = new RunManager(config, store, mockPipeline, mockClient as any);
 
-  await manager.enqueueRun({
+  const run = await manager.enqueueRun({
     repoSlug: "org/repo",
     task: longTask,
     baseBranch: "main",
@@ -542,18 +546,18 @@ test("summary includes task preview when task is long", async () => {
     threadTs: "1234567890.000000"
   });
 
-  await new Promise((resolve) => setTimeout(resolve, 200));
+  await waitForRunDone(store, run.id);
 
   const postMessages = mockClient._calls.filter((c) => c.method === "chat.postMessage");
   const summary = postMessages[postMessages.length - 1];
   const summaryText = summary.args.text as string;
   assert.ok(summaryText.includes("..."), "Long task should be truncated with ellipsis");
 
-  await cleanupTestStore(tmpDir);
+  await testDb.cleanup();
 });
 
 test("summary limits displayed files to 10", async () => {
-  const { store, tmpDir } = await setupTestStore();
+  const { store, testDb } = await setupTestStore();
   const mockClient = makeMockSlackClient();
   const manyFiles = Array.from({ length: 15 }, (_, i) => `src/file${String(i)}.ts`);
   const mockPipeline = makeMockPipelineEngine({ changedFiles: manyFiles });
@@ -561,7 +565,7 @@ test("summary limits displayed files to 10", async () => {
 
   const manager = new RunManager(config, store, mockPipeline, mockClient as any);
 
-  await manager.enqueueRun({
+  const run = await manager.enqueueRun({
     repoSlug: "org/repo",
     task: "many file changes",
     baseBranch: "main",
@@ -570,14 +574,14 @@ test("summary limits displayed files to 10", async () => {
     threadTs: "1234567890.000000"
   });
 
-  await new Promise((resolve) => setTimeout(resolve, 200));
+  await waitForRunDone(store, run.id);
 
   const postMessages = mockClient._calls.filter((c) => c.method === "chat.postMessage");
   const summary = postMessages[postMessages.length - 1];
   const summaryText = summary.args.text as string;
   assert.ok(summaryText.includes("+5 more"), "Should show overflow count for files > 10");
 
-  await cleanupTestStore(tmpDir);
+  await testDb.cleanup();
 });
 
 // ── classifyError ─────────────────────────────────────
@@ -666,14 +670,14 @@ test("classifyError returns first matching pattern when multiple could match", (
 // ── failure summary with classified error ─────────────
 
 test("failure summary shows classified error with suggestion for known patterns", async () => {
-  const { store, tmpDir } = await setupTestStore();
+  const { store, testDb } = await setupTestStore();
   const mockClient = makeMockSlackClient();
   const mockPipeline = makeMockPipelineEngineFailing("failed to clone org/repo: fatal: repository not found");
   const config = makeConfig();
 
   const manager = new RunManager(config, store, mockPipeline, mockClient as any);
 
-  await manager.enqueueRun({
+  const run = await manager.enqueueRun({
     repoSlug: "org/repo",
     task: "fix the bug",
     baseBranch: "main",
@@ -682,7 +686,7 @@ test("failure summary shows classified error with suggestion for known patterns"
     threadTs: "1234567890.000000"
   });
 
-  await new Promise((resolve) => setTimeout(resolve, 200));
+  await waitForRunDone(store, run.id);
 
   const postMessages = mockClient._calls.filter((c) => c.method === "chat.postMessage");
   const summary = postMessages[postMessages.length - 1];
@@ -690,5 +694,5 @@ test("failure summary shows classified error with suggestion for known patterns"
   assert.ok(summaryText.includes("Failed to clone repository"), "Should show friendly error name");
   assert.ok(summaryText.includes("GitHub credentials"), "Should show suggestion");
 
-  await cleanupTestStore(tmpDir);
+  await testDb.cleanup();
 });

@@ -5,18 +5,28 @@
  * Follows the same daemon pattern as WorkspaceCleaner.
  */
 
+import path from "node:path";
 import type { WebClient } from "@slack/web-api";
 import type { AppConfig } from "../config.js";
 import type { RunEnqueuer } from "./run-enqueuer.js";
 import { logError, logInfo, logWarn } from "../logger.js";
+import { loadExtensionAdapters } from "./sources/load-extension-adapters.js";
 import { ObserverStateStore } from "./state-store.js";
+import { LearningStore } from "./learning-store.js";
+import type { Database } from "../db/index.js";
+
 import { loadTriggerRules, matchTriggerRule } from "./trigger-rules.js";
 import { buildDedupKey, getDedupTtl, runSafetyChecks } from "./safety.js";
 import { composeRunInput } from "./run-composer.js";
 import { startWebhookServer, type OnEventCallback } from "./webhook-server.js";
+import { registerAdapter } from "./sources/adapter-registry.js";
+import { githubAdapter } from "./sources/github-adapter-wrapper.js";
+import { createSentryAdapter } from "./sources/sentry-adapter-wrapper.js";
 import { pollSentry, type SentryPollerConfig } from "./sources/sentry-poller.js";
 import { pollGitHub, type GitHubPollerConfig } from "./sources/github-poller.js";
 import { triageEvent } from "./smart-triage.js";
+import { startCronScheduler, type CronSchedulerHandle } from "./sources/cron-adapter.js";
+import { startAutonomousScheduler, type SchedulerSlotChecker, type SchedulerStats } from "./autonomous-scheduler.js";
 import type { LLMCallerConfig } from "../llm/caller.js";
 import type { TriggerEvent, TriggerRule, ObserverEventRecord, ObserverStateSnapshot } from "./types.js";
 
@@ -25,6 +35,7 @@ const MAX_EVENT_HISTORY = 200;
 
 export class ObserverDaemon {
   private readonly stateStore: ObserverStateStore;
+  private readonly learningStore: LearningStore;
   private rules: TriggerRule[] = [];
   private sentryPoller: NodeJS.Timeout | undefined;
   private githubPoller: NodeJS.Timeout | undefined;
@@ -32,24 +43,40 @@ export class ObserverDaemon {
   private readonly pendingWebhookEvents: TriggerEvent[] = [];
   private readonly eventHistory: ObserverEventRecord[] = [];
   private processingInterval: NodeJS.Timeout | undefined;
+  private cronScheduler: CronSchedulerHandle | undefined;
+  private autonomousScheduler: ReturnType<typeof startAutonomousScheduler> | undefined;
 
   constructor(
     private readonly config: AppConfig,
     private readonly runManager: RunEnqueuer,
     private readonly webClient: WebClient | undefined,
-    private readonly tokenGetter?: () => Promise<string>
+    private readonly tokenGetter?: () => Promise<string>,
+    learningStore?: LearningStore,
+    db?: Database
   ) {
-    this.stateStore = new ObserverStateStore(config.dataDir);
+    const database = db ?? (learningStore as unknown as { db: Database })?.db;
+    if (!database) throw new Error("ObserverDaemon requires a Database instance");
+    this.stateStore = new ObserverStateStore(database);
+    this.learningStore = learningStore ?? new LearningStore(database);
   }
 
   async start(): Promise<void> {
     // Load persisted state
     await this.stateStore.load();
+    await this.learningStore.load();
 
-    // Register learning loop callback — when a run finishes, update dedup + outcomes
+    // Register learning loop callback — when a run finishes, update dedup + enrich ruleId
     this.runManager.onRunTerminal((runId, status) => {
-      this.stateStore.markDedupCompleted(runId, status);
-      logInfo("Observer: learning loop recorded outcome", { runId, status });
+      (async () => {
+        await this.stateStore.markDedupCompleted(runId, status);
+
+        // Enrich existing learning record with observer-specific ruleId
+        const ruleId = await this.stateStore.getRuleIdForRun(runId);
+        if (ruleId) {
+          await this.learningStore.enrichOutcome(runId, { ruleId });
+          await this.learningStore.flush();
+        }
+      })().catch(() => {});
     });
 
     // Load trigger rules
@@ -104,10 +131,27 @@ export class ObserverDaemon {
       });
     }
 
+    // Register built-in webhook adapters
+    registerAdapter(githubAdapter);
+    if (this.config.observerAlertChannelId) {
+      registerAdapter(createSentryAdapter(this.config.observerAlertChannelId));
+    }
+
+    // Load extension adapters from extensions/adapters/
+    const extensionDir = path.resolve("extensions/adapters");
+    const extensionAdapters = await loadExtensionAdapters(extensionDir);
+    if (extensionAdapters.length > 0) {
+      logInfo("Observer: loaded extension adapters", {
+        count: extensionAdapters.length,
+        sources: extensionAdapters.map(a => a.source)
+      });
+    }
+
     // Start webhook server (if any webhook secret configured)
     const hasGitHubWebhook = Boolean(this.config.observerGithubWebhookSecret);
     const hasSentryWebhook = Boolean(this.config.observerSentryWebhookSecret);
-    if (hasGitHubWebhook || hasSentryWebhook) {
+    const hasCustomAdapters = Object.keys(this.config.observerWebhookSecrets).length > 0;
+    if (hasGitHubWebhook || hasSentryWebhook || hasCustomAdapters) {
       const onEvent: OnEventCallback = (event) => {
         this.enqueueEvent(event);
       };
@@ -116,13 +160,23 @@ export class ObserverDaemon {
         port: this.config.observerWebhookPort,
         githubWebhookSecret: this.config.observerGithubWebhookSecret,
         sentryWebhookSecret: this.config.observerSentryWebhookSecret,
-        sentryAlertChannelId: this.config.observerAlertChannelId
+        sentryAlertChannelId: this.config.observerAlertChannelId,
+        adapterSecrets: this.config.observerWebhookSecrets
       }, onEvent);
 
       this.webhookStop = handle.stop;
 
       const sources = [hasGitHubWebhook && "github", hasSentryWebhook && "sentry"].filter(Boolean);
       logInfo("Observer: webhook server started", { port: this.config.observerWebhookPort, sources });
+    }
+
+    // Start cron scheduler (if any cron rules exist)
+    const cronRules = this.rules.filter(r => r.source === "cron");
+    if (cronRules.length > 0) {
+      this.cronScheduler = startCronScheduler(cronRules, (event) => {
+        this.enqueueEvent(event);
+      });
+      logInfo("Observer: cron scheduler started", { ruleCount: cronRules.length });
     }
 
     // Processing loop — drains pending events every 5 seconds
@@ -133,6 +187,33 @@ export class ObserverDaemon {
       });
     }, 5000);
     this.processingInterval.unref?.();
+
+    // Start autonomous scheduler (if enabled)
+    if (this.config.autonomousSchedulerEnabled) {
+      const slotChecker: SchedulerSlotChecker = {
+        hasCapacity: async () => {
+          const dailyCount = await this.stateStore.getDailyCount();
+          return dailyCount < this.config.observerMaxRunsPerDay;
+        },
+        activeRunCount: async () => this.stateStore.getDailyCount()
+      };
+
+      this.autonomousScheduler = startAutonomousScheduler(
+        {
+          enabled: true,
+          maxDeferredEvents: this.config.autonomousSchedulerMaxDeferred,
+          evaluateIntervalMs: this.config.autonomousSchedulerIntervalMs,
+          maxRetries: 10,
+          maxAge: 24 * 60 * 60 * 1000  // 24 hours
+        },
+        slotChecker,
+        (event, rule) => {
+          logInfo("Autonomous scheduler: triggering deferred event", { eventId: event.id, ruleId: rule.id });
+          this.enqueueEvent(event);
+        }
+      );
+      logInfo("Observer: autonomous scheduler started");
+    }
 
     logInfo("Observer daemon started");
   }
@@ -153,6 +234,16 @@ export class ObserverDaemon {
       this.processingInterval = undefined;
     }
 
+    if (this.cronScheduler) {
+      this.cronScheduler.stop();
+      this.cronScheduler = undefined;
+    }
+
+    if (this.autonomousScheduler) {
+      this.autonomousScheduler.stop();
+      this.autonomousScheduler = undefined;
+    }
+
     if (this.webhookStop) {
       await this.webhookStop();
       this.webhookStop = undefined;
@@ -160,6 +251,7 @@ export class ObserverDaemon {
 
     // Flush state to disk before exit
     await this.stateStore.flush();
+    await this.learningStore.flush();
 
     logInfo("Observer daemon stopped");
   }
@@ -184,6 +276,14 @@ export class ObserverDaemon {
       clearInterval(this.processingInterval);
       this.processingInterval = undefined;
     }
+    if (this.cronScheduler) {
+      this.cronScheduler.stop();
+      this.cronScheduler = undefined;
+    }
+    if (this.autonomousScheduler) {
+      this.autonomousScheduler.stop();
+      this.autonomousScheduler = undefined;
+    }
     if (this.webhookStop) {
       await this.webhookStop();
       this.webhookStop = undefined;
@@ -191,6 +291,7 @@ export class ObserverDaemon {
 
     // Flush current state before switching config
     await this.stateStore.flush();
+    await this.learningStore.flush();
 
     // Update config reference — TypeScript doesn't allow reassigning readonly,
     // so we use Object.assign to replace the contents
@@ -225,7 +326,7 @@ export class ObserverDaemon {
   // ── Dashboard query methods ──
 
   /** Get state snapshot for dashboard display. */
-  getStateSnapshot(): ObserverStateSnapshot {
+  async getStateSnapshot(): Promise<ObserverStateSnapshot> {
     return this.stateStore.getSnapshot();
   }
 
@@ -234,9 +335,24 @@ export class ObserverDaemon {
     return this.eventHistory.slice(-limit).reverse();
   }
 
+  /** Get autonomous scheduler stats for dashboard display. */
+  getSchedulerStats(): SchedulerStats {
+    return this.autonomousScheduler?.getStats() ?? { queueSize: 0, totalDeferred: 0, totalTriggered: 0, totalDropped: 0 };
+  }
+
   /** Get loaded trigger rules. */
   getRules(): TriggerRule[] {
     return [...this.rules];
+  }
+
+  /** Get recent run outcome records from the learning store (newest first). */
+  async getRecentOutcomes(limit = 50): Promise<import("./learning-store.js").RunOutcomeRecord[]> {
+    return this.learningStore.getRecentOutcomes(limit);
+  }
+
+  /** Get aggregated learnings for all rules. */
+  async getAllRuleLearnings(): Promise<import("./learning-store.js").RuleLearnings[]> {
+    return this.learningStore.getAllRuleLearnings();
   }
 
   private recordEvent(record: ObserverEventRecord): void {
@@ -245,6 +361,7 @@ export class ObserverDaemon {
       this.eventHistory.splice(0, this.eventHistory.length - MAX_EVENT_HISTORY);
     }
   }
+
 
   private async runSentryPoll(sentryConfig: SentryPollerConfig): Promise<void> {
     const events = await pollSentry(sentryConfig, this.stateStore);
@@ -315,9 +432,11 @@ export class ObserverDaemon {
         defaultTimeoutMs: this.config.observerSmartTriageTimeoutMs,
         providerPreferences: this.config.openrouterProviderPreferences
       };
+      const learningSummary = await this.learningStore.getTriageSummary(rule.id);
       const triageDecision = await triageEvent(
         event, rule, this.rules, llmConfig,
-        this.config.observerSmartTriageTimeoutMs
+        this.config.observerSmartTriageTimeoutMs,
+        learningSummary || undefined
       );
       if (triageDecision) {
         if (triageDecision.action === "discard" && triageDecision.confidence > 0.7) {
@@ -334,7 +453,10 @@ export class ObserverDaemon {
             reason: triageDecision.reason,
             confidence: triageDecision.confidence
           });
-          return; // Drop for now; a future queue system can re-process deferred events
+          if (this.autonomousScheduler) {
+            this.autonomousScheduler.defer(event, rule, triageDecision.reason);
+          }
+          return;
         }
         if (triageDecision.action === "escalate") {
           logInfo("Observer: smart triage escalated event (requires human review)", {
@@ -366,16 +488,16 @@ export class ObserverDaemon {
     }
 
     // Prune old rate limit entries before checking
-    this.stateStore.pruneRateLimitEvents(event.source, 60 * 60 * 1000);
+    await this.stateStore.pruneRateLimitEvents(event.source, 60 * 60 * 1000);
 
     // Check dedup first (hasDedup may delete expired entries), then fetch entry for cooldown
-    const isDuplicate = this.stateStore.hasDedup(dedupKey);
-    const dedupEntry = this.stateStore.getDedupEntry(dedupKey);
+    const isDuplicate = await this.stateStore.hasDedup(dedupKey);
+    const dedupEntry = await this.stateStore.getDedupEntry(dedupKey);
     const decision = runSafetyChecks(event, rule, {
       isDuplicate,
-      rateLimitTimestamps: this.stateStore.getRateLimitEvents(event.source),
-      dailyCount: this.stateStore.getDailyCount(),
-      repoCount: repoSlug ? this.stateStore.getDailyPerRepoCount(repoSlug) : 0,
+      rateLimitTimestamps: await this.stateStore.getRateLimitEvents(event.source),
+      dailyCount: await this.stateStore.getDailyCount(),
+      repoCount: repoSlug ? await this.stateStore.getDailyPerRepoCount(repoSlug) : 0,
       completedAt: dedupEntry?.completedAt,
       maxDaily: this.config.observerMaxRunsPerDay,
       maxPerRepo: this.config.observerMaxRunsPerRepoPerDay,
@@ -407,10 +529,10 @@ export class ObserverDaemon {
         });
         await this.postApprovalRequest(event, rule, runInput);
         // Record dedup and rate limit, increment daily counters
-        this.stateStore.setDedup(dedupKey, getDedupTtl(event.source));
-        this.stateStore.addRateLimitEvent(event.source, Date.now());
+        await this.stateStore.setDedup(dedupKey, getDedupTtl(event.source));
+        await this.stateStore.addRateLimitEvent(event.source, Date.now());
         if (repoSlug) {
-          this.stateStore.incrementDailyCount(repoSlug);
+          await this.stateStore.incrementDailyCount(repoSlug);
         }
         this.recordEvent({
           eventId: event.id, source: event.source, timestamp: event.timestamp,
@@ -429,10 +551,10 @@ export class ObserverDaemon {
       const record = await this.runManager.enqueueRun(runInput);
 
       // Update state (include ruleId for learning loop outcome tracking)
-      this.stateStore.setDedup(dedupKey, getDedupTtl(event.source), record.id, rule.id);
-      this.stateStore.addRateLimitEvent(event.source, Date.now());
+      await this.stateStore.setDedup(dedupKey, getDedupTtl(event.source), record.id, rule.id);
+      await this.stateStore.addRateLimitEvent(event.source, Date.now());
       if (repoSlug) {
-        this.stateStore.incrementDailyCount(repoSlug);
+        await this.stateStore.incrementDailyCount(repoSlug);
       }
 
       this.recordEvent({

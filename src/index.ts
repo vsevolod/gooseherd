@@ -1,7 +1,8 @@
 import dotenv from "dotenv";
 dotenv.config({ override: true });
 import path from "node:path";
-import { loadConfig } from "./config.js";
+import { loadConfig, type AppConfig } from "./config.js";
+import { initDatabase, closeDatabase, type Database } from "./db/index.js";
 import { RunStore } from "./store.js";
 import { GitHubService } from "./github.js";
 import { PipelineEngine } from "./pipeline/index.js";
@@ -19,30 +20,35 @@ import { ContainerManager } from "./sandbox/container-manager.js";
 import { setSandboxManager } from "./pipeline/shell.js";
 import { RunSupervisor } from "./supervisor/run-supervisor.js";
 import { ConversationStore } from "./orchestrator/conversation-store.js";
+import { loadSkills } from "./pipeline/skill-registry.js";
+import { PipelineStore } from "./pipeline/pipeline-store.js";
+import { loadPlugins, getPluginDir } from "./plugins/plugin-loader.js";
+import { NODE_HANDLERS, VALID_ACTIONS } from "./pipeline/node-registry.js";
+import { SessionManager, createLLMPlanGoal, createLLMEvaluateProgress } from "./sessions/session-manager.js";
+import { callLLMForJSON, type LLMCallerConfig } from "./llm/caller.js";
+import { LearningStore } from "./observer/learning-store.js";
+import { SetupStore } from "./db/setup-store.js";
 
-function checkAgentDefault(config: { agentCommandTemplate: string }): void {
-  if (!config.agentCommandTemplate.includes("dummy-agent")) return;
+// ── Service container ──
 
-  try {
-    execSync("which pi", { stdio: "pipe" });
-    logWarn("Using dummy agent but pi is on PATH. Set AGENT_COMMAND_TEMPLATE to use the real agent.");
-  } catch {
-    logWarn("No AGENT_COMMAND_TEMPLATE set and pi not found on PATH. Using dummy agent.");
-  }
+interface Services {
+  config: AppConfig;
+  store: RunStore;
+  githubService: GitHubService | undefined;
+  memoryProvider: CemsProvider | undefined;
+  hooks: RunLifecycleHooks;
+  containerManager: ContainerManager | undefined;
+  pipelineEngine: PipelineEngine;
+  pipelineStore: PipelineStore;
+  learningStore: LearningStore;
+  webClient: import("@slack/web-api").WebClient | undefined;
+  runManager: RunManager;
+  conversationStore: ConversationStore;
 }
 
-async function main(): Promise<void> {
-  const config = loadConfig();
-  checkAgentDefault(config);
-
-  const store = new RunStore(config.dataDir);
+async function createServices(config: AppConfig, db: Database): Promise<Services> {
+  const store = new RunStore(db);
   await store.init();
-  const recoveredRuns = await store.recoverInProgressRuns(
-    "Recovered after process restart. Auto-requeued."
-  );
-  if (recoveredRuns.length > 0) {
-    logInfo("Recovered stale in-progress runs", { count: recoveredRuns.length });
-  }
 
   const githubService = GitHubService.create(config);
   const memoryProvider = config.cemsEnabled && config.cemsApiUrl && config.cemsApiKey
@@ -52,6 +58,7 @@ async function main(): Promise<void> {
   if (memoryProvider) {
     logInfo("Memory integration enabled", { provider: memoryProvider.name, url: config.cemsApiUrl });
   }
+
   // Sandbox container manager (Docker-out-of-Docker)
   let containerManager: ContainerManager | undefined;
   if (config.sandboxEnabled) {
@@ -76,23 +83,81 @@ async function main(): Promise<void> {
     }
   }
 
+  const pipelineStore = new PipelineStore(db);
+  await pipelineStore.init(path.resolve("pipelines"));
+  logInfo("Pipeline store ready", { count: pipelineStore.list().length });
+
   const pipelineEngine = new PipelineEngine(config, githubService, hooks, containerManager);
   logInfo("Pipeline engine ready", { pipelineFile: config.pipelineFile });
 
-  // Slack Web API client — only created when Slack tokens are configured.
+  const learningStore = new LearningStore(db);
+  await learningStore.load();
+
   const { WebClient } = await import("@slack/web-api");
   const webClient = config.slackBotToken ? new WebClient(config.slackBotToken) : undefined;
 
-  const runManager = new RunManager(config, store, pipelineEngine, webClient, hooks);
-  const conversationStore = new ConversationStore({
-    persistDir: path.join(config.dataDir, "conversations")
-  });
+  const runManager = new RunManager(config, store, pipelineEngine, webClient, hooks, pipelineStore, learningStore);
+
+  const conversationStore = new ConversationStore({ db });
   await conversationStore.load();
   conversationStore.startCleanupTimer();
+
+  return {
+    config, store, githubService, memoryProvider, hooks, containerManager,
+    pipelineEngine, pipelineStore, learningStore, webClient, runManager, conversationStore,
+  };
+}
+
+// ── Helpers ──
+
+function checkAgentDefault(config: { agentCommandTemplate: string }): void {
+  if (!config.agentCommandTemplate.includes("dummy-agent")) return;
+
+  try {
+    execSync("which pi", { stdio: "pipe" });
+    logWarn("Using dummy agent but pi is on PATH. Set AGENT_COMMAND_TEMPLATE to use the real agent.");
+  } catch {
+    logWarn("No AGENT_COMMAND_TEMPLATE set and pi not found on PATH. Using dummy agent.");
+  }
+}
+
+// ── Main ──
+
+async function main(): Promise<void> {
+  // 1. Database + setup wizard config injection
+  const db = await initDatabase(process.env.DATABASE_URL ?? "postgres://gooseherd:gooseherd@postgres:5432/gooseherd");
+  const setupStore = new SetupStore(db, process.env.ENCRYPTION_KEY);
+  if (await setupStore.isComplete()) {
+    await setupStore.applyToEnv();
+  }
+
+  // 2. Load config (reads env vars, including any injected by wizard)
+  const config = loadConfig();
+  checkAgentDefault(config);
+
+  // 3. One-time registrations (skills + plugins)
+  await loadSkills(path.resolve("skills"));
+  const pluginResult = await loadPlugins(getPluginDir());
+  if (pluginResult.loaded.length > 0) {
+    logInfo("Plugins loaded", { count: pluginResult.loaded.length, names: pluginResult.loaded });
+  }
+  for (const [action, handler] of Object.entries(pluginResult.nodeHandlers)) {
+    NODE_HANDLERS[action] = handler;
+    VALID_ACTIONS.add(action);
+  }
+
+  // 4. Create core services
+  const svc = await createServices(config, db);
+
+  // 5. Recover stale in-progress runs from before restart
+  const recoveredRuns = await svc.store.recoverInProgressRuns(
+    "Recovered after process restart. Auto-requeued."
+  );
   if (recoveredRuns.length > 0) {
+    logInfo("Recovered stale in-progress runs", { count: recoveredRuns.length });
     const runsToRequeue = recoveredRuns.filter((run) => run.channelId !== "local");
     for (const run of runsToRequeue) {
-      runManager.requeueExistingRun(run.id);
+      svc.runManager.requeueExistingRun(run.id);
     }
     if (runsToRequeue.length > 0) {
       logInfo("Auto-requeued recovered runs", { count: runsToRequeue.length });
@@ -103,28 +168,54 @@ async function main(): Promise<void> {
     }
   }
 
-  const cleaner = new WorkspaceCleaner(config, store);
+  // 6. Session manager (multi-run goal-oriented loops)
+  if (config.openrouterApiKey) {
+    const sessionLlmConfig: LLMCallerConfig = {
+      apiKey: config.openrouterApiKey,
+      defaultModel: config.defaultLlmModel,
+      defaultTimeoutMs: 30_000,
+      providerPreferences: config.openrouterProviderPreferences,
+    };
+    const planGoal = createLLMPlanGoal(async <T>(system: string, userMessage: string, maxTokens: number) => {
+      const { parsed } = await callLLMForJSON<T>(sessionLlmConfig, { system, userMessage, maxTokens });
+      return parsed;
+    });
+    const evaluateProgress = createLLMEvaluateProgress(async <T>(system: string, userMessage: string, maxTokens: number) => {
+      const { parsed } = await callLLMForJSON<T>(sessionLlmConfig, { system, userMessage, maxTokens });
+      return parsed;
+    });
+    const sessionManager = new SessionManager(db, svc.runManager, planGoal, evaluateProgress);
+    await sessionManager.load();
+    svc.runManager.onRunTerminal((runId, status) => {
+      sessionManager.onRunCompleted(runId, status).catch((err) => {
+        const msg = err instanceof Error ? err.message : "unknown";
+        logWarn("SessionManager: onRunCompleted error", { runId, error: msg });
+      });
+    });
+    logInfo("Session manager enabled");
+  }
+
+  // 7. Background services
+  const cleaner = new WorkspaceCleaner(config, svc.store);
   cleaner.start();
 
   if (config.supervisorEnabled) {
-    const supervisor = new RunSupervisor(config, runManager, pipelineEngine, store, webClient);
+    const supervisor = new RunSupervisor(config, svc.runManager, svc.pipelineEngine, svc.store, svc.webClient);
     supervisor.start();
     globalRefs.supervisor = supervisor;
     logInfo("Run supervisor enabled");
   }
 
   if (config.observerEnabled) {
-    const tokenGetter = githubService ? () => githubService.getToken() : undefined;
-    const observer = new ObserverDaemon(config, runManager, webClient, tokenGetter);
+    const tokenGetter = svc.githubService ? () => svc.githubService!.getToken() : undefined;
+    const observer = new ObserverDaemon(config, svc.runManager, svc.webClient, tokenGetter, svc.learningStore, db);
     await observer.start();
     globalRefs.observer = observer;
     logInfo("Observer system enabled");
 
-    // Watch trigger rules file for changes (hot-reload without restart)
     try {
       let debounce: NodeJS.Timeout | undefined;
       globalRefs.rulesWatcher = watch(config.observerRulesFile, () => {
-        // Debounce rapid writes (editors often write multiple times)
         if (debounce) clearTimeout(debounce);
         debounce = setTimeout(() => {
           logInfo("Trigger rules file changed — reloading");
@@ -140,13 +231,23 @@ async function main(): Promise<void> {
     }
   }
 
+  // 8. Dashboard + Slack
   if (config.dashboardEnabled) {
-    startDashboardServer(config, store, runManager, globalRefs.observer, conversationStore);
+    startDashboardServer(
+      config, svc.store, svc.runManager, globalRefs.observer, svc.conversationStore, svc.pipelineStore, svc.learningStore,
+      setupStore,
+      async () => {
+        await setupStore.applyToEnv();
+        logInfo("Setup wizard completed — restarting to apply new configuration");
+        // Defer restart to let the HTTP response reach the client
+        setTimeout(() => shutdown("WIZARD_COMPLETE"), 1000);
+      }
+    );
   }
 
   const slackConfigured = Boolean(config.slackBotToken && config.slackAppToken && config.slackSigningSecret);
   if (slackConfigured) {
-    await startSlackApp(config, runManager, globalRefs.observer, memoryProvider, githubService, conversationStore);
+    await startSlackApp(config, svc.runManager, globalRefs.observer, svc.memoryProvider, svc.githubService, svc.conversationStore);
   } else {
     logInfo("Slack tokens not configured — running in dashboard-only mode");
   }
@@ -158,9 +259,10 @@ main().catch((error) => {
   process.exit(1);
 });
 
+// ── Shutdown + signals ──
+
 async function shutdown(signal: string): Promise<void> {
   logInfo(`Shutting down (${signal})`);
-  // Stop supervisor + observer before exit
   try {
     globalRefs.supervisor?.stop();
   } catch { /* swallow */ }
@@ -171,10 +273,10 @@ async function shutdown(signal: string): Promise<void> {
     const msg = err instanceof Error ? err.message : "unknown";
     logError("Error during observer shutdown", { error: msg });
   }
+  await closeDatabase();
   process.exit(0);
 }
 
-// Global refs for shutdown access and hot-reload
 const globalRefs: { observer?: ObserverDaemon; supervisor?: RunSupervisor; rulesWatcher?: FSWatcher } = {};
 
 process.on("SIGINT", () => { shutdown("SIGINT"); });

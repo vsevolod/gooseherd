@@ -3,12 +3,15 @@ import type { WebClient } from "@slack/web-api";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import type { Block, KnownBlock } from "@slack/types";
+import { writeFile, mkdir } from "node:fs/promises";
 import type { AppConfig } from "./config.js";
 import { logError, logInfo } from "./logger.js";
 import type { PipelineEngine } from "./pipeline/pipeline-engine.js";
 import type { RunLifecycleHooks } from "./hooks/run-lifecycle.js";
 import { RunStore, mapPhaseToRunStatus } from "./store.js";
 import type { ExecutionResult, NewRunInput, RunRecord } from "./types.js";
+import type { PipelineStore } from "./pipeline/pipeline-store.js";
+import type { LearningStore } from "./observer/learning-store.js";
 
 const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
@@ -49,19 +52,6 @@ const ERROR_PATTERNS: Array<{ test: RegExp; result: ClassifiedError }> = [
   },
 ];
 
-/**
- * Resolve a pipeline hint (e.g. "ui-change") to a full YAML file path.
- * Falls back to the default pipeline file if hint is missing or invalid.
- */
-function resolvePipelineFile(hint: string | undefined, defaultFile: string): string {
-  if (!hint) return defaultFile;
-  // Validate: alphanumeric, hyphens, underscores only (prevent path traversal)
-  if (!/^[a-zA-Z0-9_-]+$/.test(hint)) {
-    logInfo("Invalid pipelineHint, using default", { hint });
-    return defaultFile;
-  }
-  return path.resolve("pipelines", `${hint}.yml`);
-}
 
 export function classifyError(message: string): ClassifiedError {
   for (const { test, result } of ERROR_PATTERNS) {
@@ -163,9 +153,88 @@ export class RunManager {
     private readonly store: RunStore,
     private readonly pipelineEngine: PipelineEngine,
     private readonly slackClient: WebClient | undefined,
-    private readonly hooks?: RunLifecycleHooks
+    private readonly hooks?: RunLifecycleHooks,
+    private readonly pipelineStore?: PipelineStore,
+    private readonly learningStore?: LearningStore
   ) {
     this.queue = new PQueue({ concurrency: config.runnerConcurrency });
+
+    if (learningStore) {
+      this.onRunTerminal((runId, status) => {
+        this.recordLearningOutcome(runId, status).catch(err => {
+          const msg = err instanceof Error ? err.message : "unknown";
+          logError("Failed to record learning outcome", { runId, error: msg });
+        });
+      });
+    }
+  }
+
+  private async recordLearningOutcome(runId: string, status: string): Promise<void> {
+    if (!this.learningStore) return;
+    const run = await this.store.getRun(runId);
+    if (!run) return;
+
+    const startMs = run.startedAt ? Date.parse(run.startedAt) : Date.parse(run.createdAt);
+    const endMs = run.finishedAt ? Date.parse(run.finishedAt) : Date.now();
+    const durationMs = Math.max(0, endMs - startMs);
+
+    let errorCategory: string | undefined;
+    if (status !== "completed" && run.error) {
+      errorCategory = classifyError(run.error).category;
+    } else if (status !== "completed") {
+      errorCategory = "unknown";
+    }
+
+    await this.learningStore.recordOutcome({
+      runId,
+      source: this.determineRunSource(run),
+      repoSlug: run.repoSlug,
+      status,
+      errorCategory,
+      durationMs,
+      costUsd: run.tokenUsage?.costUsd ?? 0,
+      changedFiles: run.changedFiles?.length ?? 0,
+      pipelineId: run.pipelineHint,
+      timestamp: new Date().toISOString()
+    });
+  }
+
+  private determineRunSource(run: RunRecord): string {
+    if (run.channelId === "local") return "local";
+    if (run.channelId === "dashboard") return "dashboard";
+    if (run.channelId === "api") return "api";
+    // Observer runs get enriched with ruleId by ObserverDaemon's terminal callback
+    return "slack";
+  }
+
+  /**
+   * Resolve a pipeline hint to a file path.
+   * Checks the PipelineStore first (for custom pipelines), falls back to disk.
+   * For store-only pipelines, writes the YAML to a temp file in the run's work dir.
+   */
+  private async resolvePipeline(hint: string | undefined, runId: string): Promise<string> {
+    if (!hint) return this.config.pipelineFile;
+
+    if (!/^[a-zA-Z0-9_-]+$/.test(hint)) {
+      logInfo("Invalid pipelineHint, using default", { hint });
+      return this.config.pipelineFile;
+    }
+
+    // Check pipeline store for custom (non-built-in) pipelines
+    if (this.pipelineStore) {
+      const stored = this.pipelineStore.get(hint);
+      if (stored && !stored.isBuiltIn) {
+        const runDir = path.resolve(this.config.workRoot, runId);
+        await mkdir(runDir, { recursive: true });
+        const tmpYaml = path.join(runDir, `pipeline-${hint}.yml`);
+        await writeFile(tmpYaml, stored.yaml, "utf8");
+        logInfo("Using custom pipeline from store", { hint, file: tmpYaml });
+        return tmpYaml;
+      }
+    }
+
+    // Built-in: resolve from pipelines/ directory on disk
+    return path.resolve("pipelines", `${hint}.yml`);
   }
 
   /**
@@ -211,6 +280,11 @@ export class RunManager {
   }
 
   async getRun(id: string): Promise<RunRecord | undefined> {
+    return this.store.getRun(id);
+  }
+
+  /** Alias for getRun — satisfies RunEnqueuer.findRun for the learning store. */
+  async findRun(id: string): Promise<RunRecord | undefined> {
     return this.store.getRun(id);
   }
 
@@ -450,7 +524,7 @@ export class RunManager {
         await upsertRunCard();
       };
 
-      const pipelineFile = resolvePipelineFile(run.pipelineHint, this.config.pipelineFile);
+      const pipelineFile = await this.resolvePipeline(run.pipelineHint, run.id);
       const abortController = new AbortController();
       this.runAbortControllers.set(stableRunId, abortController);
       const result = await this.pipelineEngine.execute(run, phaseCallback, pipelineFile, onDetail, run.skipNodes, run.enableNodes, abortController.signal);

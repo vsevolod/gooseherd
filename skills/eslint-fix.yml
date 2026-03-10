@@ -1,0 +1,5 @@
+name: eslint-fix
+description: Run eslint and auto-fix issues
+language: javascript
+command: "cd {{repo_dir}} && npx eslint --fix ."
+timeout_seconds: 120

@@ -237,6 +237,19 @@ export class ContainerManager {
   }
 
   /**
+   * Check if a Docker image exists locally.
+   */
+  async imageExists(imageTag: string): Promise<boolean> {
+    try {
+      const image = this.docker.getImage(imageTag);
+      await image.inspect();
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
    * Check if Docker daemon is reachable.
    */
   async ping(): Promise<boolean> {

@@ -317,12 +317,7 @@ export async function startSlackApp(
   const handleMessageDeps = buildHandleMessageDeps(config, runManager, memoryProvider, githubService);
 
   // Conversation memory — persists full LLM history per thread
-  const conversationStore = sharedConversationStore ?? new ConversationStore();
-  if (!sharedConversationStore) {
-    // Only start a fallback cleanup if no shared store was provided
-    // (shared store already has its own cleanup timer from index.ts)
-    setInterval(() => conversationStore.cleanup(24 * 60 * 60 * 1000), 60 * 60 * 1000);
-  }
+  const conversationStore = sharedConversationStore!;
 
   /** Wrapper around say() that always includes username override */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -642,7 +637,7 @@ export async function startSlackApp(
 
     // Load prior conversation from memory store
     const threadKey = `${event.channel}:${replyThreadTs}`;
-    const priorMessages = conversationStore.get(threadKey);
+    const priorMessages = await conversationStore.get(threadKey);
     const maskedMessages = priorMessages
       ? conversationStore.maskOldObservations(priorMessages, 12)
       : undefined;
@@ -736,7 +731,7 @@ export async function startSlackApp(
     );
 
     // Store the full conversation back for future messages in this thread
-    conversationStore.set(threadKey, result.messages);
+    await conversationStore.set(threadKey, result.messages);
 
     // Replace thinking message with final response, or delete if empty
     if (result.response) {

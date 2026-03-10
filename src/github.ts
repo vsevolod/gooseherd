@@ -382,4 +382,28 @@ export class GitHubService {
       body: params.body
     });
   }
+
+  /**
+   * Validate a PAT token — returns the authenticated username.
+   * Throws on invalid/expired tokens.
+   */
+  static async validateToken(token: string): Promise<{ username: string; repoCount: number }> {
+    const octokit = new Octokit({ auth: token });
+    const { data: user } = await octokit.users.getAuthenticated();
+    const { data: repos } = await octokit.repos.listForAuthenticatedUser({ per_page: 1 });
+    // total_count not available on list — use the response headers
+    const repoCount = repos.length > 0 ? (user.public_repos + (user.total_private_repos ?? 0)) : 0;
+    return { username: user.login, repoCount };
+  }
+
+  /**
+   * List repos accessible with the current credentials.
+   */
+  async listAccessibleRepos(perPage = 30): Promise<Array<{ fullName: string; private: boolean }>> {
+    const { data } = await this.octokit.repos.listForAuthenticatedUser({
+      per_page: perPage,
+      sort: "updated",
+    });
+    return data.map((r) => ({ fullName: r.full_name, private: r.private }));
+  }
 }

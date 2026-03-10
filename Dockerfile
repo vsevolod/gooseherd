@@ -42,8 +42,10 @@ COPY package.json package-lock.json* ./
 RUN npm ci --omit=dev
 
 COPY --from=builder /app/dist/ dist/
+COPY drizzle/ drizzle/
 COPY scripts/ scripts/
 COPY pipelines/ pipelines/
+COPY skills/ skills/
 COPY extensions/ extensions/
 
 # Non-root user for security (entrypoint drops to this user via gosu)

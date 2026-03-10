@@ -1,33 +1,59 @@
-import { mkdir, readFile, writeFile, rename } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
-import path from "node:path";
+import { eq, desc, and, sql, inArray } from "drizzle-orm";
 import type { NewRunInput, RunFeedback, RunRecord, RunStatus } from "./types.js";
+import type { Database } from "./db/index.js";
+import { runs } from "./db/schema.js";
 
-interface RunStateFile {
-  runs: RunRecord[];
+type RunRow = typeof runs.$inferSelect;
+
+function rowToRecord(row: RunRow): RunRecord {
+  return {
+    id: row.id,
+    status: row.status as RunStatus,
+    phase: row.phase as RunRecord["phase"],
+    repoSlug: row.repoSlug,
+    task: row.task,
+    baseBranch: row.baseBranch,
+    branchName: row.branchName,
+    requestedBy: row.requestedBy,
+    channelId: row.channelId,
+    threadTs: row.threadTs,
+    createdAt: row.createdAt.toISOString(),
+    startedAt: row.startedAt?.toISOString(),
+    finishedAt: row.finishedAt?.toISOString(),
+    logsPath: row.logsPath ?? undefined,
+    statusMessageTs: row.statusMessageTs ?? undefined,
+    commitSha: row.commitSha ?? undefined,
+    changedFiles: row.changedFiles ?? undefined,
+    prUrl: row.prUrl ?? undefined,
+    feedback: row.feedback as RunFeedback | undefined,
+    error: row.error ?? undefined,
+    parentRunId: row.parentRunId ?? undefined,
+    rootRunId: row.rootRunId ?? undefined,
+    chainIndex: row.chainIndex ?? undefined,
+    parentBranchName: row.parentBranchName ?? undefined,
+    feedbackNote: row.feedbackNote ?? undefined,
+    pipelineHint: row.pipelineHint ?? undefined,
+    skipNodes: row.skipNodes ?? undefined,
+    enableNodes: row.enableNodes ?? undefined,
+    ciFixAttempts: row.ciFixAttempts ?? undefined,
+    ciConclusion: row.ciConclusion ?? undefined,
+    prNumber: row.prNumber ?? undefined,
+    title: row.title ?? undefined,
+    tokenUsage: row.tokenUsage as RunRecord["tokenUsage"],
+    teamId: row.teamId ?? undefined,
+  };
 }
 
 export class RunStore {
-  private readonly filePath: string;
-  private lock: Promise<void> = Promise.resolve();
-  /** In-memory cache — loaded once on init(), write-through on mutations. */
-  private cache: RunStateFile | undefined;
+  private readonly db: Database;
 
-  constructor(dataDir: string) {
-    this.filePath = path.join(dataDir, "runs.json");
+  constructor(db: Database) {
+    this.db = db;
   }
 
   async init(): Promise<void> {
-    await mkdir(path.dirname(this.filePath), { recursive: true });
-    try {
-      const raw = await readFile(this.filePath, "utf8");
-      const parsed = JSON.parse(raw) as RunStateFile;
-      this.cache = Array.isArray(parsed.runs) ? parsed : { runs: [] };
-    } catch {
-      const initial: RunStateFile = { runs: [] };
-      await this.writeStateAtomic(initial);
-      this.cache = initial;
-    }
+    // No-op — migrations handle schema
   }
 
   async createRun(
@@ -35,124 +61,133 @@ export class RunStore {
     branchPrefix: string,
     existingBranchName?: string
   ): Promise<RunRecord> {
-    return this.withLock(async () => {
-      const state = await this.readState();
-      const id = randomUUID();
-      const branchName = existingBranchName ?? `${branchPrefix}/${id.slice(0, 8)}`;
+    const id = randomUUID();
+    const branchName = existingBranchName ?? `${branchPrefix}/${id.slice(0, 8)}`;
 
-      // Resolve chain fields from parent if this is a follow-up
-      let rootRunId: string | undefined;
-      let chainIndex = 0;
-      if (input.parentRunId) {
-        const parent = state.runs.find((r) => r.id === input.parentRunId);
-        if (parent) {
-          rootRunId = parent.rootRunId ?? parent.id;
-          chainIndex = (parent.chainIndex ?? 0) + 1;
-        }
+    // Resolve chain fields from parent
+    let rootRunId: string | undefined;
+    let chainIndex = 0;
+    if (input.parentRunId) {
+      const parentRows = await this.db
+        .select()
+        .from(runs)
+        .where(eq(runs.id, input.parentRunId));
+      const parent = parentRows[0];
+      if (parent) {
+        rootRunId = parent.rootRunId ?? parent.id;
+        chainIndex = (parent.chainIndex ?? 0) + 1;
       }
+    }
 
-      const record: RunRecord = {
-        id,
-        status: "queued",
-        phase: "queued",
-        repoSlug: input.repoSlug,
-        task: input.task,
-        baseBranch: input.baseBranch,
-        branchName,
-        requestedBy: input.requestedBy,
-        channelId: input.channelId,
-        threadTs: input.threadTs,
-        createdAt: new Date().toISOString(),
-        parentRunId: input.parentRunId,
-        rootRunId,
-        chainIndex,
-        parentBranchName: existingBranchName,
-        feedbackNote: input.feedbackNote,
-        pipelineHint: input.pipelineHint,
-        skipNodes: input.skipNodes,
-        enableNodes: input.enableNodes,
-        teamId: input.teamId
-      };
-
-      state.runs.push(record);
-      await this.writeState(state);
-      return record;
+    await this.db.insert(runs).values({
+      id,
+      status: "queued",
+      phase: "queued",
+      repoSlug: input.repoSlug,
+      task: input.task,
+      baseBranch: input.baseBranch,
+      branchName,
+      requestedBy: input.requestedBy,
+      channelId: input.channelId,
+      threadTs: input.threadTs,
+      createdAt: new Date(),
+      parentRunId: input.parentRunId,
+      rootRunId,
+      chainIndex,
+      parentBranchName: existingBranchName,
+      feedbackNote: input.feedbackNote,
+      pipelineHint: input.pipelineHint,
+      skipNodes: input.skipNodes,
+      enableNodes: input.enableNodes,
+      teamId: input.teamId,
     });
+
+    return (await this.getRun(id))!;
   }
 
   async getRun(id: string): Promise<RunRecord | undefined> {
-    const state = await this.readState();
-    return state.runs.find((run) => run.id === id);
+    const rows = await this.db.select().from(runs).where(eq(runs.id, id));
+    return rows[0] ? rowToRecord(rows[0]) : undefined;
   }
 
   async listRuns(filter: { limit?: number; teamId?: string } | number = 100): Promise<RunRecord[]> {
-    const state = await this.readState();
     const opts = typeof filter === "number" ? { limit: filter } : filter;
     const limit = Math.max(1, Math.min(opts.limit ?? 100, 500));
-    let runs = state.runs;
+
+    const conditions = [];
     if (opts.teamId) {
-      runs = runs.filter((r) => r.teamId === opts.teamId);
+      conditions.push(eq(runs.teamId, opts.teamId));
     }
-    return runs.slice(-limit).reverse();
+
+    const rows = await this.db
+      .select()
+      .from(runs)
+      .where(conditions.length > 0 ? and(...conditions) : undefined)
+      .orderBy(desc(runs.createdAt))
+      .limit(limit);
+
+    return rows.map(rowToRecord);
   }
 
   async getLatestRunForThread(channelId: string, threadTs: string): Promise<RunRecord | undefined> {
-    const state = await this.readState();
-    for (let index = state.runs.length - 1; index >= 0; index -= 1) {
-      const run = state.runs[index];
-      if (run.channelId === channelId && run.threadTs === threadTs) {
-        return run;
-      }
-    }
-    return undefined;
+    const rows = await this.db
+      .select()
+      .from(runs)
+      .where(and(eq(runs.channelId, channelId), eq(runs.threadTs, threadTs)))
+      .orderBy(desc(runs.createdAt))
+      .limit(1);
+    return rows[0] ? rowToRecord(rows[0]) : undefined;
   }
 
   async getRunChain(channelId: string, threadTs: string): Promise<RunRecord[]> {
-    const state = await this.readState();
-    return state.runs
-      .filter((run) => run.channelId === channelId && run.threadTs === threadTs)
-      .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+    const rows = await this.db
+      .select()
+      .from(runs)
+      .where(and(eq(runs.channelId, channelId), eq(runs.threadTs, threadTs)))
+      .orderBy(runs.createdAt);
+    return rows.map(rowToRecord);
   }
 
   async getRecentRuns(repoSlug?: string, limit = 10): Promise<RunRecord[]> {
-    const state = await this.readState();
-    let runs = state.runs;
-    if (repoSlug) {
-      runs = runs.filter(r => r.repoSlug === repoSlug);
-    }
-    return runs.slice(-limit).reverse();
+    const conditions = repoSlug ? eq(runs.repoSlug, repoSlug) : undefined;
+    const rows = await this.db
+      .select()
+      .from(runs)
+      .where(conditions)
+      .orderBy(desc(runs.createdAt))
+      .limit(limit);
+    return rows.map(rowToRecord);
   }
 
   async getLatestRunForChannel(channelId: string): Promise<RunRecord | undefined> {
-    const state = await this.readState();
-    for (let index = state.runs.length - 1; index >= 0; index -= 1) {
-      const run = state.runs[index];
-      if (run.channelId === channelId) {
-        return run;
-      }
-    }
-    return undefined;
+    const rows = await this.db
+      .select()
+      .from(runs)
+      .where(eq(runs.channelId, channelId))
+      .orderBy(desc(runs.createdAt))
+      .limit(1);
+    return rows[0] ? rowToRecord(rows[0]) : undefined;
   }
 
   async findRunByIdentifier(identifier: string): Promise<RunRecord | undefined> {
     const normalized = normalizeIdentifier(identifier);
-    if (!normalized) {
+    if (!normalized) return undefined;
+
+    // Full UUID → exact match
+    const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+    if (UUID_RE.test(normalized)) {
+      const exact = await this.db.select().from(runs).where(eq(runs.id, normalized));
+      if (exact[0]) return rowToRecord(exact[0]);
       return undefined;
     }
 
-    const state = await this.readState();
-
-    // Exact ID match first.
-    const exact = state.runs.find((run) => run.id === normalized);
-    if (exact) {
-      return exact;
-    }
-
-    // Unique prefix match next (for short IDs).
-    const prefixMatches = state.runs.filter((run) => run.id.startsWith(normalized));
-    if (prefixMatches.length === 1) {
-      return prefixMatches[0];
-    }
+    // Short ID → prefix match (cast uuid to text for LIKE)
+    const prefixRows = await this.db
+      .select()
+      .from(runs)
+      .where(sql`${runs.id}::text LIKE ${normalized + "%"}`)
+      .limit(2);
+    if (prefixRows.length === 1) return rowToRecord(prefixRows[0]!);
 
     return undefined;
   }
@@ -187,85 +222,73 @@ export class RunStore {
       >
     >
   ): Promise<RunRecord> {
-    return this.withLock(async () => {
-      const state = await this.readState();
-      const index = state.runs.findIndex((run) => run.id === id);
-      if (index === -1) {
-        throw new Error(`Run not found: ${id}`);
-      }
+    const dbUpdate: Record<string, unknown> = {};
 
-      const current = state.runs[index] as RunRecord;
-      const next: RunRecord = {
-        ...current,
-        ...update
-      };
+    if (update.status !== undefined) dbUpdate.status = update.status;
+    if (update.phase !== undefined) dbUpdate.phase = update.phase;
+    if (update.startedAt !== undefined) dbUpdate.startedAt = update.startedAt ? new Date(update.startedAt) : null;
+    if (update.finishedAt !== undefined) dbUpdate.finishedAt = update.finishedAt ? new Date(update.finishedAt) : null;
+    if (update.logsPath !== undefined) dbUpdate.logsPath = update.logsPath;
+    if (update.statusMessageTs !== undefined) dbUpdate.statusMessageTs = update.statusMessageTs;
+    if (update.commitSha !== undefined) dbUpdate.commitSha = update.commitSha;
+    if (update.changedFiles !== undefined) dbUpdate.changedFiles = update.changedFiles;
+    if (update.prUrl !== undefined) dbUpdate.prUrl = update.prUrl;
+    if (update.feedback !== undefined) dbUpdate.feedback = update.feedback;
+    if (update.error !== undefined) dbUpdate.error = update.error;
+    if (update.parentRunId !== undefined) dbUpdate.parentRunId = update.parentRunId;
+    if (update.rootRunId !== undefined) dbUpdate.rootRunId = update.rootRunId;
+    if (update.chainIndex !== undefined) dbUpdate.chainIndex = update.chainIndex;
+    if (update.parentBranchName !== undefined) dbUpdate.parentBranchName = update.parentBranchName;
+    if (update.feedbackNote !== undefined) dbUpdate.feedbackNote = update.feedbackNote;
+    if (update.tokenUsage !== undefined) dbUpdate.tokenUsage = update.tokenUsage;
+    if (update.title !== undefined) dbUpdate.title = update.title;
 
-      state.runs[index] = next;
-      await this.writeState(state);
-      return next;
-    });
+    await this.db.update(runs).set(dbUpdate).where(eq(runs.id, id));
+    const result = await this.getRun(id);
+    if (!result) throw new Error(`Run not found: ${id}`);
+    return result;
   }
 
   async failInProgressRuns(reason: string): Promise<number> {
-    return this.withLock(async () => {
-      const state = await this.readState();
-      let updatedCount = 0;
-      for (let index = 0; index < state.runs.length; index += 1) {
-        const run = state.runs[index] as RunRecord;
-        if (
-          run.status === "queued" ||
-          run.status === "running" ||
-          run.status === "validating" ||
-          run.status === "pushing"
-        ) {
-          state.runs[index] = {
-            ...run,
-            status: "failed",
-            phase: "failed",
-            finishedAt: new Date().toISOString(),
-            error: reason
-          };
-          updatedCount += 1;
-        }
-      }
+    const inProgressStatuses = ["queued", "running", "validating", "pushing"];
+    const affected = await this.db
+      .update(runs)
+      .set({
+        status: "failed",
+        phase: "failed",
+        finishedAt: new Date(),
+        error: reason,
+      })
+      .where(inArray(runs.status, inProgressStatuses))
+      .returning({ id: runs.id });
 
-      if (updatedCount > 0) {
-        await this.writeState(state);
-      }
-      return updatedCount;
-    });
+    return affected.length;
   }
 
   async recoverInProgressRuns(reason: string): Promise<RunRecord[]> {
-    return this.withLock(async () => {
-      const state = await this.readState();
-      const recovered: RunRecord[] = [];
-      for (let index = 0; index < state.runs.length; index += 1) {
-        const run = state.runs[index] as RunRecord;
-        if (
-          run.status === "queued" ||
-          run.status === "running" ||
-          run.status === "validating" ||
-          run.status === "pushing"
-        ) {
-          const next: RunRecord = {
-            ...run,
-            status: "queued",
-            phase: "queued",
-            startedAt: undefined,
-            finishedAt: undefined,
-            error: reason
-          };
-          state.runs[index] = next;
-          recovered.push(next);
-        }
-      }
+    const inProgressStatuses = ["queued", "running", "validating", "pushing"];
+    const affected = await this.db
+      .select()
+      .from(runs)
+      .where(inArray(runs.status, inProgressStatuses));
 
-      if (recovered.length > 0) {
-        await this.writeState(state);
-      }
-      return recovered;
-    });
+    if (affected.length === 0) return [];
+
+    await this.db
+      .update(runs)
+      .set({
+        status: "queued",
+        phase: "queued",
+        startedAt: null,
+        finishedAt: null,
+        error: reason,
+      })
+      .where(inArray(runs.status, inProgressStatuses));
+
+    // Re-fetch after update
+    const ids = affected.map((r) => r.id);
+    const rows = await this.db.select().from(runs).where(inArray(runs.id, ids));
+    return rows.map(rowToRecord);
   }
 
   formatRunStatus(run: RunRecord): string {
@@ -277,21 +300,13 @@ export class RunStore {
       `Branch: ${run.branchName}`,
       `Base: ${run.baseBranch}`,
       `Requested by: <@${run.requestedBy}>`,
-      `Created at: ${run.createdAt}`
+      `Created at: ${run.createdAt}`,
     ];
 
-    if (run.prUrl) {
-      details.push(`PR: ${run.prUrl}`);
-    }
-    if (run.error) {
-      details.push(`Error: ${run.error}`);
-    }
-    if (run.logsPath) {
-      details.push(`Logs: ${run.logsPath}`);
-    }
-    if (run.commitSha) {
-      details.push(`Commit: ${run.commitSha}`);
-    }
+    if (run.prUrl) details.push(`PR: ${run.prUrl}`);
+    if (run.error) details.push(`Error: ${run.error}`);
+    if (run.logsPath) details.push(`Logs: ${run.logsPath}`);
+    if (run.commitSha) details.push(`Commit: ${run.commitSha}`);
     if (run.changedFiles && run.changedFiles.length > 0) {
       details.push(`Changed files: ${String(run.changedFiles.length)}`);
     }
@@ -301,59 +316,17 @@ export class RunStore {
 
     return details.join("\n");
   }
-
-  private async withLock<T>(fn: () => Promise<T>): Promise<T> {
-    const previous = this.lock;
-    let release: (() => void) | undefined;
-    this.lock = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-
-    await previous;
-    try {
-      return await fn();
-    } finally {
-      release?.();
-    }
-  }
-
-  private readState(): RunStateFile {
-    if (!this.cache) {
-      throw new Error("RunStore not initialized — call init() first");
-    }
-    // Return a shallow copy so callers inside withLock can mutate
-    // without affecting concurrent lock-free reads (e.g. findRunByIdentifier).
-    return { runs: [...this.cache.runs] };
-  }
-
-  /** Atomic write: temp file + rename to prevent corruption on crash. */
-  private async writeStateAtomic(state: RunStateFile): Promise<void> {
-    const tmpPath = this.filePath + ".tmp";
-    await writeFile(tmpPath, JSON.stringify(state, null, 2), "utf8");
-    await rename(tmpPath, this.filePath);
-  }
-
-  private async writeState(state: RunStateFile): Promise<void> {
-    await this.writeStateAtomic(state);
-    this.cache = state;
-  }
 }
 
 function normalizeIdentifier(input: string): string {
   const trimmed = input.trim();
-  if (!trimmed) {
-    return "";
-  }
+  if (!trimmed) return "";
 
   const uuidMatch = trimmed.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i);
-  if (uuidMatch?.[0]) {
-    return uuidMatch[0].toLowerCase();
-  }
+  if (uuidMatch?.[0]) return uuidMatch[0].toLowerCase();
 
   const shortIdMatch = trimmed.match(/[0-9a-f]{6,32}/i);
-  if (shortIdMatch?.[0]) {
-    return shortIdMatch[0].toLowerCase();
-  }
+  if (shortIdMatch?.[0]) return shortIdMatch[0].toLowerCase();
 
   return trimmed.replace(/[`<>()[\]{}]/g, "").toLowerCase();
 }
@@ -363,17 +336,9 @@ function shortRunId(id: string): string {
 }
 
 export function mapPhaseToRunStatus(phase: string): RunStatus {
-  if (phase === "validating") {
-    return "validating";
-  }
-  if (phase === "pushing") {
-    return "pushing";
-  }
-  if (phase === "awaiting_ci") {
-    return "awaiting_ci";
-  }
-  if (phase === "ci_fixing") {
-    return "ci_fixing";
-  }
+  if (phase === "validating") return "validating";
+  if (phase === "pushing") return "pushing";
+  if (phase === "awaiting_ci") return "awaiting_ci";
+  if (phase === "ci_fixing") return "ci_fixing";
   return "running";
 }

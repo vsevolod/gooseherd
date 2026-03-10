@@ -1,6 +1,7 @@
 import dotenv from "dotenv";
 dotenv.config({ override: true });
 import { loadConfig } from "./config.js";
+import { initDatabase } from "./db/index.js";
 import { RunStore, mapPhaseToRunStatus } from "./store.js";
 import { GitHubService } from "./github.js";
 import { PipelineEngine } from "./pipeline/index.js";
@@ -39,7 +40,8 @@ async function main(): Promise<void> {
   const config = loadConfig();
   const { repoSlug, baseBranch, task } = parseArgs(process.argv.slice(2));
 
-  const store = new RunStore(config.dataDir);
+  const db = await initDatabase(config.databaseUrl);
+  const store = new RunStore(db);
   await store.init();
 
   const run = await store.createRun(

@@ -6,9 +6,10 @@
 
 import { readFile } from "node:fs/promises";
 import { parse as parseYaml } from "yaml";
+import { logWarn } from "../logger.js";
 import type { TriggerEvent, TriggerRule, TriggerSource, RuleCondition, ConditionOperator } from "./types.js";
 
-const VALID_SOURCES = new Set<string>(["sentry_alert", "github_webhook", "slack_observer"]);
+const KNOWN_SOURCES = new Set<string>(["sentry_alert", "github_webhook", "slack_observer", "cron"]);
 const VALID_OPERATORS = new Set<string>(["equals", "contains", "matches", "exists"]);
 
 export class TriggerRulesLoadError extends Error {
@@ -66,8 +67,12 @@ export async function loadTriggerRules(yamlPath: string): Promise<TriggerRule[]>
     seenIds.add(raw["id"]);
 
     // Validate source
-    if (typeof raw["source"] !== "string" || !VALID_SOURCES.has(raw["source"])) {
-      throw new TriggerRulesLoadError(`${label} (${raw["id"]}): source must be one of: ${Array.from(VALID_SOURCES).join(", ")}`);
+    if (typeof raw["source"] !== "string" || !raw["source"].trim()) {
+      throw new TriggerRulesLoadError(`${label} (${raw["id"]}): source must be a non-empty string`);
+    }
+    if (!KNOWN_SOURCES.has(raw["source"])) {
+      // Warn but don't reject — extensible sources are allowed
+      logWarn("Trigger rule uses unknown source", { ruleId: raw["id"], source: raw["source"] });
     }
 
     // Validate conditions

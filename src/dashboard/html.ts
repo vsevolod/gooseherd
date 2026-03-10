@@ -309,13 +309,14 @@ export function dashboardHtml(config: AppConfig): string {
     }
     .modal h2 { margin: 0 0 16px; font-size: 16px; }
     .modal label { display: block; font-size: 12px; color: var(--muted); margin: 10px 0 4px; font-weight: 600; }
-    .modal input, .modal textarea {
+    .modal input, .modal textarea, .modal select {
       width: 100%; padding: 8px 10px; border: 1px solid var(--border);
       background: var(--panel-3); color: var(--text); border-radius: 8px;
       font-size: 13px; font-family: var(--font-ui); outline: none;
     }
+    .modal select { cursor: pointer; }
     .modal textarea { min-height: 80px; resize: vertical; }
-    .modal input:focus, .modal textarea:focus { border-color: var(--ring); }
+    .modal input:focus, .modal textarea:focus, .modal select:focus { border-color: var(--ring); }
     .modal-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
     .modal-btn {
       border: 1px solid var(--border); background: var(--button-bg); color: var(--text);
@@ -1341,6 +1342,14 @@ export function dashboardHtml(config: AppConfig): string {
           <span class="material-symbols-rounded">add</span>
           <span>New Run</span>
         </button>
+        <button class="top-btn" id="pipelines-btn">
+          <span class="material-symbols-rounded">route</span>
+          <span>Pipelines</span>
+        </button>
+        <button class="top-btn" id="learnings-btn">
+          <span class="material-symbols-rounded">insights</span>
+          <span>Learnings</span>
+        </button>
         <button class="top-btn" id="settings-btn">
           <span class="material-symbols-rounded">settings</span>
           <span>Settings</span>
@@ -1555,6 +1564,58 @@ export function dashboardHtml(config: AppConfig): string {
     </div>
   </div>
 
+  <!-- Pipeline Manager slide-over -->
+  <div class="settings-overlay" id="pipelines-overlay">
+    <div class="settings-panel" style="width: 560px;">
+      <div class="settings-header">
+        <h2>Pipeline Manager</h2>
+        <button class="settings-close" id="pipelines-close">&times;</button>
+      </div>
+      <div class="settings-body" style="padding: 16px;">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+          <div style="font-size: 13px; font-weight: 700;">Pipelines</div>
+          <button class="action-btn" id="pl-new-btn" style="font-size: 11px; padding: 5px 10px;">
+            <span class="material-symbols-rounded" style="font-size: 14px; vertical-align: middle;">add</span>
+            New Pipeline
+          </button>
+        </div>
+        <div id="pl-list" style="margin-bottom: 16px;">Loading...</div>
+
+        <!-- Pipeline editor (hidden by default) -->
+        <div id="pl-editor" style="display: none; border: 1px solid var(--border); border-radius: 8px; padding: 14px; background: var(--panel-3);">
+          <div style="font-size: 13px; font-weight: 700; margin-bottom: 10px;" id="pl-editor-title">New Pipeline</div>
+          <label style="display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; font-weight: 600;">Pipeline ID</label>
+          <input type="text" id="pl-editor-id" placeholder="e.g. my-pipeline" style="width: 100%; padding: 7px 10px; border: 1px solid var(--border); background: var(--panel); color: var(--text); border-radius: 6px; font-size: 12px; font-family: var(--font-mono); outline: none; margin-bottom: 10px;" />
+          <label style="display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; font-weight: 600;">Pipeline YAML</label>
+          <textarea id="pl-editor-yaml" style="width: 100%; min-height: 200px; padding: 8px 10px; border: 1px solid var(--border); background: var(--panel); color: var(--text); border-radius: 6px; font-size: 12px; font-family: var(--font-mono); resize: vertical; outline: none;" placeholder="version: 1\nname: My Pipeline\nnodes:\n  - id: step1\n    type: deterministic\n    action: clone"></textarea>
+          <div id="pl-editor-result" style="margin-top: 8px; font-size: 12px; min-height: 20px;"></div>
+          <div style="display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px;">
+            <button class="action-btn" id="pl-editor-cancel" style="font-size: 11px; padding: 5px 12px;">Cancel</button>
+            <button class="action-btn" id="pl-editor-validate" style="font-size: 11px; padding: 5px 12px;">Validate</button>
+            <button class="action-btn" id="pl-editor-save" style="font-size: 11px; padding: 5px 12px; background: var(--ring); color: #fff; border-color: var(--ring);">Save</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Learnings slide-over -->
+  <div class="settings-overlay" id="learnings-overlay">
+    <div class="settings-panel" style="width: 620px;">
+      <div class="settings-header">
+        <h2>Learnings</h2>
+        <button class="settings-close" id="learnings-close">&times;</button>
+      </div>
+      <div class="settings-body" style="padding: 16px;">
+        <div id="learnings-system" style="margin-bottom: 16px;"></div>
+        <div style="font-size: 12px; font-weight: 700; margin-bottom: 6px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em;">Per-repo breakdown</div>
+        <div id="learnings-repos" style="margin-bottom: 16px;">Loading...</div>
+        <div style="font-size: 12px; font-weight: 700; margin-bottom: 6px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em;">Recent outcomes</div>
+        <div id="learnings-outcomes">Loading...</div>
+      </div>
+    </div>
+  </div>
+
   <!-- New Run modal -->
   <div class="modal-overlay" id="new-run-overlay">
     <div class="modal">
@@ -1565,8 +1626,10 @@ export function dashboardHtml(config: AppConfig): string {
       <input type="text" id="nr-branch" placeholder="main" />
       <label for="nr-task">Task description</label>
       <textarea id="nr-task" placeholder="Describe what you want the agent to do..."></textarea>
-      <label for="nr-pipeline">Pipeline (optional)</label>
-      <input type="text" id="nr-pipeline" placeholder="e.g. hotfix, ui-change" />
+      <label for="nr-pipeline">Pipeline</label>
+      <select id="nr-pipeline" class="form-control">
+        <option value="">Default</option>
+      </select>
       <div id="nr-error" style="color: var(--err); font-size: 12px; margin-top: 8px; display: none;"></div>
       <div class="modal-actions">
         <button class="modal-btn" id="nr-cancel">Cancel</button>
@@ -1661,6 +1724,25 @@ export function dashboardHtml(config: AppConfig): string {
       nrError: document.getElementById('nr-error'),
       nrCancel: document.getElementById('nr-cancel'),
       nrSubmit: document.getElementById('nr-submit'),
+      learningsBtn: document.getElementById('learnings-btn'),
+      learningsOverlay: document.getElementById('learnings-overlay'),
+      learningsClose: document.getElementById('learnings-close'),
+      learningsSystem: document.getElementById('learnings-system'),
+      learningsRepos: document.getElementById('learnings-repos'),
+      learningsOutcomes: document.getElementById('learnings-outcomes'),
+      pipelinesBtn: document.getElementById('pipelines-btn'),
+      pipelinesOverlay: document.getElementById('pipelines-overlay'),
+      pipelinesClose: document.getElementById('pipelines-close'),
+      plList: document.getElementById('pl-list'),
+      plNewBtn: document.getElementById('pl-new-btn'),
+      plEditor: document.getElementById('pl-editor'),
+      plEditorTitle: document.getElementById('pl-editor-title'),
+      plEditorId: document.getElementById('pl-editor-id'),
+      plEditorYaml: document.getElementById('pl-editor-yaml'),
+      plEditorResult: document.getElementById('pl-editor-result'),
+      plEditorCancel: document.getElementById('pl-editor-cancel'),
+      plEditorValidate: document.getElementById('pl-editor-validate'),
+      plEditorSave: document.getElementById('pl-editor-save'),
     };
 
     // Session tab switching
@@ -2942,7 +3024,10 @@ export function dashboardHtml(config: AppConfig): string {
           '<div class="stat-card"><div class="stat-value">$' + (s.totalCostUsd || 0).toFixed(2) + '</div><div class="stat-label">Total Cost</div></div>' +
           '<div class="stat-card"><div class="stat-value">$' + (s.avgCostUsd || 0).toFixed(2) + '</div><div class="stat-label">Avg Cost/Run</div></div>' +
           '<div class="stat-card"><div class="stat-value">' + (s.runsLast24h || 0) + '</div><div class="stat-label">Last 24h</div></div>' +
-          '</div></div>';
+          '</div></div>' +
+          '<div class="settings-section" style="margin-top: 16px; padding-top: 16px; border-top: 1px solid #22314f;">' +
+          '<a href="/setup?reconfig=1" style="display: inline-block; padding: 8px 16px; background: #1e293b; color: #94a3b8; border-radius: 8px; text-decoration: none; font-size: 13px; font-weight: 600;">Reconfigure</a>' +
+          '</div>';
       } catch (e) {
         el.settingsBody.textContent = 'Failed to load settings.';
       }
@@ -2969,6 +3054,24 @@ export function dashboardHtml(config: AppConfig): string {
     };
 
     // ── New Run modal ──
+    async function loadPipelineOptions() {
+      try {
+        var res = await fetchJson('/api/pipelines');
+        var select = el.nrPipeline;
+        // Keep only the default option
+        while (select.options.length > 1) select.remove(1);
+        if (res.pipelines) {
+          for (var i = 0; i < res.pipelines.length; i++) {
+            var p = res.pipelines[i];
+            var opt = document.createElement('option');
+            opt.value = p.id;
+            opt.textContent = p.name + (p.isBuiltIn ? ' (built-in)' : '');
+            select.appendChild(opt);
+          }
+        }
+      } catch(e) { /* pipelines not available */ }
+    }
+
     el.newRunBtn.onclick = () => {
       el.newRunOverlay.classList.add('open');
       el.nrError.style.display = 'none';
@@ -2976,6 +3079,7 @@ export function dashboardHtml(config: AppConfig): string {
       el.nrBranch.value = '';
       el.nrTask.value = '';
       el.nrPipeline.value = '';
+      loadPipelineOptions();
       el.nrRepo.focus();
     };
     el.nrCancel.onclick = () => el.newRunOverlay.classList.remove('open');
@@ -2984,6 +3088,7 @@ export function dashboardHtml(config: AppConfig): string {
       if (e.key === 'Escape') {
         el.settingsOverlay.classList.remove('open');
         el.newRunOverlay.classList.remove('open');
+        el.pipelinesOverlay.classList.remove('open');
       }
     });
     el.nrSubmit.onclick = async () => {
@@ -3292,6 +3397,239 @@ export function dashboardHtml(config: AppConfig): string {
       } catch (e) {
         // Observer not available — hide panel
         observerEl.card.style.display = 'none';
+      }
+    }
+
+    // ── Pipeline Manager ──
+
+    var plEditingId = null; // null = new, string = editing existing
+
+    el.pipelinesBtn.onclick = function() {
+      el.pipelinesOverlay.classList.add('open');
+      el.plEditor.style.display = 'none';
+      refreshPipelineList();
+    };
+    el.pipelinesClose.onclick = function() { el.pipelinesOverlay.classList.remove('open'); };
+    el.pipelinesOverlay.onclick = function(e) { if (e.target === el.pipelinesOverlay) el.pipelinesOverlay.classList.remove('open'); };
+
+    async function refreshPipelineList() {
+      try {
+        var res = await fetchJson('/api/pipelines');
+        var pipelines = res.pipelines || [];
+        if (pipelines.length === 0) {
+          el.plList.innerHTML = '<div style="color: var(--muted); font-size: 12px; padding: 12px 0; text-align: center;">No pipelines found.</div>';
+          return;
+        }
+        var html = '<table style="width: 100%; border-collapse: collapse; font-size: 12px;">';
+        html += '<thead><tr style="border-bottom: 2px solid var(--border); text-align: left;">';
+        html += '<th style="padding: 6px 8px; font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em;">Name</th>';
+        html += '<th style="padding: 6px 8px; font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em;">ID</th>';
+        html += '<th style="padding: 6px 8px; font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em;">Nodes</th>';
+        html += '<th style="padding: 6px 8px; font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em;">Updated</th>';
+        html += '<th style="padding: 6px 8px; font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em;"></th>';
+        html += '</tr></thead><tbody>';
+        for (var i = 0; i < pipelines.length; i++) {
+          var p = pipelines[i];
+          var builtInBadge = p.isBuiltIn ? '<span style="font-size: 10px; font-weight: 600; background: color-mix(in srgb, var(--ok) 18%, transparent); color: var(--ok); border-radius: 4px; padding: 1px 5px; margin-left: 4px;">built-in</span>' : '';
+          html += '<tr style="border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);">';
+          html += '<td style="padding: 8px 8px; font-weight: 600;">' + esc(p.name) + builtInBadge + '</td>';
+          html += '<td style="padding: 8px 8px; font-family: var(--font-mono); color: var(--muted);">' + esc(p.id) + '</td>';
+          html += '<td style="padding: 8px 8px; text-align: center;">' + p.nodeCount + '</td>';
+          html += '<td style="padding: 8px 8px; color: var(--muted);">' + timeAgo(p.updatedAt) + '</td>';
+          html += '<td style="padding: 8px 8px; text-align: right; white-space: nowrap;">';
+          html += '<button class="action-btn pl-edit-btn" data-id="' + esc(p.id) + '" style="font-size: 11px; padding: 3px 8px; margin-right: 4px;">Edit</button>';
+          if (!p.isBuiltIn) {
+            html += '<button class="action-btn pl-delete-btn" data-id="' + esc(p.id) + '" style="font-size: 11px; padding: 3px 8px; color: var(--err); border-color: color-mix(in srgb, var(--err) 30%, var(--border));">Delete</button>';
+          }
+          html += '</td></tr>';
+        }
+        html += '</tbody></table>';
+        el.plList.innerHTML = html;
+
+        // Wire edit buttons
+        el.plList.querySelectorAll('.pl-edit-btn').forEach(function(btn) {
+          btn.onclick = function() { openPipelineEditor(btn.getAttribute('data-id')); };
+        });
+        // Wire delete buttons
+        el.plList.querySelectorAll('.pl-delete-btn').forEach(function(btn) {
+          btn.onclick = function() { deletePipeline(btn.getAttribute('data-id')); };
+        });
+      } catch(e) {
+        el.plList.innerHTML = '<div style="color: var(--err); font-size: 12px; padding: 12px 0;">Failed to load pipelines: ' + esc(e.message) + '</div>';
+      }
+    }
+
+    async function openPipelineEditor(id) {
+      el.plEditor.style.display = '';
+      el.plEditorResult.innerHTML = '';
+      if (id) {
+        // Edit existing
+        plEditingId = id;
+        el.plEditorTitle.textContent = 'Edit Pipeline';
+        el.plEditorId.value = id;
+        el.plEditorId.disabled = true;
+        try {
+          var res = await fetchJson('/api/pipelines/' + encodeURIComponent(id));
+          el.plEditorYaml.value = res.pipeline.yaml;
+        } catch(e) {
+          el.plEditorYaml.value = '';
+          el.plEditorResult.innerHTML = '<span style="color: var(--err);">Failed to load: ' + esc(e.message) + '</span>';
+        }
+      } else {
+        // New pipeline
+        plEditingId = null;
+        el.plEditorTitle.textContent = 'New Pipeline';
+        el.plEditorId.value = '';
+        el.plEditorId.disabled = false;
+        el.plEditorYaml.value = '';
+      }
+    }
+
+    el.plNewBtn.onclick = function() { openPipelineEditor(null); };
+
+    el.plEditorCancel.onclick = function() {
+      el.plEditor.style.display = 'none';
+      el.plEditorResult.innerHTML = '';
+    };
+
+    el.plEditorValidate.onclick = async function() {
+      var yaml = el.plEditorYaml.value.trim();
+      if (!yaml) { el.plEditorResult.innerHTML = '<span style="color: var(--err);">YAML is required.</span>'; return; }
+      try {
+        var res = await fetchJson('/api/pipelines/validate', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ yaml: yaml }),
+        });
+        if (res.valid) {
+          el.plEditorResult.innerHTML = '<span style="color: var(--ok);">\\u2713 Valid \\u2014 ' + esc(res.name) + ' (' + res.nodeCount + ' nodes)</span>';
+        } else {
+          el.plEditorResult.innerHTML = '<span style="color: var(--err);">\\u2717 ' + esc(res.error) + '</span>';
+        }
+      } catch(e) {
+        el.plEditorResult.innerHTML = '<span style="color: var(--err);">Validation failed: ' + esc(e.message) + '</span>';
+      }
+    };
+
+    el.plEditorSave.onclick = async function() {
+      var id = plEditingId || el.plEditorId.value.trim();
+      var yaml = el.plEditorYaml.value.trim();
+      if (!id) { el.plEditorResult.innerHTML = '<span style="color: var(--err);">Pipeline ID is required.</span>'; return; }
+      if (!yaml) { el.plEditorResult.innerHTML = '<span style="color: var(--err);">YAML is required.</span>'; return; }
+      el.plEditorSave.disabled = true;
+      try {
+        var url = plEditingId ? '/api/pipelines/' + encodeURIComponent(id) : '/api/pipelines';
+        var method = plEditingId ? 'PUT' : 'POST';
+        var bodyObj = plEditingId ? { yaml: yaml } : { id: id, yaml: yaml };
+        await fetchJson(url, {
+          method: method,
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(bodyObj),
+        });
+        el.plEditorResult.innerHTML = '<span style="color: var(--ok);">\\u2713 Saved successfully.</span>';
+        el.plEditor.style.display = 'none';
+        refreshPipelineList();
+      } catch(e) {
+        el.plEditorResult.innerHTML = '<span style="color: var(--err);">Save failed: ' + esc(e.message) + '</span>';
+      } finally {
+        el.plEditorSave.disabled = false;
+      }
+    };
+
+    async function deletePipeline(id) {
+      if (!confirm('Delete pipeline "' + id + '"? This cannot be undone.')) return;
+      try {
+        await fetchJson('/api/pipelines/' + encodeURIComponent(id), { method: 'DELETE' });
+        refreshPipelineList();
+      } catch(e) {
+        alert('Delete failed: ' + e.message);
+      }
+    }
+
+    // ── Learnings Panel ──
+
+    el.learningsBtn.onclick = function() {
+      el.learningsOverlay.classList.add('open');
+      refreshLearnings();
+    };
+    el.learningsClose.onclick = function() { el.learningsOverlay.classList.remove('open'); };
+    el.learningsOverlay.onclick = function(e) { if (e.target === el.learningsOverlay) el.learningsOverlay.classList.remove('open'); };
+
+    async function refreshLearnings() {
+      try {
+        var res = await fetchJson('/api/learnings/summary');
+        var sys = res.system || {};
+        var repos = res.repos || [];
+
+        // System stats cards
+        el.learningsSystem.innerHTML =
+          '<div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px;">' +
+          '<div style="border: 1px solid var(--border); border-radius: 8px; padding: 10px; background: var(--panel-3); text-align: center;">' +
+            '<div style="font-size: 22px; font-weight: 700;">' + (sys.totalRuns || 0) + '</div>' +
+            '<div style="font-size: 11px; color: var(--muted);">Total Runs</div>' +
+          '</div>' +
+          '<div style="border: 1px solid var(--border); border-radius: 8px; padding: 10px; background: var(--panel-3); text-align: center;">' +
+            '<div style="font-size: 22px; font-weight: 700; color: var(--ok);">' + (sys.successRate || 0) + '%</div>' +
+            '<div style="font-size: 11px; color: var(--muted);">Success Rate</div>' +
+          '</div>' +
+          '<div style="border: 1px solid var(--border); border-radius: 8px; padding: 10px; background: var(--panel-3); text-align: center;">' +
+            '<div style="font-size: 22px; font-weight: 700;">$' + (sys.totalCostUsd || 0).toFixed(2) + '</div>' +
+            '<div style="font-size: 11px; color: var(--muted);">Total Cost</div>' +
+          '</div>' +
+          '<div style="border: 1px solid var(--border); border-radius: 8px; padding: 10px; background: var(--panel-3); text-align: center;">' +
+            '<div style="font-size: 22px; font-weight: 700;">' + Math.round((sys.avgDurationMs || 0) / 1000) + 's</div>' +
+            '<div style="font-size: 11px; color: var(--muted);">Avg Duration</div>' +
+          '</div>' +
+          '</div>';
+
+        // Repos table
+        if (repos.length === 0) {
+          el.learningsRepos.innerHTML = '<div style="color: var(--muted); font-size: 12px; padding: 12px 0; text-align: center;">No run data yet.</div>';
+        } else {
+          var html = '<table style="width: 100%; border-collapse: collapse; font-size: 12px;">';
+          html += '<thead><tr style="border-bottom: 2px solid var(--border); text-align: left;">';
+          html += '<th style="padding: 6px 8px; font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em;">Repo</th>';
+          html += '<th style="padding: 6px 8px; font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em;">Runs</th>';
+          html += '<th style="padding: 6px 8px; font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em;">Success</th>';
+          html += '<th style="padding: 6px 8px; font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em;">Avg Cost</th>';
+          html += '<th style="padding: 6px 8px; font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em;">Last Run</th>';
+          html += '</tr></thead><tbody>';
+          repos.forEach(function(r) {
+            var rateColor = r.successRate >= 80 ? 'var(--ok)' : r.successRate >= 50 ? 'var(--warn)' : 'var(--err)';
+            html += '<tr style="border-bottom: 1px solid var(--border);">';
+            html += '<td style="padding: 6px 8px; font-family: var(--font-mono); font-size: 11px;">' + r.repoSlug + '</td>';
+            html += '<td style="padding: 6px 8px;">' + r.totalRuns + '</td>';
+            html += '<td style="padding: 6px 8px; color: ' + rateColor + '; font-weight: 600;">' + r.successRate + '%</td>';
+            html += '<td style="padding: 6px 8px;">$' + r.avgCostUsd.toFixed(2) + '</td>';
+            html += '<td style="padding: 6px 8px; color: var(--muted);">' + new Date(r.lastRunAt).toLocaleDateString() + '</td>';
+            html += '</tr>';
+          });
+          html += '</tbody></table>';
+          el.learningsRepos.innerHTML = html;
+        }
+
+        // Recent outcomes
+        var outRes = await fetchJson('/api/learnings/outcomes?limit=20');
+        var outcomes = outRes.outcomes || [];
+        if (outcomes.length === 0) {
+          el.learningsOutcomes.innerHTML = '<div style="color: var(--muted); font-size: 12px; padding: 12px 0; text-align: center;">No outcomes recorded yet.</div>';
+        } else {
+          var oHtml = '<div style="max-height: 300px; overflow-y: auto;">';
+          outcomes.forEach(function(o) {
+            var statusColor = o.status === 'completed' ? 'var(--ok)' : 'var(--err)';
+            oHtml += '<div style="display: flex; gap: 8px; align-items: center; padding: 5px 0; border-bottom: 1px solid var(--border); font-size: 12px;">';
+            oHtml += '<span style="width: 8px; height: 8px; border-radius: 50%; background: ' + statusColor + '; flex-shrink: 0;"></span>';
+            oHtml += '<span style="font-family: var(--font-mono); font-size: 11px; min-width: 140px;">' + o.repoSlug + '</span>';
+            oHtml += '<span style="color: var(--muted); min-width: 60px;">' + o.source + '</span>';
+            oHtml += '<span style="color: var(--muted);">$' + (o.costUsd || 0).toFixed(2) + '</span>';
+            oHtml += '<span style="color: var(--muted); margin-left: auto; font-size: 11px;">' + new Date(o.timestamp).toLocaleString() + '</span>';
+            oHtml += '</div>';
+          });
+          oHtml += '</div>';
+          el.learningsOutcomes.innerHTML = oHtml;
+        }
+      } catch(e) {
+        el.learningsSystem.innerHTML = '<div style="color: var(--err); font-size: 12px;">Failed to load learnings: ' + e.message + '</div>';
       }
     }
 

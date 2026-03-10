@@ -5,6 +5,11 @@ import { logError } from "../logger.js";
 export class RunLifecycleHooks {
   constructor(private readonly memory?: MemoryProvider) {}
 
+  /** Expose the memory provider so pipeline nodes (e.g. retrospective) can store discoveries. */
+  get memoryProvider(): MemoryProvider | undefined {
+    return this.memory;
+  }
+
   async onPromptEnrich(run: RunRecord): Promise<string[]> {
     if (!this.memory) return [];
     try {

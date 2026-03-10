@@ -23,6 +23,8 @@ export interface WebhookServerConfig {
   sentryWebhookSecret?: string;
   /** Slack channel for Sentry alert notifications */
   sentryAlertChannelId?: string;
+  /** Per-source webhook secrets for custom adapters: { source: secret } */
+  adapterSecrets?: Record<string, string>;
 }
 
 export type OnEventCallback = (event: TriggerEvent) => void;
@@ -84,6 +86,13 @@ async function handleRequest(
   // Sentry webhook
   if (url === "/webhooks/sentry" && method === "POST") {
     await handleSentryWebhook(req, res, config, onEvent);
+    return;
+  }
+
+  // Generic adapter webhook: /webhooks/{source}
+  const adapterMatch = url.match(/^\/webhooks\/([a-z0-9_-]+)$/);
+  if (adapterMatch && method === "POST") {
+    await handleAdapterWebhook(req, res, config, onEvent, adapterMatch[1]!);
     return;
   }
 
@@ -185,6 +194,68 @@ async function handleSentryWebhook(
   } else {
     sendJson(res, 200, { accepted: false, reason: "event type not actionable" });
   }
+}
+
+async function handleAdapterWebhook(
+  req: IncomingMessage,
+  res: ServerResponse,
+  config: WebhookServerConfig,
+  onEvent: OnEventCallback,
+  source: string
+): Promise<void> {
+  const { getAdapter } = await import("./sources/adapter-registry.js");
+  const adapter = getAdapter(source);
+  if (!adapter) {
+    sendJson(res, 404, { error: `No adapter registered for source: ${source}` });
+    return;
+  }
+
+  const body = await readBody(req);
+  if (body === null) {
+    sendJson(res, 413, { error: "Request body too large" });
+    return;
+  }
+
+  // Look up secret for this source
+  const secret = config.adapterSecrets?.[source];
+  if (secret) {
+    const headers = flattenHeaders(req.headers);
+    if (!adapter.verifySignature(body, headers, secret)) {
+      sendJson(res, 401, { error: "Invalid signature" });
+      return;
+    }
+  }
+
+  let payload: unknown;
+  try {
+    payload = JSON.parse(body);
+  } catch {
+    sendJson(res, 400, { error: "Invalid JSON" });
+    return;
+  }
+
+  const headers = flattenHeaders(req.headers);
+  const event = adapter.parseEvent(headers, payload);
+
+  if (event) {
+    onEvent(event);
+    sendJson(res, 200, { accepted: true, eventId: event.id });
+  } else {
+    sendJson(res, 200, { accepted: false, reason: "event type not actionable" });
+  }
+}
+
+/** Flatten IncomingHttpHeaders to Record<string, string> */
+function flattenHeaders(headers: Record<string, string | string[] | undefined>): Record<string, string> {
+  const flat: Record<string, string> = {};
+  for (const [key, value] of Object.entries(headers)) {
+    if (typeof value === "string") {
+      flat[key] = value;
+    } else if (Array.isArray(value)) {
+      flat[key] = value[0] ?? "";
+    }
+  }
+  return flat;
 }
 
 function readBody(req: IncomingMessage): Promise<string | null> {

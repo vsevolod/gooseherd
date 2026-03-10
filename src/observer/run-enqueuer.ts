@@ -10,4 +10,6 @@ import type { NewRunInput, RunRecord } from "../types.js";
 export interface RunEnqueuer {
   enqueueRun(input: NewRunInput): Promise<RunRecord>;
   onRunTerminal(cb: (runId: string, status: string) => void): void;
+  /** Look up a run by ID (used by the learning store to gather outcome details). */
+  findRun?(id: string): Promise<RunRecord | undefined>;
 }

@@ -62,6 +62,10 @@ export interface NodeDeps {
   onDetail?: (detail: string) => Promise<void>;
   /** When set, shell commands route through this Docker sandbox container. */
   sandboxId?: string;
+  /** Request deferred sandbox creation with a specific image. Used by setup_sandbox node. */
+  requestSandbox?: (image: string) => Promise<void>;
+  /** Container manager reference for image resolution (build/check). */
+  containerManager?: import("../sandbox/container-manager.js").ContainerManager;
 }
 
 export type NodeHandler = (

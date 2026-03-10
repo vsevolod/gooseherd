@@ -17,4 +17,9 @@ if [ -S "$SOCKET" ]; then
   fi
 fi
 
+# Auto-detect pi-agent if AGENT_COMMAND_TEMPLATE is not set
+if [ -z "$AGENT_COMMAND_TEMPLATE" ] && command -v pi >/dev/null 2>&1; then
+  export AGENT_COMMAND_TEMPLATE="cd {{repo_dir}} && pi -p @{{prompt_file}} --no-session --mode json --tools read,write,edit,bash,grep,find,ls {{pi_extensions}} {{mcp_flags}}"
+fi
+
 exec gosu gooseherd "$@"

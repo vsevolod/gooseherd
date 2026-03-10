@@ -8,6 +8,7 @@ import { writeFile, mkdir, rm } from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { randomUUID, createHmac } from "node:crypto";
+import { createTestDb } from "./helpers/test-db.js";
 
 // ── Safety pipeline imports ──
 import {
@@ -324,19 +325,36 @@ trigger_rules:
     await rm(tmpDir, { recursive: true, force: true });
   });
 
-  test("loadTriggerRules: throws on invalid source", async () => {
+  test("loadTriggerRules: allows unknown source with warning", async () => {
+    tmpDir = path.join(tmpdir(), `gooseherd-test-${randomUUID().slice(0, 8)}`);
+    await mkdir(tmpDir, { recursive: true });
+    const yamlPath = path.join(tmpDir, "rules.yml");
+    await writeFile(yamlPath, `
+trigger_rules:
+  - id: custom-rule
+    source: datadog
+    conditions: []
+`);
+    const rules = await loadTriggerRules(yamlPath);
+    assert.equal(rules.length, 1);
+    assert.equal(rules[0]!.id, "custom-rule");
+    assert.equal(rules[0]!.source, "datadog");
+    await rm(tmpDir, { recursive: true, force: true });
+  });
+
+  test("loadTriggerRules: throws on empty source", async () => {
     tmpDir = path.join(tmpdir(), `gooseherd-test-${randomUUID().slice(0, 8)}`);
     await mkdir(tmpDir, { recursive: true });
     const yamlPath = path.join(tmpDir, "rules.yml");
     await writeFile(yamlPath, `
 trigger_rules:
   - id: bad-rule
-    source: invalid_source
+    source: "  "
     conditions: []
 `);
     await assert.rejects(
       () => loadTriggerRules(yamlPath),
-      (err: Error) => err instanceof TriggerRulesLoadError && err.message.includes("source must be one of")
+      (err: Error) => err instanceof TriggerRulesLoadError && err.message.includes("source must be a non-empty string")
     );
     await rm(tmpDir, { recursive: true, force: true });
   });
@@ -659,101 +677,95 @@ describe("Sentry Poller", () => {
 // ═══════════════════════════════════════════════════════
 
 describe("ObserverStateStore", { concurrency: 1 }, () => {
-  async function makeStore(): Promise<{ store: ObserverStateStore; dir: string }> {
-    const dir = path.join(tmpdir(), `gooseherd-state-${randomUUID().slice(0, 8)}`);
-    await mkdir(dir, { recursive: true });
-    const store = new ObserverStateStore(dir);
+  async function makeStore(): Promise<{ store: ObserverStateStore; cleanup: () => Promise<void> }> {
+    const testDb = await createTestDb();
+    const store = new ObserverStateStore(testDb.db);
     await store.load();
-    return { store, dir };
+    return { store, cleanup: testDb.cleanup };
   }
 
-  test("state store: load initializes empty state when no file", async () => {
-    const { store, dir } = await makeStore();
-    assert.equal(store.getDailyCount(), 0);
-    assert.equal(store.hasDedup("test"), false);
-    await rm(dir, { recursive: true, force: true });
+  test("state store: load initializes empty state when no file", async (t) => {
+    const { store, cleanup } = await makeStore();
+    t.after(cleanup);
+    assert.equal(await store.getDailyCount(), 0);
+    assert.equal(await store.hasDedup("test"), false);
   });
 
-  test("state store: dedup set/has/sweep lifecycle", async () => {
-    const { store, dir } = await makeStore();
+  test("state store: dedup set/has/sweep lifecycle", async (t) => {
+    const { store, cleanup } = await makeStore();
+    t.after(cleanup);
 
     // Set a dedup entry with long TTL
-    store.setDedup("key1", 60_000);
-    assert.equal(store.hasDedup("key1"), true);
+    await store.setDedup("key1", 60_000);
+    assert.equal(await store.hasDedup("key1"), true);
 
     // Set one with 0 TTL (already expired)
-    store.setDedup("key2", 0);
+    await store.setDedup("key2", 0);
     // hasDedup triggers expiry check
-    assert.equal(store.hasDedup("key2"), false);
-
-    await rm(dir, { recursive: true, force: true });
+    assert.equal(await store.hasDedup("key2"), false);
   });
 
-  test("state store: daily counter increments and resets", async () => {
-    const { store, dir } = await makeStore();
+  test("state store: daily counter increments and resets", async (t) => {
+    const { store, cleanup } = await makeStore();
+    t.after(cleanup);
 
-    store.incrementDailyCount("org/repo");
-    store.incrementDailyCount("org/repo");
-    store.incrementDailyCount("org/other");
+    await store.incrementDailyCount("org/repo");
+    await store.incrementDailyCount("org/repo");
+    await store.incrementDailyCount("org/other");
 
-    assert.equal(store.getDailyCount(), 3);
-    assert.equal(store.getDailyPerRepoCount("org/repo"), 2);
-    assert.equal(store.getDailyPerRepoCount("org/other"), 1);
-
-    await rm(dir, { recursive: true, force: true });
+    assert.equal(await store.getDailyCount(), 3);
+    assert.equal(await store.getDailyPerRepoCount("org/repo"), 2);
+    assert.equal(await store.getDailyPerRepoCount("org/other"), 1);
   });
 
-  test("state store: flush and reload preserves state", async () => {
-    const { store, dir } = await makeStore();
+  test("state store: flush and reload preserves state (DB is immediate)", async (t) => {
+    const testDb = await createTestDb();
+    t.after(async () => { await testDb.cleanup(); });
 
-    store.setDedup("persist-key", 300_000, "run-1");
-    store.incrementDailyCount("org/repo");
-    store.addRateLimitEvent("sentry_alert", Date.now());
+    const store = new ObserverStateStore(testDb.db);
+    await store.load();
+
+    await store.setDedup("persist-key", 300_000, "run-1");
+    await store.incrementDailyCount("org/repo");
+    await store.addRateLimitEvent("sentry_alert", Date.now());
     await store.flush();
 
-    // Reload into a fresh store
-    const store2 = new ObserverStateStore(dir);
+    // Reload into a fresh store on same DB
+    const store2 = new ObserverStateStore(testDb.db);
     await store2.load();
-    assert.equal(store2.hasDedup("persist-key"), true);
-    assert.equal(store2.getDailyCount(), 1);
-    assert.equal(store2.getRateLimitEvents("sentry_alert").length, 1);
-
-    await rm(dir, { recursive: true, force: true });
+    assert.equal(await store2.hasDedup("persist-key"), true);
+    assert.equal(await store2.getDailyCount(), 1);
+    assert.equal((await store2.getRateLimitEvents("sentry_alert")).length, 1);
   });
 
-  test("state store: rate limit events prune old entries", async () => {
-    const dir = path.join(tmpdir(), `gooseherd-prune-${randomUUID()}`);
-    await mkdir(dir, { recursive: true });
-    const s = new ObserverStateStore(dir);
-    await s.load();
+  test("state store: rate limit events prune old entries", async (t) => {
+    const { store: s, cleanup } = await makeStore();
+    t.after(cleanup);
 
     const now = Date.now();
-    s.addRateLimitEvent("sentry_alert", now - 120 * 60 * 1000); // 2h ago
-    s.addRateLimitEvent("sentry_alert", now - 10 * 1000); // 10s ago
+    await s.addRateLimitEvent("sentry_alert", now - 120 * 60 * 1000); // 2h ago
+    await s.addRateLimitEvent("sentry_alert", now - 10 * 1000); // 10s ago
 
-    const beforePrune = s.getRateLimitEvents("sentry_alert");
+    const beforePrune = await s.getRateLimitEvents("sentry_alert");
     assert.equal(beforePrune.length, 2, `expected 2 before prune, got ${String(beforePrune.length)}`);
 
-    s.pruneRateLimitEvents("sentry_alert", 60 * 60 * 1000); // 1h window
+    await s.pruneRateLimitEvents("sentry_alert", 60 * 60 * 1000); // 1h window
 
-    const afterPrune = s.getRateLimitEvents("sentry_alert");
+    const afterPrune = await s.getRateLimitEvents("sentry_alert");
     assert.equal(afterPrune.length, 1, `expected 1 after prune, got ${String(afterPrune.length)}`);
-
-    await rm(dir, { recursive: true, force: true });
   });
 
-  test("state store: markDedupCompleted sets completedAt", async () => {
-    const { store, dir } = await makeStore();
+  test("state store: markDedupCompleted sets completedAt", async (t) => {
+    const { store, cleanup } = await makeStore();
+    t.after(cleanup);
 
-    store.setDedup("key1", 60_000, "run-abc");
-    store.markDedupCompleted("run-abc");
+    await store.setDedup("key1", 60_000, "run-abc");
+    await store.markDedupCompleted("run-abc", "success");
 
-    const entry = store.getDedupEntry("key1");
+    const entry = await store.getDedupEntry("key1");
     assert.ok(entry);
     assert.ok(entry.completedAt);
     assert.ok(entry.completedAt > 0);
-
-    await rm(dir, { recursive: true, force: true });
   });
 });
 

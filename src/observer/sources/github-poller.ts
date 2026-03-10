@@ -70,7 +70,7 @@ async function pollRepo(
   stateStore: ObserverStateStore
 ): Promise<TriggerEvent[]> {
   const { owner, repo } = parseRepoSlug(repoSlug);
-  const lastRunId = stateStore.getGithubLastRunId(repoSlug);
+  const lastRunId = await stateStore.getGithubLastRunId(repoSlug);
 
   const runs = await fetchFailedRuns(config.githubToken, owner, repo);
   if (runs.length === 0) return [];
@@ -86,7 +86,7 @@ async function pollRepo(
 
   // Update cursor to highest run ID
   const maxRunId = Math.max(...newRuns.map(r => r.id));
-  stateStore.setGithubLastRunId(repoSlug, maxRunId);
+  await stateStore.setGithubLastRunId(repoSlug, maxRunId);
 
   return newRuns.map(run => ({
     id: `gh-actions-${String(run.id)}-${randomUUID().slice(0, 8)}`,

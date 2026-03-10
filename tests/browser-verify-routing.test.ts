@@ -3,6 +3,7 @@ import { describe, test } from "node:test";
 import {
   classifyBrowserVerifyFailure,
   deriveAuthSignals,
+  detectAuthErrorType,
   detectModelProvider,
   isNonCodeFixFailure,
   resolveStagehandProvider,
@@ -146,10 +147,90 @@ describe("classifyBrowserVerifyFailure", () => {
 });
 
 describe("isNonCodeFixFailure", () => {
-  test("marks auth/provider/inconclusive classes as non-code-fix", () => {
+  test("marks provider/auth_exhausted/inconclusive classes as non-code-fix", () => {
     assert.equal(isNonCodeFixFailure("provider_mismatch"), true);
-    assert.equal(isNonCodeFixFailure("auth_required"), true);
+    assert.equal(isNonCodeFixFailure("auth_exhausted"), true);
+    assert.equal(isNonCodeFixFailure("auth_action_blocked"), true);
     assert.equal(isNonCodeFixFailure("verify_inconclusive"), true);
     assert.equal(isNonCodeFixFailure("feature_not_found"), false);
+  });
+
+  test("auth_required and signup_failed now enter fix loop", () => {
+    assert.equal(isNonCodeFixFailure("auth_required"), false);
+    assert.equal(isNonCodeFixFailure("signup_failed"), false);
+  });
+});
+
+describe("detectAuthErrorType", () => {
+  test("detects email_rejected from DOM findings", () => {
+    const result = detectAuthErrorType(
+      ["Email has already been taken"],
+      [],
+      ""
+    );
+    assert.equal(result, "email_rejected");
+  });
+
+  test("detects email_rejected from action reasoning", () => {
+    const result = detectAuthErrorType(
+      [],
+      [{ reasoning: "The email address is already registered" }],
+      ""
+    );
+    assert.equal(result, "email_rejected");
+  });
+
+  test("detects password_too_weak", () => {
+    const result = detectAuthErrorType(
+      ["Password is too short (minimum 8 characters)"],
+      [],
+      ""
+    );
+    assert.equal(result, "password_too_weak");
+  });
+
+  test("detects captcha_required", () => {
+    const result = detectAuthErrorType(
+      [],
+      [],
+      "The page shows a reCAPTCHA challenge that I cannot solve"
+    );
+    assert.equal(result, "captcha_required");
+  });
+
+  test("detects form_error for generic validation issues", () => {
+    const result = detectAuthErrorType(
+      ["Validation failed for this field"],
+      [],
+      ""
+    );
+    assert.equal(result, "form_error");
+  });
+
+  test("returns unknown when no patterns match", () => {
+    const result = detectAuthErrorType(
+      [],
+      [],
+      "The page loaded successfully"
+    );
+    assert.equal(result, "unknown");
+  });
+
+  test("detects hcaptcha variant", () => {
+    const result = detectAuthErrorType(
+      ["hcaptcha widget visible on form"],
+      [],
+      ""
+    );
+    assert.equal(result, "captcha_required");
+  });
+
+  test("detects password policy requirement", () => {
+    const result = detectAuthErrorType(
+      [],
+      [{ reasoning: "Password does not meet minimum characters policy" }],
+      ""
+    );
+    assert.equal(result, "password_too_weak");
   });
 });

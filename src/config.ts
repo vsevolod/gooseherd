@@ -74,6 +74,7 @@ const envSchema = z.object({
   OBSERVER_GITHUB_WEBHOOK_SECRET: z.string().optional(),
   OBSERVER_SENTRY_WEBHOOK_SECRET: z.string().optional(),
   OBSERVER_WEBHOOK_PORT: z.string().optional(),
+  OBSERVER_WEBHOOK_SECRETS: z.string().optional(),
   OBSERVER_GITHUB_POLL_INTERVAL_SECONDS: z.string().optional(),
   OBSERVER_GITHUB_WATCHED_REPOS: z.string().optional(),
 
@@ -90,6 +91,10 @@ const envSchema = z.object({
   ORCHESTRATOR_TIMEOUT_MS: z.string().optional(),
   ORCHESTRATOR_WALL_CLOCK_TIMEOUT_MS: z.string().optional(),
 
+  AUTONOMOUS_SCHEDULER_ENABLED: z.string().optional(),
+  AUTONOMOUS_SCHEDULER_MAX_DEFERRED: z.string().optional(),
+  AUTONOMOUS_SCHEDULER_INTERVAL_MS: z.string().optional(),
+
   OBSERVER_SMART_TRIAGE_ENABLED: z.string().optional(),
   OBSERVER_SMART_TRIAGE_MODEL: z.string().optional(),
   OBSERVER_SMART_TRIAGE_TIMEOUT_MS: z.string().optional(),
@@ -101,6 +106,9 @@ const envSchema = z.object({
   BROWSER_VERIFY_EXECUTION_MODEL: z.string().optional(),
   BROWSER_VERIFY_MAX_STEPS: z.string().optional(),
   BROWSER_VERIFY_EXEC_TIMEOUT_MS: z.string().optional(),
+  BROWSER_VERIFY_TEST_EMAIL: z.string().optional(),
+  BROWSER_VERIFY_TEST_PASSWORD: z.string().optional(),
+  BROWSER_VERIFY_EMAIL_DOMAINS: z.string().optional(),
 
   CI_WAIT_ENABLED: z.string().optional(),
   CI_POLL_INTERVAL_SECONDS: z.string().optional(),
@@ -125,7 +133,10 @@ const envSchema = z.object({
   SUPERVISOR_WATCHDOG_INTERVAL_SECONDS: z.string().optional(),
   SUPERVISOR_MAX_AUTO_RETRIES: z.string().optional(),
   SUPERVISOR_RETRY_COOLDOWN_SECONDS: z.string().optional(),
-  SUPERVISOR_MAX_RETRIES_PER_DAY: z.string().optional()
+  SUPERVISOR_MAX_RETRIES_PER_DAY: z.string().optional(),
+
+  DATABASE_URL: z.string().optional(),
+  ENCRYPTION_KEY: z.string().optional(),
 });
 
 function parseList(value?: string): string[] {
@@ -234,6 +245,8 @@ export interface AppConfig {
   observerGithubWebhookSecret?: string;
   observerSentryWebhookSecret?: string;
   observerWebhookPort: number;
+  /** Per-source webhook secrets for custom adapters: { source: secret } */
+  observerWebhookSecrets: Record<string, string>;
   observerGithubPollIntervalSeconds: number;
   /** Repos to watch for failed GitHub Actions: "owner/repo,owner2/repo2" */
   observerGithubWatchedRepos: string[];
@@ -252,6 +265,10 @@ export interface AppConfig {
   orchestratorTimeoutMs: number;
   orchestratorWallClockTimeoutMs: number;
 
+  autonomousSchedulerEnabled: boolean;
+  autonomousSchedulerMaxDeferred: number;
+  autonomousSchedulerIntervalMs: number;
+
   observerSmartTriageEnabled: boolean;
   observerSmartTriageModel: string;
   observerSmartTriageTimeoutMs: number;
@@ -263,6 +280,12 @@ export interface AppConfig {
   browserVerifyExecutionModel?: string;
   browserVerifyMaxSteps: number;
   browserVerifyExecTimeoutMs: number;
+  /** Override email for browser verify auth. When set, used as the primary test credential. */
+  browserVerifyTestEmail?: string;
+  /** Override password for browser verify auth. */
+  browserVerifyTestPassword?: string;
+  /** Comma-separated email domains for signup rotation (e.g. "gmail.com,outlook.com"). */
+  browserVerifyEmailDomains: string[];
 
   ciWaitEnabled: boolean;
   ciPollIntervalSeconds: number;
@@ -290,6 +313,9 @@ export interface AppConfig {
   supervisorMaxAutoRetries: number;
   supervisorRetryCooldownSeconds: number;
   supervisorMaxRetriesPerDay: number;
+
+  databaseUrl: string;
+  encryptionKey?: string;
 }
 
 function parseRepoMap(value?: string): Map<string, string> {
@@ -305,6 +331,18 @@ function parseRepoMap(value?: string): Map<string, string> {
     }
   }
   return map;
+}
+
+function parseWebhookSecrets(value?: string): Record<string, string> {
+  const secrets: Record<string, string> = {};
+  if (!value || value.trim() === "") return secrets;
+  for (const entry of value.split(",")) {
+    const colonIdx = entry.indexOf(":");
+    if (colonIdx > 0 && colonIdx < entry.length - 1) {
+      secrets[entry.slice(0, colonIdx).trim()] = entry.slice(colonIdx + 1).trim();
+    }
+  }
+  return secrets;
 }
 
 export function parseTeamChannelMap(value?: string): Map<string, string[]> {
@@ -442,6 +480,7 @@ export function loadConfig(): AppConfig {
     observerGithubWebhookSecret: parsed.OBSERVER_GITHUB_WEBHOOK_SECRET?.trim() || undefined,
     observerSentryWebhookSecret: parsed.OBSERVER_SENTRY_WEBHOOK_SECRET?.trim() || undefined,
     observerWebhookPort: parseInteger(parsed.OBSERVER_WEBHOOK_PORT, 9090),
+    observerWebhookSecrets: parseWebhookSecrets(parsed.OBSERVER_WEBHOOK_SECRETS),
     observerGithubPollIntervalSeconds: parseInteger(parsed.OBSERVER_GITHUB_POLL_INTERVAL_SECONDS, 300),
     observerGithubWatchedRepos: parseList(parsed.OBSERVER_GITHUB_WATCHED_REPOS),
 
@@ -458,6 +497,10 @@ export function loadConfig(): AppConfig {
     orchestratorTimeoutMs: parseInteger(parsed.ORCHESTRATOR_TIMEOUT_MS, 180_000),
     orchestratorWallClockTimeoutMs: parseInteger(parsed.ORCHESTRATOR_WALL_CLOCK_TIMEOUT_MS, 480_000),
 
+    autonomousSchedulerEnabled: parseBoolean(parsed.AUTONOMOUS_SCHEDULER_ENABLED, false),
+    autonomousSchedulerMaxDeferred: parseInteger(parsed.AUTONOMOUS_SCHEDULER_MAX_DEFERRED, 100),
+    autonomousSchedulerIntervalMs: parseInteger(parsed.AUTONOMOUS_SCHEDULER_INTERVAL_MS, 300_000),
+
     observerSmartTriageEnabled: parseBoolean(parsed.OBSERVER_SMART_TRIAGE_ENABLED, false),
     observerSmartTriageModel: parsed.OBSERVER_SMART_TRIAGE_MODEL?.trim() || parsed.DEFAULT_LLM_MODEL?.trim() || "anthropic/claude-sonnet-4-6",
     observerSmartTriageTimeoutMs: parseInteger(parsed.OBSERVER_SMART_TRIAGE_TIMEOUT_MS, 10_000),
@@ -469,6 +512,9 @@ export function loadConfig(): AppConfig {
     browserVerifyExecutionModel: parsed.BROWSER_VERIFY_EXECUTION_MODEL?.trim() || undefined,
     browserVerifyMaxSteps: parseInteger(parsed.BROWSER_VERIFY_MAX_STEPS, 15),
     browserVerifyExecTimeoutMs: parseInteger(parsed.BROWSER_VERIFY_EXEC_TIMEOUT_MS, 300_000),
+    browserVerifyTestEmail: parsed.BROWSER_VERIFY_TEST_EMAIL?.trim() || undefined,
+    browserVerifyTestPassword: parsed.BROWSER_VERIFY_TEST_PASSWORD?.trim() || undefined,
+    browserVerifyEmailDomains: parseList(parsed.BROWSER_VERIFY_EMAIL_DOMAINS),
 
     ciWaitEnabled: parseBoolean(parsed.CI_WAIT_ENABLED, false),
     ciPollIntervalSeconds: parseInteger(parsed.CI_POLL_INTERVAL_SECONDS, 30),
@@ -493,6 +539,9 @@ export function loadConfig(): AppConfig {
     supervisorWatchdogIntervalSeconds: parseInteger(parsed.SUPERVISOR_WATCHDOG_INTERVAL_SECONDS, 30),
     supervisorMaxAutoRetries: parseInteger(parsed.SUPERVISOR_MAX_AUTO_RETRIES, 1),
     supervisorRetryCooldownSeconds: parseInteger(parsed.SUPERVISOR_RETRY_COOLDOWN_SECONDS, 60),
-    supervisorMaxRetriesPerDay: parseInteger(parsed.SUPERVISOR_MAX_RETRIES_PER_DAY, 20)
+    supervisorMaxRetriesPerDay: parseInteger(parsed.SUPERVISOR_MAX_RETRIES_PER_DAY, 20),
+
+    databaseUrl: parsed.DATABASE_URL?.trim() || "postgres://gooseherd:gooseherd@postgres:5432/gooseherd",
+    encryptionKey: parsed.ENCRYPTION_KEY?.trim() || undefined,
   };
 }

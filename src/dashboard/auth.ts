@@ -1,6 +1,7 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { AppConfig } from "../config.js";
+import { verifyPassword } from "../db/setup-store.js";
 import { escapeHtml } from "./html.js";
 
 function sendJson(res: ServerResponse, status: number, payload: unknown): void {
@@ -12,7 +13,6 @@ function sendJson(res: ServerResponse, status: number, payload: unknown): void {
 export function hashToken(token: string): string {
   return createHash("sha256").update(token).digest("hex");
 }
-
 
 function parseCookies(req: IncomingMessage): Record<string, string> {
   const header = req.headers["cookie"] ?? "";
@@ -28,7 +28,6 @@ function parseCookies(req: IncomingMessage): Record<string, string> {
   return cookies;
 }
 
-
 export function safeTokenCompare(a: string, b: string): boolean {
   const aBuf = Buffer.from(a, "utf8");
   const bBuf = Buffer.from(b, "utf8");
@@ -36,59 +35,118 @@ export function safeTokenCompare(a: string, b: string): boolean {
   return timingSafeEqual(aBuf, bBuf);
 }
 
+export interface AuthOptions {
+  /** DASHBOARD_TOKEN env var (takes priority). */
+  dashboardToken?: string;
+  /** Wizard password hash from DB. */
+  passwordHash?: string;
+  /** Whether setup wizard is complete. */
+  setupComplete: boolean;
+}
+
 /**
  * Check if a request is authenticated.
  * Returns true if auth passes, false if the response has been handled (401/redirect).
  */
-
 export function checkAuth(
   req: IncomingMessage,
   res: ServerResponse,
-  dashboardToken: string | undefined,
+  opts: AuthOptions,
   pathname: string
 ): boolean {
-  // No token configured → no auth required (backward compat for localhost dev)
-  if (!dashboardToken) return true;
-
   // Health check always passes
   if (pathname === "/healthz") return true;
 
   // Login routes always pass
   if (pathname === "/login") return true;
 
-  // Check Bearer token for API routes
+  // ── Setup wizard auth logic ──
+  if (!opts.setupComplete) {
+    // Wizard page and status are always accessible during setup
+    if (pathname === "/setup" || pathname === "/api/setup/status") return true;
+    // Password endpoint always accessible (first step, before any auth exists)
+    if (pathname === "/api/setup/password") return true;
+
+    // Other setup routes require session cookie after password is set
+    if (pathname.startsWith("/api/setup/")) {
+      if (opts.passwordHash) {
+        const cookies = parseCookies(req);
+        const sessionHash = cookies["gooseherd-session"];
+        if (sessionHash && safeTokenCompare(sessionHash, hashToken(opts.passwordHash))) return true;
+      }
+      sendJson(res, 401, { error: "Unauthorized" });
+      return false;
+    }
+
+    // Non-setup routes during incomplete setup: redirect to /setup
+    if (pathname.startsWith("/api/")) {
+      sendJson(res, 503, { error: "Setup not complete" });
+      return false;
+    }
+    res.statusCode = 302;
+    res.setHeader("location", "/setup");
+    res.end();
+    return false;
+  }
+
+  // ── Normal auth (setup complete) ──
+
+  const effectiveToken = opts.dashboardToken;
+
+  // Parse session cookie once (used by both token and password auth)
+  const cookies = parseCookies(req);
+  const sessionHash = cookies["gooseherd-session"];
+
+  // Check env-var token (Bearer header for API routes, session cookie for all)
+  if (effectiveToken) {
+    if (pathname.startsWith("/api/")) {
+      const authHeader = req.headers["authorization"] ?? "";
+      if (authHeader.startsWith("Bearer ")) {
+        const token = authHeader.slice(7);
+        if (safeTokenCompare(token, effectiveToken)) return true;
+      }
+    }
+    if (sessionHash && safeTokenCompare(sessionHash, hashToken(effectiveToken))) return true;
+  }
+
+  // Check wizard password hash session cookie (works alongside env token)
+  if (opts.passwordHash && sessionHash) {
+    if (safeTokenCompare(sessionHash, hashToken(opts.passwordHash))) return true;
+  }
+
+  // No auth configured at all — allow access (backward compat for localhost dev)
+  if (!effectiveToken && !opts.passwordHash) return true;
+
+  // Not authenticated — redirect or 401
   if (pathname.startsWith("/api/")) {
-    const authHeader = req.headers["authorization"] ?? "";
-    if (authHeader.startsWith("Bearer ")) {
-      const token = authHeader.slice(7);
-      if (safeTokenCompare(token, dashboardToken)) return true;
-    }
-
-    // Also accept session cookie for API routes (dashboard JS calls)
-    const cookies = parseCookies(req);
-    const sessionHash = cookies["gooseherd-session"];
-    if (sessionHash && safeTokenCompare(sessionHash, hashToken(dashboardToken))) {
-      return true;
-    }
-
     sendJson(res, 401, { error: "Unauthorized" });
     return false;
   }
 
-  // HTML pages: check session cookie
-  const cookies = parseCookies(req);
-  const sessionHash = cookies["gooseherd-session"];
-  if (sessionHash && safeTokenCompare(sessionHash, hashToken(dashboardToken))) {
-    return true;
-  }
-
-  // Redirect to login page
   res.statusCode = 302;
   res.setHeader("location", "/login");
   res.end();
   return false;
 }
 
+/**
+ * Handle POST /login — supports both env-var token and wizard password.
+ * Returns the session cookie value on success, or undefined on failure.
+ */
+export async function handleLogin(
+  submittedValue: string,
+  opts: AuthOptions
+): Promise<string | undefined> {
+  // Check env-var token first
+  if (opts.dashboardToken && safeTokenCompare(submittedValue, opts.dashboardToken)) {
+    return hashToken(opts.dashboardToken);
+  }
+  // Check wizard password (async scrypt)
+  if (opts.passwordHash && await verifyPassword(submittedValue, opts.passwordHash)) {
+    return hashToken(opts.passwordHash);
+  }
+  return undefined;
+}
 
 /** Render the login page. */
 export function loginPageHtml(config: AppConfig, error?: string): string {
@@ -152,9 +210,9 @@ export function loginPageHtml(config: AppConfig, error?: string): string {
 <body>
   <form class="login-card" method="POST" action="/login">
     <h1>${escapeHtml(config.appName)}</h1>
-    <p>Enter your dashboard token to continue.</p>
+    <p>Enter your password to continue.</p>
     ${error ? `<div class="error">${escapeHtml(error)}</div>` : ""}
-    <label for="token">Token</label>
+    <label for="token">Password</label>
     <input type="password" id="token" name="token" autofocus required />
     <button type="submit">Sign in</button>
   </form>

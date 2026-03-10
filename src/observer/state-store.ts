@@ -1,239 +1,324 @@
 /**
- * Observer state store — persists dedup keys, rate counters, and poll cursors to disk.
+ * Observer state store — persists dedup keys, rate counters, and poll cursors to PostgreSQL.
  *
- * Survives restarts so a process restart during an error storm
- * doesn't re-trigger every alert.
+ * Decomposed from 1 JSON blob → 5 tables for proper relational storage.
  */
 
-import { readFile, writeFile, mkdir } from "node:fs/promises";
-import path from "node:path";
-import type { DedupEntry, ObserverState, ObserverStateSnapshot, RuleOutcomeStats } from "./types.js";
-
-/** Create a fresh empty state (avoids shared-reference mutation). */
-function freshState(): ObserverState {
-  return {
-    dedupEntries: {},
-    rateLimitEvents: {},
-    dailyCount: 0,
-    dailyPerRepo: {},
-    counterDay: "",
-    sentryLastPoll: {},
-    githubLastRunId: {},
-    ruleOutcomes: {}
-  };
-}
+import { eq, and, sql } from "drizzle-orm";
+import type { DedupEntry, ObserverStateSnapshot, RuleOutcomeStats } from "./types.js";
+import type { Database } from "../db/index.js";
+import {
+  observerDedup,
+  observerRateEvents,
+  observerDailyCounters,
+  observerPollCursors,
+  observerRuleOutcomes,
+} from "../db/schema.js";
 
 export class ObserverStateStore {
-  private state: ObserverState = freshState();
-  private readonly filePath: string;
-  private dirty = false;
+  private readonly db: Database;
 
-  constructor(dataDir: string) {
-    this.filePath = path.join(dataDir, "observer-state.json");
+  constructor(db: Database) {
+    this.db = db;
   }
 
   async load(): Promise<void> {
-    try {
-      const raw = await readFile(this.filePath, "utf8");
-      const parsed = JSON.parse(raw) as Partial<ObserverState>;
-      const extra = parsed as unknown as Record<string, unknown>;
-      this.state = {
-        dedupEntries: parsed.dedupEntries ?? {},
-        rateLimitEvents: parsed.rateLimitEvents ?? {},
-        dailyCount: parsed.dailyCount ?? 0,
-        dailyPerRepo: parsed.dailyPerRepo ?? {},
-        counterDay: parsed.counterDay ?? "",
-        sentryLastPoll: parsed.sentryLastPoll ?? {},
-        githubLastRunId: (extra["githubLastRunId"] as Record<string, number>) ?? {},
-        ruleOutcomes: (extra["ruleOutcomes"] as Record<string, RuleOutcomeStats>) ?? {}
-      };
-    } catch {
-      this.state = freshState();
-    }
-    // Reset daily counters if day changed
-    this.resetDailyIfNeeded();
-    // Sweep expired dedup entries
-    this.sweepDedup();
+    // Sweep expired dedup entries on startup
+    await this.sweepDedup();
   }
 
   async flush(): Promise<void> {
-    if (!this.dirty) return;
-    await mkdir(path.dirname(this.filePath), { recursive: true });
-    await writeFile(this.filePath, JSON.stringify(this.state, null, 2), "utf8");
-    this.dirty = false;
+    // No-op — writes are immediate to DB
   }
 
   // ── Dedup ──
 
-  hasDedup(key: string): boolean {
-    const entry = this.state.dedupEntries[key];
+  async hasDedup(key: string): Promise<boolean> {
+    const rows = await this.db
+      .select()
+      .from(observerDedup)
+      .where(eq(observerDedup.key, key));
+    const entry = rows[0];
     if (!entry) return false;
     if (entry.ttlMs === 0 || Date.now() - entry.seenAt > entry.ttlMs) {
-      delete this.state.dedupEntries[key];
-      this.dirty = true;
+      await this.db.delete(observerDedup).where(eq(observerDedup.key, key));
       return false;
     }
     return true;
   }
 
-  setDedup(key: string, ttlMs: number, runId?: string, ruleId?: string): void {
-    this.state.dedupEntries[key] = { seenAt: Date.now(), ttlMs, runId, ruleId };
-    this.dirty = true;
+  async setDedup(key: string, ttlMs: number, runId?: string, ruleId?: string): Promise<void> {
+    await this.db
+      .insert(observerDedup)
+      .values({ key, seenAt: Date.now(), ttlMs, runId, ruleId })
+      .onConflictDoUpdate({
+        target: observerDedup.key,
+        set: { seenAt: Date.now(), ttlMs, runId, ruleId },
+      });
   }
 
-  /**
-   * Mark a dedup entry as completed and record the outcome for its rule.
-   * Called when a run reaches terminal status (completed or failed).
-   */
-  markDedupCompleted(runId: string, status: string): void {
-    for (const entry of Object.values(this.state.dedupEntries)) {
-      if (entry.runId === runId) {
-        entry.completedAt = Date.now();
-        this.dirty = true;
+  async markDedupCompleted(runId: string, status: string): Promise<void> {
+    const rows = await this.db
+      .select()
+      .from(observerDedup)
+      .where(eq(observerDedup.runId, runId));
 
-        // Record outcome for the associated rule
-        if (entry.ruleId) {
-          this.recordRuleOutcome(entry.ruleId, status);
-        }
-        return;
+    for (const entry of rows) {
+      await this.db
+        .update(observerDedup)
+        .set({ completedAt: Date.now() })
+        .where(eq(observerDedup.key, entry.key));
+
+      if (entry.ruleId) {
+        await this.recordRuleOutcome(entry.ruleId, status);
       }
     }
   }
 
-  getDedupEntry(key: string): DedupEntry | undefined {
-    return this.state.dedupEntries[key];
+  async getDedupEntry(key: string): Promise<DedupEntry | undefined> {
+    const rows = await this.db
+      .select()
+      .from(observerDedup)
+      .where(eq(observerDedup.key, key));
+    const row = rows[0];
+    if (!row) return undefined;
+    return {
+      seenAt: row.seenAt,
+      ttlMs: row.ttlMs,
+      runId: row.runId ?? undefined,
+      ruleId: row.ruleId ?? undefined,
+      completedAt: row.completedAt ?? undefined,
+    };
   }
 
-  sweepDedup(): void {
+  async sweepDedup(): Promise<void> {
     const now = Date.now();
-    let swept = false;
-    for (const [key, entry] of Object.entries(this.state.dedupEntries)) {
-      if (now - entry.seenAt > entry.ttlMs) {
-        delete this.state.dedupEntries[key];
-        swept = true;
-      }
-    }
-    if (swept) this.dirty = true;
+    await this.db
+      .delete(observerDedup)
+      .where(sql`${observerDedup.seenAt} + ${observerDedup.ttlMs} < ${now}`);
   }
 
   // ── Rate limiting ──
 
-  getRateLimitEvents(source: string): number[] {
-    return this.state.rateLimitEvents[source] ?? [];
+  async getRateLimitEvents(source: string): Promise<number[]> {
+    const rows = await this.db
+      .select({ timestampMs: observerRateEvents.timestampMs })
+      .from(observerRateEvents)
+      .where(eq(observerRateEvents.source, source));
+    return rows.map((r) => r.timestampMs);
   }
 
-  addRateLimitEvent(source: string, timestamp: number): void {
-    if (!this.state.rateLimitEvents[source]) {
-      this.state.rateLimitEvents[source] = [];
-    }
-    this.state.rateLimitEvents[source].push(timestamp);
-    this.dirty = true;
+  async addRateLimitEvent(source: string, timestamp: number): Promise<void> {
+    await this.db.insert(observerRateEvents).values({
+      source,
+      timestampMs: timestamp,
+    });
   }
 
-  pruneRateLimitEvents(source: string, windowMs: number): void {
+  async pruneRateLimitEvents(source: string, windowMs: number): Promise<void> {
     const cutoff = Date.now() - windowMs;
-    const events = this.state.rateLimitEvents[source];
-    if (events) {
-      this.state.rateLimitEvents[source] = events.filter(t => t > cutoff);
-      this.dirty = true;
-    }
+    await this.db
+      .delete(observerRateEvents)
+      .where(
+        and(
+          eq(observerRateEvents.source, source),
+          sql`${observerRateEvents.timestampMs} < ${cutoff}`
+        )
+      );
   }
 
   // ── Daily counters ──
 
-  getDailyCount(): number {
-    this.resetDailyIfNeeded();
-    return this.state.dailyCount;
+  private todayStr(): string {
+    return new Date().toISOString().slice(0, 10);
   }
 
-  getDailyPerRepoCount(repoSlug: string): number {
-    this.resetDailyIfNeeded();
-    return this.state.dailyPerRepo[repoSlug] ?? 0;
+  async getDailyCount(): Promise<number> {
+    const today = this.todayStr();
+    const rows = await this.db
+      .select()
+      .from(observerDailyCounters)
+      .where(eq(observerDailyCounters.counterDay, today));
+    return rows[0]?.dailyCount ?? 0;
   }
 
-  incrementDailyCount(repoSlug: string): void {
-    this.resetDailyIfNeeded();
-    this.state.dailyCount += 1;
-    this.state.dailyPerRepo[repoSlug] = (this.state.dailyPerRepo[repoSlug] ?? 0) + 1;
-    this.dirty = true;
+  async getDailyPerRepoCount(repoSlug: string): Promise<number> {
+    const today = this.todayStr();
+    const rows = await this.db
+      .select()
+      .from(observerDailyCounters)
+      .where(eq(observerDailyCounters.counterDay, today));
+    const perRepo = rows[0]?.perRepo ?? {};
+    return perRepo[repoSlug] ?? 0;
   }
 
-  private resetDailyIfNeeded(): void {
-    const today = new Date().toISOString().slice(0, 10);
-    if (this.state.counterDay !== today) {
-      this.state.dailyCount = 0;
-      this.state.dailyPerRepo = {};
-      this.state.counterDay = today;
-      this.dirty = true;
-    }
+  async incrementDailyCount(repoSlug: string): Promise<void> {
+    const today = this.todayStr();
+
+    // Upsert the daily counter row atomically
+    // Explicit ::text casts needed — PG can't infer param types inside jsonb_build_object()
+    await this.db.execute(sql`
+      INSERT INTO observer_daily_counters (counter_day, daily_count, per_repo)
+      VALUES (${today}, 1, jsonb_build_object(${repoSlug}::text, 1))
+      ON CONFLICT (counter_day) DO UPDATE SET
+        daily_count = observer_daily_counters.daily_count + 1,
+        per_repo = observer_daily_counters.per_repo || jsonb_build_object(
+          ${repoSlug}::text,
+          COALESCE((observer_daily_counters.per_repo ->> ${repoSlug}::text)::int, 0) + 1
+        )
+    `);
   }
 
   // ── Rule outcome tracking ──
 
-  private recordRuleOutcome(ruleId: string, status: string): void {
-    const existing = this.state.ruleOutcomes[ruleId] ?? {
-      success: 0, failure: 0, lastOutcome: "", lastAt: ""
+  private async recordRuleOutcome(ruleId: string, status: string): Promise<void> {
+    const isSuccess = status === "completed";
+    await this.db
+      .insert(observerRuleOutcomes)
+      .values({
+        ruleId,
+        success: isSuccess ? 1 : 0,
+        failure: isSuccess ? 0 : 1,
+        lastOutcome: status,
+        lastAt: new Date(),
+      })
+      .onConflictDoUpdate({
+        target: observerRuleOutcomes.ruleId,
+        set: {
+          success: isSuccess
+            ? sql`${observerRuleOutcomes.success} + 1`
+            : observerRuleOutcomes.success,
+          failure: isSuccess
+            ? observerRuleOutcomes.failure
+            : sql`${observerRuleOutcomes.failure} + 1`,
+          lastOutcome: status,
+          lastAt: new Date(),
+        },
+      });
+  }
+
+  async getOutcomeStats(ruleId: string): Promise<RuleOutcomeStats | undefined> {
+    const rows = await this.db
+      .select()
+      .from(observerRuleOutcomes)
+      .where(eq(observerRuleOutcomes.ruleId, ruleId));
+    const row = rows[0];
+    if (!row) return undefined;
+    return {
+      success: row.success,
+      failure: row.failure,
+      lastOutcome: row.lastOutcome,
+      lastAt: row.lastAt?.toISOString() ?? "",
     };
+  }
 
-    if (status === "completed") {
-      existing.success += 1;
-    } else {
-      existing.failure += 1;
+  async getAllOutcomeStats(): Promise<Record<string, RuleOutcomeStats>> {
+    const rows = await this.db.select().from(observerRuleOutcomes);
+    const result: Record<string, RuleOutcomeStats> = {};
+    for (const row of rows) {
+      result[row.ruleId] = {
+        success: row.success,
+        failure: row.failure,
+        lastOutcome: row.lastOutcome,
+        lastAt: row.lastAt?.toISOString() ?? "",
+      };
     }
-    existing.lastOutcome = status;
-    existing.lastAt = new Date().toISOString();
-
-    this.state.ruleOutcomes[ruleId] = existing;
-    this.dirty = true;
+    return result;
   }
 
-  getOutcomeStats(ruleId: string): RuleOutcomeStats | undefined {
-    return this.state.ruleOutcomes[ruleId];
+  async getRuleIdForRun(runId: string): Promise<string | undefined> {
+    const rows = await this.db
+      .select({ ruleId: observerDedup.ruleId })
+      .from(observerDedup)
+      .where(eq(observerDedup.runId, runId));
+    return rows[0]?.ruleId ?? undefined;
   }
 
-  getAllOutcomeStats(): Record<string, RuleOutcomeStats> {
-    return { ...this.state.ruleOutcomes };
-  }
+  async getSnapshot(): Promise<ObserverStateSnapshot> {
+    const today = this.todayStr();
 
-  /** Serializable snapshot of observer state for dashboard consumption. */
-  getSnapshot(): ObserverStateSnapshot {
-    const dedupCount = Object.keys(this.state.dedupEntries).length;
-    const activeDedups = Object.entries(this.state.dedupEntries)
-      .filter(([, e]) => !e.completedAt)
-      .length;
+    const [dedupRows, activeDedupRows, dailyRows, ruleRows, rateRows] = await Promise.all([
+      this.db.select({ count: sql<number>`count(*)::int` }).from(observerDedup),
+      this.db
+        .select({ count: sql<number>`count(*)::int` })
+        .from(observerDedup)
+        .where(sql`${observerDedup.completedAt} IS NULL`),
+      this.db.select().from(observerDailyCounters).where(eq(observerDailyCounters.counterDay, today)),
+      this.db.select().from(observerRuleOutcomes),
+      this.db
+        .select({
+          source: observerRateEvents.source,
+          count: sql<number>`count(*)::int`,
+        })
+        .from(observerRateEvents)
+        .groupBy(observerRateEvents.source),
+    ]);
+
+    const dailyRow = dailyRows[0];
+    const ruleOutcomes: Record<string, RuleOutcomeStats> = {};
+    for (const row of ruleRows) {
+      ruleOutcomes[row.ruleId] = {
+        success: row.success,
+        failure: row.failure,
+        lastOutcome: row.lastOutcome,
+        lastAt: row.lastAt?.toISOString() ?? "",
+      };
+    }
+
+    const rateLimitSources: Record<string, number> = {};
+    for (const row of rateRows) {
+      rateLimitSources[row.source] = row.count;
+    }
 
     return {
-      dedupCount,
-      activeDedups,
-      dailyCount: this.state.dailyCount,
-      dailyPerRepo: { ...this.state.dailyPerRepo },
-      counterDay: this.state.counterDay,
-      ruleOutcomes: { ...this.state.ruleOutcomes },
-      rateLimitSources: Object.fromEntries(
-        Object.entries(this.state.rateLimitEvents).map(([k, v]) => [k, v.length])
-      )
+      dedupCount: dedupRows[0]?.count ?? 0,
+      activeDedups: activeDedupRows[0]?.count ?? 0,
+      dailyCount: dailyRow?.dailyCount ?? 0,
+      dailyPerRepo: dailyRow?.perRepo ?? {},
+      counterDay: today,
+      ruleOutcomes,
+      rateLimitSources,
     };
   }
 
-  // ── Sentry poll cursors ──
+  // ── Poll cursors (Sentry + GitHub) ──
 
-  getSentryLastPoll(project: string): string | undefined {
-    return this.state.sentryLastPoll[project];
+  async getSentryLastPoll(project: string): Promise<string | undefined> {
+    return this.getCursor("sentry", project);
   }
 
-  setSentryLastPoll(project: string, timestamp: string): void {
-    this.state.sentryLastPoll[project] = timestamp;
-    this.dirty = true;
+  async setSentryLastPoll(project: string, timestamp: string): Promise<void> {
+    await this.setCursor("sentry", project, timestamp);
   }
 
-  // ── GitHub poll cursors ──
-
-  getGithubLastRunId(repoSlug: string): number | undefined {
-    return this.state.githubLastRunId[repoSlug];
+  async getGithubLastRunId(repoSlug: string): Promise<number | undefined> {
+    const value = await this.getCursor("github", repoSlug);
+    return value ? Number(value) : undefined;
   }
 
-  setGithubLastRunId(repoSlug: string, runId: number): void {
-    this.state.githubLastRunId[repoSlug] = runId;
-    this.dirty = true;
+  async setGithubLastRunId(repoSlug: string, runId: number): Promise<void> {
+    await this.setCursor("github", repoSlug, String(runId));
+  }
+
+  private async getCursor(sourceType: string, sourceKey: string): Promise<string | undefined> {
+    const rows = await this.db
+      .select()
+      .from(observerPollCursors)
+      .where(
+        and(
+          eq(observerPollCursors.sourceType, sourceType),
+          eq(observerPollCursors.sourceKey, sourceKey)
+        )
+      );
+    return rows[0]?.cursorValue;
+  }
+
+  private async setCursor(sourceType: string, sourceKey: string, cursorValue: string): Promise<void> {
+    await this.db.execute(sql`
+      INSERT INTO observer_poll_cursors (source_type, source_key, cursor_value)
+      VALUES (${sourceType}, ${sourceKey}, ${cursorValue})
+      ON CONFLICT (source_type, source_key) DO UPDATE SET
+        cursor_value = ${cursorValue}
+    `);
   }
 }

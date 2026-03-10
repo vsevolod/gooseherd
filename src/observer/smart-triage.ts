@@ -126,14 +126,18 @@ export async function triageEvent(
   matchedRule: TriggerRule,
   rules: TriggerRule[],
   llmConfig: LLMCallerConfig,
-  timeoutMs: number
+  timeoutMs: number,
+  learningSummary?: string
 ): Promise<ObserverDecision | null> {
   // Skip triage for rules that opt out
   if (matchedRule.skipTriage) {
     return null;
   }
 
-  const systemPrompt = buildTriageSystemPrompt(rules);
+  let systemPrompt = buildTriageSystemPrompt(rules);
+  if (learningSummary) {
+    systemPrompt += `\n\nHistorical data for this rule:\n${learningSummary}`;
+  }
   const userMessage = buildTriageUserMessage(event);
 
   try {

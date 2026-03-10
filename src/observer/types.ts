@@ -8,10 +8,11 @@
 
 // ── Trigger sources ──
 
-export type TriggerSource =
-  | "sentry_alert"
-  | "github_webhook"
-  | "slack_observer";
+/**
+ * Trigger source identifier. Built-in sources: "sentry_alert", "github_webhook", "slack_observer".
+ * Custom adapters can use any string (e.g. "datadog", "pagerduty", "linear", "cron").
+ */
+export type TriggerSource = string;
 
 export type TriggerPriority = "low" | "medium" | "high" | "critical";
 

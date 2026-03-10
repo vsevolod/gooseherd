@@ -16,6 +16,11 @@ import { localTestNode } from "./nodes/local-test.js";
 import { uploadScreenshotNode } from "./nodes/upload-screenshot.js";
 import { generateTitleNode } from "./nodes/generate-title.js";
 import { summarizeChangesNode } from "./nodes/summarize-changes.js";
+import { runNode } from "./nodes/run.js";
+import { skillNode } from "./nodes/skill.js";
+import { runSkillNode } from "./nodes/run-skill.js";
+import { retrospectiveNode } from "./nodes/retrospective.js";
+import { setupSandboxNode } from "./nodes/setup-sandbox.js";
 
 // Quality gate node imports
 import { classifyTaskNode } from "./quality-gates/classify-task-node.js";
@@ -64,7 +69,12 @@ export const NODE_HANDLERS: Record<string, NodeHandler> = {
   upload_screenshot: uploadScreenshotNode,
   generate_title: generateTitleNode,
   summarize_changes: summarizeChangesNode,
-  decide_next_step: decideNextStepNode
+  decide_next_step: decideNextStepNode,
+  run: runNode,
+  skill: skillNode,
+  run_skill: runSkillNode,
+  retrospective: retrospectiveNode,
+  setup_sandbox: setupSandboxNode
 };
 
 /** Set of valid action names, derived from the handler registry. */

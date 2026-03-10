@@ -86,7 +86,7 @@ async function pollProject(
   repoSlug: string,
   stateStore: ObserverStateStore
 ): Promise<TriggerEvent[]> {
-  const lastPoll = stateStore.getSentryLastPoll(projectSlug);
+  const lastPoll = await stateStore.getSentryLastPoll(projectSlug);
   const since = lastPoll ?? new Date(Date.now() - 5 * 60 * 1000).toISOString();
 
   const issues = await fetchNewIssues(config, projectSlug, since);
@@ -99,7 +99,7 @@ async function pollProject(
     (max, issue) => (issue.lastSeen > max ? issue.lastSeen : max),
     since
   );
-  stateStore.setSentryLastPoll(projectSlug, latestTimestamp);
+  await stateStore.setSentryLastPoll(projectSlug, latestTimestamp);
 
   const events: TriggerEvent[] = [];
 

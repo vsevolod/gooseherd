@@ -1,0 +1,20 @@
+# Example sandbox image for Python projects.
+# Reference from .gooseherd.yml:
+#   sandbox:
+#     dockerfile: sandbox/Dockerfile.python
+#
+# Or use in your own repo's .gooseherd.yml:
+#   sandbox:
+#     dockerfile: .docker/sandbox.Dockerfile
+
+FROM python:3.12-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git curl build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install common Python tools
+RUN pip install --no-cache-dir poetry pipenv
+
+WORKDIR /work
+CMD ["sleep", "infinity"]

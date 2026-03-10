@@ -10,10 +10,32 @@
 #   docker compose --env-file .env up --build
 
 services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: gooseherd
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-gooseherd}
+      POSTGRES_DB: gooseherd
+    volumes:
+      - gooseherd-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gooseherd"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
   gooseherd:
     image: ghcr.io/chocksy/gooseherd:latest
     build: .
+    depends_on:
+      postgres:
+        condition: service_healthy
     environment:
+      # ── Database ──
+      - DATABASE_URL=postgres://gooseherd:${POSTGRES_PASSWORD:-gooseherd}@postgres:5432/gooseherd
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY:-}
       # ── Branding ──
       - APP_NAME=${APP_NAME:-Gooseherd}
 
@@ -25,7 +47,7 @@ services:
       - SLACK_ALLOWED_CHANNELS=${SLACK_ALLOWED_CHANNELS:-}
 
       # ── Required (GitHub) ──
-      - GITHUB_TOKEN=${GITHUB_TOKEN:?}
+      - GITHUB_TOKEN=${GITHUB_TOKEN:-}
       - GITHUB_DEFAULT_OWNER=${GITHUB_DEFAULT_OWNER:-}
       - REPO_ALLOWLIST=${REPO_ALLOWLIST:-}
 
@@ -33,7 +55,7 @@ services:
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
-      - AGENT_COMMAND_TEMPLATE=${AGENT_COMMAND_TEMPLATE:?}
+      - AGENT_COMMAND_TEMPLATE=${AGENT_COMMAND_TEMPLATE:-}
       - AGENT_FOLLOW_UP_TEMPLATE=${AGENT_FOLLOW_UP_TEMPLATE:-}
       - AGENT_TIMEOUT_SECONDS=${AGENT_TIMEOUT_SECONDS:-600}
 
@@ -47,6 +69,9 @@ services:
       - BROWSER_VERIFY_EXECUTION_MODEL=${BROWSER_VERIFY_EXECUTION_MODEL:-}
       - BROWSER_VERIFY_MAX_STEPS=${BROWSER_VERIFY_MAX_STEPS:-15}
       - REVIEW_APP_URL_PATTERN=${REVIEW_APP_URL_PATTERN:-}
+      - BROWSER_VERIFY_TEST_EMAIL=${BROWSER_VERIFY_TEST_EMAIL:-}
+      - BROWSER_VERIFY_TEST_PASSWORD=${BROWSER_VERIFY_TEST_PASSWORD:-}
+      - BROWSER_VERIFY_EMAIL_DOMAINS=${BROWSER_VERIFY_EMAIL_DOMAINS:-}
 
       # ── Orchestrator ──
       - ORCHESTRATOR_ENABLED=${ORCHESTRATOR_ENABLED:-false}
@@ -109,6 +134,19 @@ services:
       # ── OpenRouter Provider Routing (JSON, e.g. {"ignore":["DeepInfra"]}) ──
       - OPENROUTER_PROVIDER_PREFERENCES=${OPENROUTER_PROVIDER_PREFERENCES:-}
 
+      # ── Observer (auto-trigger from Sentry, GitHub, Slack) ──
+      - OBSERVER_ENABLED=${OBSERVER_ENABLED:-false}
+      - OBSERVER_RULES_FILE=${OBSERVER_RULES_FILE:-extensions/trigger-rules.yml}
+      - OBSERVER_WEBHOOK_PORT=${OBSERVER_WEBHOOK_PORT:-9090}
+      - OBSERVER_WEBHOOK_SECRETS=${OBSERVER_WEBHOOK_SECRETS:-}
+      - SENTRY_AUTH_TOKEN=${SENTRY_AUTH_TOKEN:-}
+      - SENTRY_ORG=${SENTRY_ORG:-}
+      - OBSERVER_DAILY_LIMIT=${OBSERVER_DAILY_LIMIT:-20}
+      - OBSERVER_DAILY_PER_REPO_LIMIT=${OBSERVER_DAILY_PER_REPO_LIMIT:-5}
+      - OBSERVER_RATE_LIMIT_WINDOW_MINUTES=${OBSERVER_RATE_LIMIT_WINDOW_MINUTES:-30}
+      - OBSERVER_RATE_LIMIT_MAX_PER_WINDOW=${OBSERVER_RATE_LIMIT_MAX_PER_WINDOW:-3}
+      - AUTONOMOUS_SCHEDULER_ENABLED=${AUTONOMOUS_SCHEDULER_ENABLED:-false}
+
       # ── Run Supervisor (auto-retry + watchdog) ──
       - SUPERVISOR_ENABLED=${SUPERVISOR_ENABLED:-true}
       - SUPERVISOR_RUN_TIMEOUT_SECONDS=${SUPERVISOR_RUN_TIMEOUT_SECONDS:-7200}
@@ -133,6 +171,9 @@ services:
       - gooseherd-data:/app/data
       - /var/run/docker.sock:/var/run/docker.sock   # Docker-out-of-Docker for sandbox containers
     restart: unless-stopped
+    ports:
+      - "${DASHBOARD_PORT:-8787}:8787"
+      - "${OBSERVER_WEBHOOK_PORT:-9090}:9090"
     deploy:
       resources:
         limits:
@@ -152,5 +193,6 @@ services:
     #   - 'traefik.http.middlewares.gooseherd-auth.basicauth.users=admin:$$2y$$05$$HASH_HERE'
 
 volumes:
+  gooseherd-pgdata:
   gooseherd-work:
   gooseherd-data:

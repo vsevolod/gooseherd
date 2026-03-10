@@ -1,0 +1,5 @@
+name: rubocop-fix
+description: Run rubocop and fix offenses
+language: ruby
+command: "cd {{repo_dir}} && bundle exec rubocop --autocorrect"
+timeout_seconds: 120

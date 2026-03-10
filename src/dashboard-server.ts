@@ -13,18 +13,23 @@ import { parseRunLog, getEventStats } from "./log-parser.js";
 import type { ObserverEventRecord, ObserverStateSnapshot, TriggerRule } from "./observer/types.js";
 import type { ChatMessage } from "./llm/caller.js";
 import { dashboardHtml } from "./dashboard/html.js";
-import { checkAuth, hashToken, loginPageHtml, safeTokenCompare } from "./dashboard/auth.js";
+import { checkAuth, hashToken, loginPageHtml, handleLogin, type AuthOptions } from "./dashboard/auth.js";
+import type { PipelineStore } from "./pipeline/pipeline-store.js";
+import type { LearningStore } from "./observer/learning-store.js";
+import { SetupStore } from "./db/setup-store.js";
+import { wizardHtml } from "./dashboard/wizard-html.js";
+import { GitHubService } from "./github.js";
 
 /** Lean interface — dashboard only reads observer state, never mutates it. */
 export interface DashboardObserver {
-  getStateSnapshot(): ObserverStateSnapshot;
+  getStateSnapshot(): Promise<ObserverStateSnapshot>;
   getRecentEvents(limit?: number): ObserverEventRecord[];
   getRules(): TriggerRule[];
 }
 
 /** Optional source for in-memory orchestrator thread messages. */
 export interface DashboardConversationSource {
-  get(threadKey: string): ChatMessage[] | undefined;
+  get(threadKey: string): Promise<ChatMessage[] | undefined>;
 }
 
 function sendJson(res: ServerResponse, status: number, payload: unknown): void {
@@ -285,7 +290,11 @@ export function startDashboardServer(
   store: RunStore,
   runManager?: Pick<RunManager, "retryRun" | "continueRun" | "getRunChain" | "saveFeedbackFromSlackAction" | "cancelRun" | "enqueueRun">,
   observer?: DashboardObserver,
-  conversationSource?: DashboardConversationSource
+  conversationSource?: DashboardConversationSource,
+  pipelineStore?: PipelineStore,
+  learningStore?: LearningStore,
+  setupStore?: SetupStore,
+  onSetupComplete?: () => Promise<void>
 ): void {
   const server = createServer(async (req, res) => {
     try {
@@ -298,17 +307,196 @@ export function startDashboardServer(
       const requestUrl = new URL(req.url ?? "/", `http://${config.dashboardHost}:${String(config.dashboardPort)}`);
       const pathname = requestUrl.pathname;
 
+      // Build auth options (async — reads wizard password hash from DB)
+      const setupComplete = setupStore ? await setupStore.isComplete() : true;
+      const passwordHash = setupStore ? await setupStore.getPasswordHash() : undefined;
+      const authOpts: AuthOptions = {
+        dashboardToken: config.dashboardToken,
+        passwordHash,
+        setupComplete,
+      };
+
       // Auth check — must come before route dispatch
-      if (!checkAuth(req, res, config.dashboardToken, pathname)) return;
+      if (!checkAuth(req, res, authOpts, pathname)) return;
 
       if (req.method === "GET" && pathname === "/healthz") {
         sendJson(res, 200, { ok: true });
         return;
       }
 
+      // ── Setup wizard routes ──
+
+      if (req.method === "GET" && pathname === "/setup") {
+        const reconfig = requestUrl.searchParams.get("reconfig") === "1";
+        sendText(res, 200, wizardHtml(config.appName, reconfig), "text/html");
+        return;
+      }
+
+      if (req.method === "GET" && pathname === "/api/setup/status") {
+        if (!setupStore) { sendJson(res, 501, { error: "Setup not available" }); return; }
+        const status = await setupStore.getStatus();
+        sendJson(res, 200, status);
+        return;
+      }
+
+      if (req.method === "POST" && pathname === "/api/setup/password") {
+        if (!setupStore) { sendJson(res, 501, { error: "Setup not available" }); return; }
+        // When setup is complete, require current password for password changes
+        if (setupComplete) {
+          sendJson(res, 403, { error: "Password changes require reconfiguration" });
+          return;
+        }
+        const body = await readBody(req);
+        if (!body) { sendJson(res, 400, { error: "Missing body" }); return; }
+        let parsed: { password?: string };
+        try { parsed = JSON.parse(body) as { password?: string }; }
+        catch { sendJson(res, 400, { error: "Invalid JSON" }); return; }
+        const { password } = parsed;
+        if (!password || password.length < 8) {
+          sendJson(res, 400, { error: "Password must be at least 8 characters" });
+          return;
+        }
+        const hash = await setupStore.setPassword(password);
+        // Set session cookie so subsequent wizard steps are authenticated
+        const sessionValue = hashToken(hash);
+        const secureSuffix = config.dashboardPublicUrl?.startsWith("https") ? "; Secure" : "";
+        res.setHeader("set-cookie", `gooseherd-session=${sessionValue}; HttpOnly; SameSite=Strict; Path=/${secureSuffix}`);
+        sendJson(res, 200, { ok: true });
+        return;
+      }
+
+      if (req.method === "POST" && pathname === "/api/setup/github") {
+        if (!setupStore) { sendJson(res, 501, { error: "Setup not available" }); return; }
+        const body = await readBody(req);
+        if (!body) { sendJson(res, 400, { error: "Missing body" }); return; }
+        let ghConfig: unknown;
+        try { ghConfig = JSON.parse(body); }
+        catch { sendJson(res, 400, { error: "Invalid JSON" }); return; }
+        await setupStore.saveGitHub(ghConfig as Parameters<SetupStore["saveGitHub"]>[0]);
+        sendJson(res, 200, { ok: true });
+        return;
+      }
+
+      if (req.method === "POST" && pathname === "/api/setup/validate-github") {
+        const body = await readBody(req);
+        if (!body) { sendJson(res, 400, { error: "Missing body" }); return; }
+        let ghConfig: { authMode: string; token?: string };
+        try { ghConfig = JSON.parse(body) as { authMode: string; token?: string }; }
+        catch { sendJson(res, 400, { error: "Invalid JSON" }); return; }
+        if (ghConfig.authMode === "pat" && ghConfig.token) {
+          try {
+            const result = await GitHubService.validateToken(ghConfig.token);
+            sendJson(res, 200, result);
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : "Validation failed";
+            sendJson(res, 400, { error: msg });
+          }
+        } else {
+          sendJson(res, 400, { error: "Only PAT validation is supported in the wizard" });
+        }
+        return;
+      }
+
+      if (req.method === "POST" && pathname === "/api/setup/llm") {
+        if (!setupStore) { sendJson(res, 501, { error: "Setup not available" }); return; }
+        const body = await readBody(req);
+        if (!body) { sendJson(res, 400, { error: "Missing body" }); return; }
+        let llmConfig: Parameters<SetupStore["saveLLM"]>[0];
+        try { llmConfig = JSON.parse(body) as Parameters<SetupStore["saveLLM"]>[0]; }
+        catch { sendJson(res, 400, { error: "Invalid JSON" }); return; }
+        if (!llmConfig.apiKey) { sendJson(res, 400, { error: "API key is required" }); return; }
+        await setupStore.saveLLM(llmConfig);
+        sendJson(res, 200, { ok: true });
+        return;
+      }
+
+      if (req.method === "POST" && pathname === "/api/setup/validate-llm") {
+        const body = await readBody(req);
+        if (!body) { sendJson(res, 400, { error: "Missing body" }); return; }
+        let parsed: { provider: string; apiKey: string };
+        try { parsed = JSON.parse(body) as { provider: string; apiKey: string }; }
+        catch { sendJson(res, 400, { error: "Invalid JSON" }); return; }
+        const { provider, apiKey } = parsed;
+        if (!apiKey) { sendJson(res, 400, { error: "API key is required" }); return; }
+        try {
+          // Minimal validation: try a GET request to the provider's models endpoint
+          const baseUrl = provider === "anthropic" ? "https://api.anthropic.com/v1/models"
+            : provider === "openai" ? "https://api.openai.com/v1/models"
+            : "https://openrouter.ai/api/v1/models";
+          const headers: Record<string, string> = provider === "anthropic"
+            ? { "x-api-key": apiKey, "anthropic-version": "2023-06-01" }
+            : { Authorization: `Bearer ${apiKey}` };
+          const resp = await fetch(baseUrl, { headers, signal: AbortSignal.timeout(10_000) });
+          if (!resp.ok) throw new Error(`API returned ${String(resp.status)}`);
+          sendJson(res, 200, { ok: true });
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : "Validation failed";
+          sendJson(res, 400, { error: msg });
+        }
+        return;
+      }
+
+      if (req.method === "POST" && pathname === "/api/setup/slack") {
+        if (!setupStore) { sendJson(res, 501, { error: "Setup not available" }); return; }
+        const body = await readBody(req);
+        if (!body) { sendJson(res, 400, { error: "Missing body" }); return; }
+        let slackConfig: Parameters<SetupStore["saveSlack"]>[0];
+        try { slackConfig = JSON.parse(body) as Parameters<SetupStore["saveSlack"]>[0]; }
+        catch { sendJson(res, 400, { error: "Invalid JSON" }); return; }
+        if (!slackConfig.botToken) { sendJson(res, 400, { error: "Bot Token is required" }); return; }
+        if (!slackConfig.appToken) { sendJson(res, 400, { error: "App-Level Token is required" }); return; }
+        await setupStore.saveSlack(slackConfig);
+        sendJson(res, 200, { ok: true });
+        return;
+      }
+
+      if (req.method === "POST" && pathname === "/api/setup/validate-slack") {
+        const body = await readBody(req);
+        if (!body) { sendJson(res, 400, { error: "Missing body" }); return; }
+        let parsed: { botToken?: string };
+        try { parsed = JSON.parse(body) as { botToken?: string }; }
+        catch { sendJson(res, 400, { error: "Invalid JSON" }); return; }
+        if (!parsed.botToken) { sendJson(res, 400, { error: "Bot Token is required" }); return; }
+        try {
+          const resp = await fetch("https://slack.com/api/auth.test", {
+            method: "POST",
+            headers: { Authorization: `Bearer ${parsed.botToken}`, "Content-Type": "application/json" },
+            signal: AbortSignal.timeout(10_000),
+          });
+          const data = await resp.json() as { ok: boolean; error?: string; bot_id?: string; user?: string; team?: string };
+          if (!data.ok) throw new Error(data.error || "auth.test failed");
+          sendJson(res, 200, { botName: data.user || data.bot_id, teamName: data.team });
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : "Validation failed";
+          sendJson(res, 400, { error: msg });
+        }
+        return;
+      }
+
+      if (req.method === "POST" && pathname === "/api/setup/complete") {
+        if (!setupStore) { sendJson(res, 501, { error: "Setup not available" }); return; }
+        try {
+          await setupStore.markComplete();
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : "Setup incomplete";
+          sendJson(res, 400, { error: msg });
+          return;
+        }
+        if (onSetupComplete) {
+          try { await onSetupComplete(); } catch (err) {
+            const msg = err instanceof Error ? err.message : "unknown";
+            logError("Setup completion callback failed", { error: msg });
+          }
+        } else {
+          await setupStore.applyToEnv();
+        }
+        sendJson(res, 200, { ok: true });
+        return;
+      }
+
       // Login page (GET)
       if (req.method === "GET" && pathname === "/login") {
-        if (!config.dashboardToken) {
+        if (!config.dashboardToken && !passwordHash) {
           res.statusCode = 302;
           res.setHeader("location", "/");
           res.end();
@@ -320,7 +508,7 @@ export function startDashboardServer(
 
       // Login handler (POST)
       if (req.method === "POST" && pathname === "/login") {
-        if (!config.dashboardToken) {
+        if (!config.dashboardToken && !passwordHash) {
           res.statusCode = 302;
           res.setHeader("location", "/");
           res.end();
@@ -330,8 +518,8 @@ export function startDashboardServer(
         if (body === null) { sendJson(res, 413, { error: "Request body too large" }); return; }
         const params = new URLSearchParams(body);
         const token = params.get("token") ?? "";
-        if (safeTokenCompare(token, config.dashboardToken)) {
-          const sessionValue = hashToken(config.dashboardToken);
+        const sessionValue = await handleLogin(token, authOpts);
+        if (sessionValue) {
           res.statusCode = 302;
           const secureSuffix = config.dashboardPublicUrl?.startsWith("https") ? "; Secure" : "";
           res.setHeader("set-cookie", `gooseherd-session=${sessionValue}; HttpOnly; SameSite=Strict; Path=/${secureSuffix}`);
@@ -339,9 +527,10 @@ export function startDashboardServer(
           res.end();
           return;
         }
-        sendText(res, 200, loginPageHtml(config, "Invalid token"), "text/html");
+        sendText(res, 200, loginPageHtml(config, "Invalid password"), "text/html");
         return;
       }
+
 
       if (req.method === "GET" && pathname === "/") {
         sendText(res, 200, dashboardHtml(config), "text/html");
@@ -794,7 +983,7 @@ export function startDashboardServer(
 
         if (parts.length === 4 && parts[3] === "conversation" && req.method === "GET") {
           const threadKey = `${run.channelId}:${run.threadTs}`;
-          const messages = conversationSource?.get(threadKey) ?? [];
+          const messages = (await conversationSource?.get(threadKey)) ?? [];
           sendJson(res, 200, {
             threadKey,
             available: Boolean(conversationSource),
@@ -811,7 +1000,7 @@ export function startDashboardServer(
           sendJson(res, 200, { enabled: false });
           return;
         }
-        sendJson(res, 200, { enabled: true, ...observer.getStateSnapshot() });
+        sendJson(res, 200, { enabled: true, ...(await observer.getStateSnapshot()) });
         return;
       }
 
@@ -842,6 +1031,118 @@ export function startDashboardServer(
           skipTriage: r.skipTriage
         }));
         sendJson(res, 200, { rules });
+        return;
+      }
+
+      // ── Pipeline CRUD routes ──
+
+      if (req.method === "GET" && pathname === "/api/pipelines") {
+        if (!pipelineStore) { sendJson(res, 501, { error: "Pipeline store not available" }); return; }
+        const pipelines = pipelineStore.list();
+        sendJson(res, 200, { pipelines });
+        return;
+      }
+
+      if (req.method === "POST" && pathname === "/api/pipelines/validate") {
+        if (!pipelineStore) { sendJson(res, 501, { error: "Pipeline store not available" }); return; }
+        const body = await readBody(req);
+        if (body === null) { sendJson(res, 413, { error: "Request body too large" }); return; }
+        let parsed: { yaml?: string };
+        try { parsed = JSON.parse(body); } catch { sendJson(res, 400, { error: "Invalid JSON" }); return; }
+        if (!parsed.yaml) { sendJson(res, 400, { error: "yaml is required" }); return; }
+        try {
+          const config = pipelineStore.validate(parsed.yaml);
+          sendJson(res, 200, { valid: true, name: config.name, nodeCount: config.nodes.length });
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : "unknown";
+          sendJson(res, 200, { valid: false, error: msg });
+        }
+        return;
+      }
+
+      if (req.method === "POST" && pathname === "/api/pipelines") {
+        if (!pipelineStore) { sendJson(res, 501, { error: "Pipeline store not available" }); return; }
+        const body = await readBody(req);
+        if (body === null) { sendJson(res, 413, { error: "Request body too large" }); return; }
+        let parsed: { id?: string; yaml?: string };
+        try { parsed = JSON.parse(body); } catch { sendJson(res, 400, { error: "Invalid JSON" }); return; }
+        if (!parsed.id || !parsed.yaml) { sendJson(res, 400, { error: "id and yaml are required" }); return; }
+        try {
+          const saved = await pipelineStore.save(parsed.id, parsed.yaml);
+          sendJson(res, 201, { pipeline: saved });
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : "unknown";
+          sendJson(res, 400, { error: msg });
+        }
+        return;
+      }
+
+      if (parts[0] === "api" && parts[1] === "pipelines" && parts.length === 3) {
+        const id = decodeURIComponent(parts[2]);
+
+        if (req.method === "GET") {
+          if (!pipelineStore) { sendJson(res, 501, { error: "Pipeline store not available" }); return; }
+          const pipeline = pipelineStore.get(id);
+          if (!pipeline) { sendJson(res, 404, { error: `Pipeline not found: ${id}` }); return; }
+          sendJson(res, 200, { pipeline });
+          return;
+        }
+
+        if (req.method === "PUT") {
+          if (!pipelineStore) { sendJson(res, 501, { error: "Pipeline store not available" }); return; }
+          const body = await readBody(req);
+          if (body === null) { sendJson(res, 413, { error: "Request body too large" }); return; }
+          let parsed: { yaml?: string };
+          try { parsed = JSON.parse(body); } catch { sendJson(res, 400, { error: "Invalid JSON" }); return; }
+          if (!parsed.yaml) { sendJson(res, 400, { error: "yaml is required" }); return; }
+          try {
+            const saved = await pipelineStore.save(id, parsed.yaml);
+            sendJson(res, 200, { pipeline: saved });
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : "unknown";
+            sendJson(res, 400, { error: msg });
+          }
+          return;
+        }
+
+        if (req.method === "DELETE") {
+          if (!pipelineStore) { sendJson(res, 501, { error: "Pipeline store not available" }); return; }
+          const deleted = await pipelineStore.delete(id);
+          if (!deleted) { sendJson(res, 400, { error: "Cannot delete: pipeline not found or is built-in" }); return; }
+          sendJson(res, 200, { ok: true });
+          return;
+        }
+      }
+
+      // ── Learnings routes ──
+
+      if (req.method === "GET" && pathname === "/api/learnings/summary") {
+        if (!learningStore) { sendJson(res, 501, { error: "Learning store not available" }); return; }
+        sendJson(res, 200, {
+          system: await learningStore.getSystemStats(),
+          repos: await learningStore.getAllRepoSummaries(),
+        });
+        return;
+      }
+
+      if (req.method === "GET" && pathname === "/api/learnings/outcomes") {
+        if (!learningStore) { sendJson(res, 501, { error: "Learning store not available" }); return; }
+        const limit = parseLimit(requestUrl.searchParams.get("limit"));
+        let outcomes = await learningStore.getRecentOutcomes(limit);
+        const repoFilter = requestUrl.searchParams.get("repo");
+        if (repoFilter) outcomes = outcomes.filter(o => o.repoSlug === repoFilter);
+        const sourceFilter = requestUrl.searchParams.get("source");
+        if (sourceFilter) outcomes = outcomes.filter(o => o.source === sourceFilter);
+        sendJson(res, 200, { outcomes });
+        return;
+      }
+
+      if (parts[0] === "api" && parts[1] === "learnings" && parts[2] === "repo" && parts[3]) {
+        if (!learningStore) { sendJson(res, 501, { error: "Learning store not available" }); return; }
+        const slug = decodeURIComponent(parts.slice(3).join("/"));
+        const repoLearnings = await learningStore.getRepoLearnings(slug);
+        if (!repoLearnings) { sendJson(res, 404, { error: `No learnings for repo: ${slug}` }); return; }
+        sendJson(res, 200, { learnings: repoLearnings });
         return;
       }
 

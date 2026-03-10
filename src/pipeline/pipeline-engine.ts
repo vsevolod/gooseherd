@@ -136,47 +136,25 @@ export class PipelineEngine {
       }
     }
 
-    // Create sandbox container if enabled
+    // Determine sandbox strategy: deferred (setup_sandbox node) or upfront (legacy)
+    const hasSetupSandbox = pipeline.nodes.some(n => n.action === "setup_sandbox");
+
+    // Create sandbox container if enabled — upfront for legacy pipelines,
+    // deferred for pipelines with setup_sandbox node.
     let sandbox: SandboxHandle | undefined;
-    if (this.config.sandboxEnabled && this.containerManager) {
-      const sandboxEnv: Record<string, string> = {};
+    const sandboxRef: { handle?: SandboxHandle } = {};
 
-      // Pass through agent-relevant env vars
-      for (const key of [
-        "OPENROUTER_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY",
-        "XAI_API_KEY", "GEMINI_API_KEY",
-        "CEMS_API_URL", "CEMS_API_KEY",
-        "OPENROUTER_PROVIDER_PREFERENCES"
-      ]) {
-        if (process.env[key]) {
-          sandboxEnv[key] = process.env[key]!;
-        }
-      }
+    if (this.config.sandboxEnabled && this.containerManager && !hasSetupSandbox) {
+      // Legacy path: create sandbox upfront with global image
+      sandbox = await this.buildAndCreateSandbox(run.id, this.config.sandboxImage, logFile);
+    }
 
-      // Pass git token for authenticated operations
-      const gitToken = await this.githubService?.getToken();
-      if (gitToken) {
-        sandboxEnv["GIT_TOKEN"] = gitToken;
-      }
-
-      sandbox = await this.containerManager.createSandbox(
-        run.id,
-        {
-          image: this.config.sandboxImage,
-          cpus: this.config.sandboxCpus,
-          memoryMb: this.config.sandboxMemoryMb,
-          env: sandboxEnv,
-          networkMode: "bridge"
-        },
-        this.config.sandboxHostWorkPath
-      );
-
-      await appendLog(logFile, `[sandbox] container created: ${sandbox.containerName}\n`);
-
-      // Write pi-agent models.json with OpenRouter provider routing preferences
-      if (this.config.openrouterProviderPreferences) {
-        await this.writePiAgentModelsJson(sandbox.containerId, this.config.openrouterProviderPreferences, logFile);
-      }
+    // For deferred sandbox, provide requestSandbox callback
+    if (hasSetupSandbox && this.config.sandboxEnabled && this.containerManager) {
+      deps.requestSandbox = async (image: string) => {
+        sandboxRef.handle = await this.buildAndCreateSandbox(run.id, image, logFile);
+      };
+      deps.containerManager = this.containerManager;
     }
 
     const skipNodeIdSet = skipNodes && skipNodes.length > 0 ? new Set(skipNodes) : undefined;
@@ -190,19 +168,24 @@ export class PipelineEngine {
     let result;
     try {
       if (sandbox) {
-        // Run pipeline inside AsyncLocalStorage context so all shell calls
+        // Legacy path: Run pipeline inside AsyncLocalStorage context so all shell calls
         // within this async tree route through the correct container.
-        // Concurrent pipeline executions each get their own context.
         result = await runInSandboxContext(sandbox.containerId, run.id, () =>
           this.executePipeline(pipeline, ctx, deps, startIndex, false, eventLogger, skipNodeIdSet, enableNodeIdSet, abortSignal)
         );
+      } else if (hasSetupSandbox) {
+        // Deferred path: run pre-sandbox nodes on host, then enter sandbox context
+        // after setup_sandbox completes. executePipeline handles the context switch.
+        result = await this.executePipeline(pipeline, ctx, deps, startIndex, false, eventLogger, skipNodeIdSet, enableNodeIdSet, abortSignal, 0, sandboxRef);
       } else {
         result = await this.executePipeline(pipeline, ctx, deps, startIndex, false, eventLogger, skipNodeIdSet, enableNodeIdSet, abortSignal);
       }
     } finally {
-      if (sandbox && this.containerManager) {
+      // Clean up sandbox (handles both upfront and deferred)
+      const activeSandbox = sandbox ?? sandboxRef.handle;
+      if (activeSandbox && this.containerManager) {
         await this.containerManager.destroySandbox(run.id);
-        await appendLog(logFile, `[sandbox] container destroyed: ${sandbox.containerName}\n`);
+        await appendLog(logFile, `[sandbox] container destroyed: ${activeSandbox.containerName}\n`);
       }
     }
 
@@ -244,7 +227,8 @@ export class PipelineEngine {
     skipNodeIds?: Set<string>,
     enableNodeIds?: Set<string>,
     abortSignal?: AbortSignal,
-    subPipelineDepth = 0
+    subPipelineDepth = 0,
+    sandboxRef?: { handle?: SandboxHandle }
   ): Promise<PipelineResult> {
     const MAX_SUB_PIPELINE_DEPTH = 3;
     const steps: PipelineStepResult[] = [];
@@ -463,6 +447,23 @@ export class PipelineEngine {
       // Checkpoint after each successful node
       if (result.outcome === "success") {
         await ctx.checkpoint(node.id);
+
+        // Deferred sandbox: after setup_sandbox completes, wrap remaining nodes
+        // in sandbox context so shell commands route through the container.
+        if (node.action === "setup_sandbox" && sandboxRef?.handle) {
+          const remainingResult = await runInSandboxContext(
+            sandboxRef.handle.containerId,
+            deps.run.id,
+            () => this.executePipeline(
+              pipeline, ctx, deps, i + 1, pipelineSwitched,
+              eventLogger, skipNodeIds, enableNodeIds, abortSignal,
+              subPipelineDepth
+            )
+          );
+          steps.push(...remainingResult.steps);
+          warnings.push(...remainingResult.warnings);
+          return { outcome: remainingResult.outcome, steps, warnings };
+        }
 
         // Check for per-repo pipeline override (set by clone → applyRepoConfig)
         if (!pipelineSwitched) {
@@ -754,6 +755,61 @@ export class PipelineEngine {
       throw new Error(`No handler registered for action: ${action}`);
     }
     return handler;
+  }
+
+  /**
+   * Build sandbox env, create container, and write pi-agent config.
+   * Shared by both upfront and deferred sandbox creation paths.
+   */
+  private async buildAndCreateSandbox(
+    runId: string,
+    image: string,
+    logFile: string
+  ): Promise<SandboxHandle> {
+    if (!this.containerManager) {
+      throw new Error("Cannot create sandbox: no ContainerManager configured");
+    }
+
+    const sandboxEnv: Record<string, string> = {};
+
+    // Pass through agent-relevant env vars
+    for (const key of [
+      "OPENROUTER_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY",
+      "XAI_API_KEY", "GEMINI_API_KEY",
+      "CEMS_API_URL", "CEMS_API_KEY",
+      "OPENROUTER_PROVIDER_PREFERENCES"
+    ]) {
+      if (process.env[key]) {
+        sandboxEnv[key] = process.env[key]!;
+      }
+    }
+
+    // Pass git token for authenticated operations
+    const gitToken = await this.githubService?.getToken();
+    if (gitToken) {
+      sandboxEnv["GIT_TOKEN"] = gitToken;
+    }
+
+    const sandbox = await this.containerManager.createSandbox(
+      runId,
+      {
+        image,
+        cpus: this.config.sandboxCpus,
+        memoryMb: this.config.sandboxMemoryMb,
+        env: sandboxEnv,
+        networkMode: "bridge"
+      },
+      this.config.sandboxHostWorkPath
+    );
+
+    await appendLog(logFile, `[sandbox] container created: ${sandbox.containerName} (image: ${image})\n`);
+
+    // Write pi-agent models.json with OpenRouter provider routing preferences
+    if (this.config.openrouterProviderPreferences) {
+      await this.writePiAgentModelsJson(sandbox.containerId, this.config.openrouterProviderPreferences, logFile);
+    }
+
+    return sandbox;
   }
 
   /**
