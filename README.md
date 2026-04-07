@@ -95,14 +95,23 @@ Optional controls:
 | `{{run_id}}` | Unique run identifier |
 | `{{repo_slug}}` | `owner/repo` |
 
-Default uses `scripts/dummy-agent.sh` — a safe no-op test stub that creates a file and a screenshot without touching real code. Switch to your agent for real runs:
+Default uses `scripts/dummy-agent.sh` — a safe no-op test stub that creates a file and a screenshot without touching real code. Switch to your agent for real runs (the sandbox image ships with all of these pre-installed):
 
 ```bash
-# Goose
+# pi-agent (OPENROUTER_API_KEY)
+AGENT_COMMAND_TEMPLATE='cd {{repo_dir}} && pi -p @{{prompt_file}} --no-session --mode json'
+
+# Goose (OPENROUTER_API_KEY)
 AGENT_COMMAND_TEMPLATE='cd {{repo_dir}} && goose run --no-session -i {{prompt_file}}'
 
-# pi-agent
-AGENT_COMMAND_TEMPLATE='cd {{repo_dir}} && pi -p @{{prompt_file}} --no-session --mode json'
+# OpenAI Codex CLI (CODEX_API_KEY)
+AGENT_COMMAND_TEMPLATE='cd {{repo_dir}} && codex exec --full-auto "$(cat {{prompt_file}})"'
+
+# Claude Code CLI (ANTHROPIC_API_KEY)
+AGENT_COMMAND_TEMPLATE='cd {{repo_dir}} && claude -p "$(cat {{prompt_file}})" --allowedTools "Read,Edit,Write,Bash,Grep,Glob"'
+
+# Cursor Agent CLI (CURSOR_API_KEY)
+AGENT_COMMAND_TEMPLATE='cd {{repo_dir}} && cursor-agent "$(cat {{prompt_file}})" --no-interactive'
 ```
 
 ## Dashboard

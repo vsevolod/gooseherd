@@ -22,9 +22,24 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
   && rm -rf /var/lib/apt/lists/*
 
-# pi-agent CLI (AI coding agent)
+# ── AI Agent CLIs ──
+# pi-agent (default)
 RUN npm install -g @mariozechner/pi-coding-agent \
   && pi --version
+
+# OpenAI Codex CLI (needs CODEX_API_KEY at runtime)
+RUN npm install -g @openai/codex \
+  && codex --version || true
+
+# Claude Code CLI (needs ANTHROPIC_API_KEY at runtime)
+RUN npm install -g @anthropic-ai/claude-code \
+  && claude --version || true
+
+# Cursor Agent CLI (needs CURSOR_API_KEY at runtime)
+RUN curl -fsSL https://cursor.com/install | bash \
+  && export PATH="$HOME/.local/bin:$PATH" \
+  && cursor-agent --version || true
+ENV PATH="/root/.local/bin:$PATH"
 
 # Gitleaks (secret scanner)
 RUN ARCH=$(dpkg --print-architecture) && \

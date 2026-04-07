@@ -70,10 +70,34 @@ These can be set via environment variables **or** through the setup wizard on fi
 | `VALIDATION_COMMAND` | (empty) | Shell command to validate changes (e.g. `npm run lint`) |
 | `LINT_FIX_COMMAND` | (empty) | Auto-fix linting issues before commit |
 
-**pi-agent example:**
+Any CLI agent that reads a prompt file, edits code, and exits works with Gooseherd. The sandbox image ships with all agents below pre-installed.
+
+**pi-agent** (needs `OPENROUTER_API_KEY`):
 ```
 AGENT_COMMAND_TEMPLATE=cd {{repo_dir}} && pi -p @{{prompt_file}} --model openrouter/openai/gpt-4.1-mini --no-session --mode json --tools read,write,edit,bash,grep,find,ls {{pi_extensions}} {{mcp_flags}}
 ```
+
+**Goose** (needs `OPENROUTER_API_KEY` or provider-specific key):
+```
+AGENT_COMMAND_TEMPLATE=cd {{repo_dir}} && goose run --no-session -i {{prompt_file}}
+```
+
+**OpenAI Codex CLI** (needs `CODEX_API_KEY`):
+```
+AGENT_COMMAND_TEMPLATE=cd {{repo_dir}} && codex exec --full-auto "$(cat {{prompt_file}})"
+```
+
+**Claude Code CLI** (needs `ANTHROPIC_API_KEY`):
+```
+AGENT_COMMAND_TEMPLATE=cd {{repo_dir}} && claude -p "$(cat {{prompt_file}})" --allowedTools "Read,Edit,Write,Bash,Grep,Glob"
+```
+
+**Cursor Agent CLI** (needs `CURSOR_API_KEY`):
+```
+AGENT_COMMAND_TEMPLATE=cd {{repo_dir}} && cursor-agent "$(cat {{prompt_file}})" --no-interactive
+```
+
+The `$(cat {{prompt_file}})` pattern inlines the task file contents for CLIs that accept a prompt string but not a file path. For per-repo custom sandbox images with different agents, see the [Sandbox section](#sandbox-docker-out-of-docker).
 
 ### Runtime
 
