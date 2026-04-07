@@ -120,14 +120,15 @@ async function setupTestStore(): Promise<{ store: RunStore; testDb: TestDb }> {
   return { store, testDb };
 }
 
-/** Poll until a run reaches a terminal status (completed/failed) or timeout. */
-async function waitForRunDone(store: RunStore, runId: string, timeoutMs = 5000): Promise<void> {
+/** Poll until a run reaches a terminal status (completed/failed) or throw on timeout. */
+async function waitForRunDone(store: RunStore, runId: string, timeoutMs = 15000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const run = await store.getRun(runId);
     if (run && (run.status === "completed" || run.status === "failed")) return;
-    await new Promise((r) => setTimeout(r, 50));
+    await new Promise((r) => setTimeout(r, 100));
   }
+  throw new Error(`waitForRunDone: run ${runId} did not reach terminal status within ${timeoutMs}ms`);
 }
 
 // ── enqueueRun ─────────────────────────────────────────
