@@ -1,5 +1,5 @@
 import path from "node:path";
-import { access, mkdir, writeFile } from "node:fs/promises";
+import { mkdir } from "node:fs/promises";
 import type {
   PipelineConfig,
   NodeConfig,
@@ -19,21 +19,35 @@ import type { AppConfig } from "../config.js";
 import type { GitHubService } from "../github.js";
 import type { RunLifecycleHooks } from "../hooks/run-lifecycle.js";
 import { ContextBag } from "./context-bag.js";
-import { evaluateExpression } from "./expression-evaluator.js";
 import { loadPipeline } from "./pipeline-loader.js";
 import { appendLog, runInSandboxContext } from "./shell.js";
-import { logInfo, logError } from "../logger.js";
+import { logInfo } from "../logger.js";
 import type { ContainerManager } from "../sandbox/container-manager.js";
 import type { SandboxHandle } from "../sandbox/types.js";
 
 import { NODE_HANDLERS } from "./node-registry.js";
 import { isNonCodeFixFailure, type BrowserVerifyFailureCode } from "./quality-gates/browser-verify-routing.js";
+import { escalateMode, type ExecutionMode } from "./quality-gates/task-classifier.js";
 
 export type PipelinePhase = "cloning" | "agent" | "validating" | "pushing" | "awaiting_ci" | "ci_fixing";
 
 /**
+ * Evaluate a pipeline node `if` condition.
+ * Only 5 patterns exist across all YAMLs — all resolve to truthiness or `!= ''`.
+ */
+function shouldRunNode(condition: string, ctx: ContextBag, config: Record<string, unknown>): boolean {
+  const neqMatch = condition.match(/^(.+?)\s*!=\s*''\s*$/);
+  if (neqMatch) {
+    const value = ctx.resolve(neqMatch[1]!.trim(), config);
+    return value !== undefined && value !== null && value !== "";
+  }
+  const value = ctx.resolve(condition.trim(), config);
+  return !!value;
+}
+
+/**
  * Pipeline engine: loads YAML pipeline, executes nodes in order,
- * checkpoints context between nodes, handles loop constructs.
+ * handles loop constructs for failure recovery.
  */
 export class PipelineEngine {
   private readonly nodeEventListeners: NodeEventListener[] = [];
@@ -77,8 +91,6 @@ export class PipelineEngine {
 
     const runDir = path.resolve(this.config.workRoot, run.id);
     const logFile = path.join(runDir, "run.log");
-    const checkpointDir = path.join(runDir, "checkpoints");
-
     // Ensure run directory + log file exist before pipeline starts
     // (the clone node will rm + recreate, but we need the dir for pre-node logging)
     await mkdir(runDir, { recursive: true });
@@ -97,8 +109,6 @@ export class PipelineEngine {
       task: run.task,
       requestedBy: run.requestedBy
     });
-    ctx.setCheckpointDir(checkpointDir);
-
     // Merge pipeline-level context
     if (pipeline.context) {
       for (const [key, value] of Object.entries(pipeline.context)) {
@@ -120,21 +130,7 @@ export class PipelineEngine {
       onDetail
     };
 
-    // Try to resume from checkpoint
-    const checkpoint = await ContextBag.resume(checkpointDir);
     let startIndex = 0;
-    if (checkpoint) {
-      const lastNodeIndex = pipeline.nodes.findIndex(n => n.id === checkpoint.lastCompletedNodeId);
-      if (lastNodeIndex >= 0) {
-        startIndex = lastNodeIndex + 1;
-        // Restore context from checkpoint
-        const resumedData = checkpoint.ctx.toObject();
-        for (const [key, value] of Object.entries(resumedData)) {
-          ctx.set(key, value);
-        }
-        logInfo("Resumed from checkpoint", { lastNode: checkpoint.lastCompletedNodeId, nextIndex: startIndex });
-      }
-    }
 
     // Determine sandbox strategy: deferred (setup_sandbox node) or upfront (legacy)
     const hasSetupSandbox = pipeline.nodes.some(n => n.action === "setup_sandbox");
@@ -171,14 +167,14 @@ export class PipelineEngine {
         // Legacy path: Run pipeline inside AsyncLocalStorage context so all shell calls
         // within this async tree route through the correct container.
         result = await runInSandboxContext(sandbox.containerId, run.id, () =>
-          this.executePipeline(pipeline, ctx, deps, startIndex, false, eventLogger, skipNodeIdSet, enableNodeIdSet, abortSignal)
+          this.executePipeline(pipeline, ctx, deps, startIndex, eventLogger, skipNodeIdSet, enableNodeIdSet, abortSignal)
         );
       } else if (hasSetupSandbox) {
         // Deferred path: run pre-sandbox nodes on host, then enter sandbox context
         // after setup_sandbox completes. executePipeline handles the context switch.
-        result = await this.executePipeline(pipeline, ctx, deps, startIndex, false, eventLogger, skipNodeIdSet, enableNodeIdSet, abortSignal, 0, sandboxRef);
+        result = await this.executePipeline(pipeline, ctx, deps, startIndex, eventLogger, skipNodeIdSet, enableNodeIdSet, abortSignal, sandboxRef);
       } else {
-        result = await this.executePipeline(pipeline, ctx, deps, startIndex, false, eventLogger, skipNodeIdSet, enableNodeIdSet, abortSignal);
+        result = await this.executePipeline(pipeline, ctx, deps, startIndex, eventLogger, skipNodeIdSet, enableNodeIdSet, abortSignal);
       }
     } finally {
       // Clean up sandbox (handles both upfront and deferred)
@@ -222,15 +218,12 @@ export class PipelineEngine {
     ctx: ContextBag,
     deps: NodeDeps,
     startIndex: number,
-    pipelineSwitched = false,
     eventLogger?: EventLogger,
     skipNodeIds?: Set<string>,
     enableNodeIds?: Set<string>,
     abortSignal?: AbortSignal,
-    subPipelineDepth = 0,
     sandboxRef?: { handle?: SandboxHandle }
   ): Promise<PipelineResult> {
-    const MAX_SUB_PIPELINE_DEPTH = 3;
     const steps: PipelineStepResult[] = [];
     const warnings: string[] = [];
     const maxGotos = 10;
@@ -260,12 +253,10 @@ export class PipelineEngine {
         continue;
       }
 
-      // Evaluate `if` condition
+      // Evaluate `if` condition (simple truthiness / != '' patterns only)
       if (node.if) {
         const configObj = this.config as unknown as Record<string, unknown>;
-        const shouldRun = evaluateExpression(node.if, (varName: string) => {
-          return ctx.resolve(varName, configObj);
-        });
+        const shouldRun = shouldRunNode(node.if, ctx, configObj);
         if (!shouldRun) {
           steps.push({ nodeId: node.id, outcome: "skipped", durationMs: 0 });
           await eventLogger?.emit("node_end", { nodeId: node.id, outcome: "skipped", durationMs: 0 });
@@ -275,33 +266,12 @@ export class PipelineEngine {
       }
 
       await appendLog(deps.logFile, `\n[pipeline] ${node.id}: starting\n`);
-      await eventLogger?.emit("node_start", { nodeId: node.id });
-      this.fireNodeEvent({ runId: deps.run.id, nodeId: node.id, action: node.action, type: "start" });
       const startTime = Date.now();
-
-      // Execute the node
       const handler = this.getHandler(node.action);
-      let result: NodeResult;
-
-      try {
-        result = await handler(node, ctx, deps);
-      } catch (error) {
-        const message = error instanceof Error ? error.message : "Unknown error";
-        result = { outcome: "failure", error: message };
-      }
-
-      const durationMs = Date.now() - startTime;
+      const { result, durationMs } = await this.runTrackedNode(
+        node.id, node.action, handler, node, ctx, deps, eventLogger
+      );
       await appendLog(deps.logFile, `\n[pipeline] ${node.id}: ${result.outcome} (${String(durationMs)}ms)\n`);
-      await eventLogger?.emit("node_end", {
-        nodeId: node.id,
-        outcome: result.outcome,
-        durationMs,
-        error: result.error
-      });
-      this.fireNodeEvent({
-        runId: deps.run.id, nodeId: node.id, action: node.action,
-        type: "end", outcome: result.outcome, durationMs, error: result.error
-      });
 
       // Write outputs to context bag
       if (result.outputs) {
@@ -358,59 +328,30 @@ export class PipelineEngine {
                 nodeId: node.id,
                 artifact: `goto:${node.id}:${gotoTarget}:${String(gotoCount)}`
               });
-              // Record the step and checkpoint before jumping
+              // Record the step before jumping
               steps.push({ nodeId: node.id, outcome: result.outcome, durationMs });
-              await ctx.checkpoint(node.id);
               i = targetIdx - 1; // -1 because loop will i++
               continue;
             }
           }
         }
 
-        // Support sub-pipeline invocation — run a named pipeline inline, sharing context
-        const subPipelineName = result.outputs["_runSubPipeline"];
-        if (typeof subPipelineName === "string") {
-          if (subPipelineDepth >= MAX_SUB_PIPELINE_DEPTH) {
-            await appendLog(deps.logFile, `[pipeline] sub-pipeline depth limit (${String(MAX_SUB_PIPELINE_DEPTH)}) reached, ignoring '${subPipelineName}'\n`);
-          } else {
-            const subPipeline = await this.tryLoadPipelineOverride(subPipelineName, deps.logFile);
-            if (subPipeline) {
-              await appendLog(deps.logFile, `[pipeline] running sub-pipeline '${subPipelineName}' (${String(subPipeline.nodes.length)} nodes)\n`);
-              await eventLogger?.emit("artifact", {
-                nodeId: node.id,
-                artifact: `sub_pipeline:${node.id}:${subPipelineName}`
-              });
-              const subResult = await this.executePipeline(
-                subPipeline, ctx, deps, 0, true, eventLogger, skipNodeIds, enableNodeIds, abortSignal, subPipelineDepth + 1
-              );
-              steps.push(...subResult.steps);
-              warnings.push(...subResult.warnings);
-              if (subResult.outcome === "failure") {
-                // Record the triggering node before returning failure
-                steps.push({ nodeId: node.id, outcome: "success", durationMs });
-                return { outcome: "failure", steps, warnings };
-              }
-            }
-          }
-        }
       }
 
       // Handle failure with loop construct
       if (result.outcome === "failure" && node.on_failure) {
         const loopResult = await this.handleLoopFailure(
-          node, result, ctx, deps, pipeline, eventLogger
+          node, result, ctx, deps, eventLogger
         );
 
         if (loopResult.outcome === "success") {
           steps.push({ nodeId: node.id, outcome: "success", durationMs: Date.now() - startTime });
-          await ctx.checkpoint(node.id);
           continue;
         }
 
         if (loopResult.outcome === "completed_with_warnings") {
           warnings.push(`${node.id}: ${loopResult.warnings.join("; ")}`);
           steps.push({ nodeId: node.id, outcome: "success", durationMs: Date.now() - startTime });
-          await ctx.checkpoint(node.id);
           continue;
         }
 
@@ -432,7 +373,6 @@ export class PipelineEngine {
         }
         warnings.push(`${node.id}: ${result.error ?? "soft fail"}`);
         steps.push({ nodeId: node.id, outcome: "success", durationMs });
-        await ctx.checkpoint(node.id);
         continue;
       }
 
@@ -444,44 +384,20 @@ export class PipelineEngine {
 
       steps.push({ nodeId: node.id, outcome: result.outcome, durationMs });
 
-      // Checkpoint after each successful node
-      if (result.outcome === "success") {
-        await ctx.checkpoint(node.id);
-
-        // Deferred sandbox: after setup_sandbox completes, wrap remaining nodes
-        // in sandbox context so shell commands route through the container.
-        if (node.action === "setup_sandbox" && sandboxRef?.handle) {
-          const remainingResult = await runInSandboxContext(
-            sandboxRef.handle.containerId,
-            deps.run.id,
-            () => this.executePipeline(
-              pipeline, ctx, deps, i + 1, pipelineSwitched,
-              eventLogger, skipNodeIds, enableNodeIds, abortSignal,
-              subPipelineDepth
-            )
-          );
-          steps.push(...remainingResult.steps);
-          warnings.push(...remainingResult.warnings);
-          return { outcome: remainingResult.outcome, steps, warnings };
-        }
-
-        // Check for per-repo pipeline override (set by clone → applyRepoConfig)
-        if (!pipelineSwitched) {
-          const override = ctx.get<string>("repoConfigPipeline");
-          if (override) {
-            const newPipeline = await this.tryLoadPipelineOverride(override, deps.logFile);
-            if (newPipeline) {
-              const currentIdx = newPipeline.nodes.findIndex(n => n.id === node.id);
-              if (currentIdx >= 0) {
-                const tailResult = await this.executePipeline(newPipeline, ctx, deps, currentIdx + 1, true, eventLogger, skipNodeIds, enableNodeIds, abortSignal);
-                steps.push(...tailResult.steps);
-                warnings.push(...tailResult.warnings);
-                return { outcome: tailResult.outcome, steps, warnings };
-              }
-              await appendLog(deps.logFile, `[pipeline] override '${override}' does not contain node '${node.id}', ignoring\n`);
-            }
-          }
-        }
+      // Deferred sandbox: after setup_sandbox completes, wrap remaining nodes
+      // in sandbox context so shell commands route through the container.
+      if (result.outcome === "success" && node.action === "setup_sandbox" && sandboxRef?.handle) {
+        const remainingResult = await runInSandboxContext(
+          sandboxRef.handle.containerId,
+          deps.run.id,
+          () => this.executePipeline(
+            pipeline, ctx, deps, i + 1,
+            eventLogger, skipNodeIds, enableNodeIds, abortSignal
+          )
+        );
+        steps.push(...remainingResult.steps);
+        warnings.push(...remainingResult.warnings);
+        return { outcome: remainingResult.outcome, steps, warnings };
       }
     }
 
@@ -497,7 +413,6 @@ export class PipelineEngine {
     failedResult: NodeResult,
     ctx: ContextBag,
     deps: NodeDeps,
-    pipeline: PipelineConfig,
     eventLogger?: EventLogger
   ): Promise<PipelineResult> {
     const loopConfig = failedNode.on_failure as LoopConfig;
@@ -508,17 +423,11 @@ export class PipelineEngine {
       ? resolvedMaxRounds
       : 1;
 
-    const agentHandler = this.getHandler(loopConfig.agent_node);
     const onExhausted = loopConfig.on_exhausted ?? "fail_run";
     const warnings: string[] = [];
     const browserFailureCode = ctx.get<BrowserVerifyFailureCode>("browserVerifyFailureCode");
 
-    await appendLog(deps.logFile, `\n[pipeline] entering fix loop for ${failedNode.id} (max ${String(maxRounds)} rounds)\n`);
-    await eventLogger?.emit("artifact", {
-      nodeId: failedNode.id,
-      artifact: `loop_start:${failedNode.id}:${loopConfig.agent_node}:${String(maxRounds)}`
-    });
-
+    // Short-circuit BEFORE handler lookup — bypass doesn't need the agent handler
     if (failedNode.action === "browser_verify" && isNonCodeFixFailure(browserFailureCode)) {
       const warning = `browser_verify loop bypassed for ${browserFailureCode} — not a code-fix-first failure`;
       await appendLog(deps.logFile, `[pipeline] ${warning}\n`);
@@ -542,6 +451,14 @@ export class PipelineEngine {
       };
     }
 
+    const agentHandler = this.getHandler(loopConfig.agent_node);
+
+    await appendLog(deps.logFile, `\n[pipeline] entering fix loop for ${failedNode.id} (max ${String(maxRounds)} rounds)\n`);
+    await eventLogger?.emit("artifact", {
+      nodeId: failedNode.id,
+      artifact: `loop_start:${failedNode.id}:${loopConfig.agent_node}:${String(maxRounds)}`
+    });
+
     // Store the last failure's raw output for the fix agent
     if (failedResult.rawOutput) {
       ctx.set("lastFailureRawOutput", failedResult.rawOutput);
@@ -552,6 +469,15 @@ export class PipelineEngine {
     for (let attempt = 1; attempt <= maxRounds; attempt++) {
       ctx.set("loopAttempt", attempt);
 
+      // Mode escalation: escalate execution mode before fix agent so it benefits from richer instructions
+      const currentMode = (ctx.get<string>("executionMode") ?? "standard") as ExecutionMode;
+      const escalated = escalateMode(currentMode, attempt);
+      if (escalated !== currentMode) {
+        ctx.set("executionMode", escalated);
+        await appendLog(deps.logFile, `[pipeline] mode escalated: ${currentMode} → ${escalated} after ${String(attempt)} failure(s)\n`);
+        await eventLogger?.emit("artifact", { nodeId: failedNode.id, artifact: `mode_escalated:${currentMode}:${escalated}` });
+      }
+
       // Run the fix agent
       await appendLog(deps.logFile, `\n[pipeline] fix loop attempt ${String(attempt)}/${String(maxRounds)}\n`);
       const fixNode: NodeConfig = {
@@ -559,124 +485,47 @@ export class PipelineEngine {
         type: "agentic",
         action: loopConfig.agent_node
       };
-      const fixStart = Date.now();
-      await eventLogger?.emit("node_start", { nodeId: fixNode.id });
-      this.fireNodeEvent({
-        runId: deps.run.id,
-        nodeId: fixNode.id,
-        action: fixNode.action,
-        type: "start"
-      });
-
-      let fixResult: NodeResult;
-
-      try {
-        fixResult = await agentHandler(fixNode, ctx, deps);
-      } catch (error) {
-        const message = error instanceof Error ? error.message : "Unknown error";
-        await appendLog(deps.logFile, `\n[pipeline] fix agent failed: ${message}\n`);
-        fixResult = { outcome: "failure", error: message };
-      }
-
-      const fixDurationMs = Date.now() - fixStart;
-      await eventLogger?.emit("node_end", {
-        nodeId: fixNode.id,
-        outcome: fixResult.outcome,
-        durationMs: fixDurationMs,
-        error: fixResult.error
-      });
-      this.fireNodeEvent({
-        runId: deps.run.id,
-        nodeId: fixNode.id,
-        action: fixNode.action,
-        type: "end",
-        outcome: fixResult.outcome,
-        durationMs: fixDurationMs,
-        error: fixResult.error
-      });
+      const { result: fixResult } = await this.runTrackedNode(
+        fixNode.id, fixNode.action, agentHandler, fixNode, ctx, deps, eventLogger
+      );
 
       if (fixResult.outcome !== "success") {
-        await appendLog(
-          deps.logFile,
-          `[pipeline] fix agent outcome=${fixResult.outcome} on attempt ${String(attempt)} — skipping retry check\n`
-        );
-        await eventLogger?.emit("artifact", {
-          nodeId: failedNode.id,
-          artifact: `loop_fix_failed:${failedNode.id}:${String(attempt)}:${fixResult.outcome}`
-        });
+        await appendLog(deps.logFile, `[pipeline] fix agent outcome=${fixResult.outcome} on attempt ${String(attempt)} — skipping retry check\n`);
+        await eventLogger?.emit("artifact", { nodeId: failedNode.id, artifact: `loop_fix_failed:${failedNode.id}:${String(attempt)}:${fixResult.outcome}` });
         continue;
       }
-      if (fixResult.outputs) {
-        ctx.mergeOutputs(fixResult.outputs);
-      }
+      if (fixResult.outputs) ctx.mergeOutputs(fixResult.outputs);
 
-      // Run lint fix after agent fix (lint only runs after agent changes)
-      // Skip for fix_ci and fix_browser which already commit+push internally
+      // Run lint fix after agent fix (skip for fix_ci/fix_browser which commit+push internally)
       if (loopConfig.agent_node !== "fix_ci" && loopConfig.agent_node !== "fix_browser") {
         const lintHandler = NODE_HANDLERS["lint_fix"];
         if (lintHandler && deps.config.lintFixCommand) {
-          const lintNode: NodeConfig = { id: "lint_fix_post", type: "deterministic", action: "lint_fix" };
-          await lintHandler(lintNode, ctx, deps);
+          await lintHandler({ id: "lint_fix_post", type: "deterministic", action: "lint_fix" }, ctx, deps);
         }
       }
 
       // Re-run the original node to check if fixed
-      const retryHandler = this.getHandler(failedNode.action);
-      let retryResult: NodeResult;
       const retryNodeId = `${failedNode.id}_retry_${String(attempt)}`;
-      const retryStart = Date.now();
-      await eventLogger?.emit("node_start", { nodeId: retryNodeId });
-      this.fireNodeEvent({
-        runId: deps.run.id,
-        nodeId: retryNodeId,
-        action: failedNode.action,
-        type: "start"
-      });
-      try {
-        retryResult = await retryHandler(failedNode, ctx, deps);
-      } catch (error) {
-        const message = error instanceof Error ? error.message : "Unknown error";
-        retryResult = { outcome: "failure", error: message };
-      }
-      const retryDurationMs = Date.now() - retryStart;
-      await eventLogger?.emit("node_end", {
-        nodeId: retryNodeId,
-        outcome: retryResult.outcome,
-        durationMs: retryDurationMs,
-        error: retryResult.error
-      });
-      this.fireNodeEvent({
-        runId: deps.run.id,
-        nodeId: retryNodeId,
-        action: failedNode.action,
-        type: "end",
-        outcome: retryResult.outcome,
-        durationMs: retryDurationMs,
-        error: retryResult.error
-      });
+      const retryHandler = this.getHandler(failedNode.action);
+      const { result: retryResult } = await this.runTrackedNode(
+        retryNodeId, failedNode.action, retryHandler, failedNode, ctx, deps, eventLogger
+      );
 
       if (retryResult.outcome === "success") {
         await appendLog(deps.logFile, `\n[pipeline] fix loop succeeded on attempt ${String(attempt)}\n`);
-        await eventLogger?.emit("artifact", {
-          nodeId: failedNode.id,
-          artifact: `loop_success:${failedNode.id}:${String(attempt)}`
-        });
-        if (retryResult.outputs) {
-          ctx.mergeOutputs(retryResult.outputs);
-        }
+        await eventLogger?.emit("artifact", { nodeId: failedNode.id, artifact: `loop_success:${failedNode.id}:${String(attempt)}` });
+        if (retryResult.outputs) ctx.mergeOutputs(retryResult.outputs);
         return { outcome: "success", steps: [], warnings };
       }
 
       // Merge retry outputs so next fix attempt sees updated failure context
-      if (retryResult.outputs) {
-        ctx.mergeOutputs(retryResult.outputs);
-      }
+      if (retryResult.outputs) ctx.mergeOutputs(retryResult.outputs);
       if (retryResult.rawOutput) {
         ctx.set("lastFailureRawOutput", retryResult.rawOutput);
         lastRawOutput = retryResult.rawOutput;
       }
 
-      // Accumulate failure history for browser verify (and potentially other loops)
+      // Accumulate failure history for browser verify
       if (failedNode.action === "browser_verify") {
         ctx.append("browserVerifyFailureHistory", {
           round: attempt,
@@ -687,10 +536,7 @@ export class PipelineEngine {
         });
       }
 
-      await eventLogger?.emit("artifact", {
-        nodeId: failedNode.id,
-        artifact: `loop_retry_failed:${failedNode.id}:${String(attempt)}:${retryResult.outcome}`
-      });
+      await eventLogger?.emit("artifact", { nodeId: failedNode.id, artifact: `loop_retry_failed:${failedNode.id}:${String(attempt)}:${retryResult.outcome}` });
     }
 
     // Loop exhausted — include last validation output for debugging
@@ -722,31 +568,39 @@ export class PipelineEngine {
     };
   }
 
-  private async tryLoadPipelineOverride(name: string, logFile: string): Promise<PipelineConfig | undefined> {
-    // Validate: alphanumeric, hyphens, underscores only
-    if (!/^[a-zA-Z0-9_-]+$/.test(name)) {
-      await appendLog(logFile, `[pipeline] invalid override name '${name}', must be alphanumeric/hyphens/underscores\n`);
-      return undefined;
-    }
+  /**
+   * Run a node handler wrapped with event tracking (emit + fire for start/end).
+   * Returns the result and duration. Catches handler errors into failure results.
+   */
+  private async runTrackedNode(
+    nodeId: string,
+    action: string,
+    handler: NodeHandler,
+    node: NodeConfig,
+    ctx: ContextBag,
+    deps: NodeDeps,
+    eventLogger?: EventLogger
+  ): Promise<{ result: NodeResult; durationMs: number }> {
+    await eventLogger?.emit("node_start", { nodeId });
+    this.fireNodeEvent({ runId: deps.run.id, nodeId, action, type: "start" });
+    const start = Date.now();
 
-    const yamlPath = path.resolve("pipelines", `${name}.yml`);
+    let result: NodeResult;
     try {
-      await access(yamlPath);
-    } catch {
-      await appendLog(logFile, `[pipeline] override pipeline not found: ${yamlPath}\n`);
-      return undefined;
-    }
-
-    try {
-      const pipeline = await loadPipeline(yamlPath);
-      logInfo("Pipeline override loaded", { name, nodes: pipeline.nodes.length });
-      await appendLog(logFile, `[pipeline] switched to override pipeline '${name}' (${String(pipeline.nodes.length)} nodes)\n`);
-      return pipeline;
+      result = await handler(node, ctx, deps);
     } catch (error) {
-      const msg = error instanceof Error ? error.message : "unknown";
-      await appendLog(logFile, `[pipeline] failed to load override pipeline '${name}': ${msg}\n`);
-      return undefined;
+      const message = error instanceof Error ? error.message : "Unknown error";
+      result = { outcome: "failure", error: message };
     }
+
+    const durationMs = Date.now() - start;
+    await eventLogger?.emit("node_end", { nodeId, outcome: result.outcome, durationMs, error: result.error });
+    this.fireNodeEvent({
+      runId: deps.run.id, nodeId, action,
+      type: "end", outcome: result.outcome, durationMs, error: result.error
+    });
+
+    return { result, durationMs };
   }
 
   private getHandler(action: string): NodeHandler {
