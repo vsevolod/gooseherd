@@ -56,26 +56,27 @@ describe("dashboard auth", () => {
   test("no token configured → always passes", () => {
     const req = makeMockReq();
     const res = makeMockRes();
-    assert.equal(checkAuth(req, res, undefined, "/"), true);
-    assert.equal(checkAuth(req, res, undefined, "/api/runs"), true);
+    const opts = { setupComplete: true };
+    assert.equal(checkAuth(req, res, opts, "/"), true);
+    assert.equal(checkAuth(req, res, opts, "/api/runs"), true);
   });
 
   test("healthz always passes even with token", () => {
     const req = makeMockReq();
     const res = makeMockRes();
-    assert.equal(checkAuth(req, res, "secret123", "/healthz"), true);
+    assert.equal(checkAuth(req, res, { setupComplete: true, dashboardToken: "secret123" }, "/healthz"), true);
   });
 
   test("/login always passes even with token", () => {
     const req = makeMockReq();
     const res = makeMockRes();
-    assert.equal(checkAuth(req, res, "secret123", "/login"), true);
+    assert.equal(checkAuth(req, res, { setupComplete: true, dashboardToken: "secret123" }, "/login"), true);
   });
 
   test("API route without auth returns 401", () => {
     const req = makeMockReq();
     const res = makeMockRes();
-    const result = checkAuth(req, res, "secret123", "/api/runs");
+    const result = checkAuth(req, res, { setupComplete: true, dashboardToken: "secret123" }, "/api/runs");
     assert.equal(result, false);
     assert.equal(res.statusCode, 401);
   });
@@ -85,7 +86,7 @@ describe("dashboard auth", () => {
       headers: { authorization: "Bearer secret123" }
     });
     const res = makeMockRes();
-    assert.equal(checkAuth(req, res, "secret123", "/api/runs"), true);
+    assert.equal(checkAuth(req, res, { setupComplete: true, dashboardToken: "secret123" }, "/api/runs"), true);
   });
 
   test("API route with wrong Bearer token returns 401", () => {
@@ -93,14 +94,14 @@ describe("dashboard auth", () => {
       headers: { authorization: "Bearer wrong" }
     });
     const res = makeMockRes();
-    assert.equal(checkAuth(req, res, "secret123", "/api/runs"), false);
+    assert.equal(checkAuth(req, res, { setupComplete: true, dashboardToken: "secret123" }, "/api/runs"), false);
     assert.equal(res.statusCode, 401);
   });
 
   test("HTML page without cookie redirects to /login", () => {
     const req = makeMockReq();
     const res = makeMockRes();
-    const result = checkAuth(req, res, "secret123", "/");
+    const result = checkAuth(req, res, { setupComplete: true, dashboardToken: "secret123" }, "/");
     assert.equal(result, false);
     assert.equal(res.statusCode, 302);
     assert.equal(res._headers["location"], "/login");
@@ -113,7 +114,7 @@ describe("dashboard auth", () => {
       headers: { cookie: `gooseherd-session=${sessionValue}` }
     });
     const res = makeMockRes();
-    assert.equal(checkAuth(req, res, "secret123", "/"), true);
+    assert.equal(checkAuth(req, res, { setupComplete: true, dashboardToken: "secret123" }, "/"), true);
   });
 
   test("HTML page with invalid session cookie redirects", () => {
@@ -121,7 +122,7 @@ describe("dashboard auth", () => {
       headers: { cookie: "gooseherd-session=invalid" }
     });
     const res = makeMockRes();
-    assert.equal(checkAuth(req, res, "secret123", "/"), false);
+    assert.equal(checkAuth(req, res, { setupComplete: true, dashboardToken: "secret123" }, "/"), false);
     assert.equal(res.statusCode, 302);
   });
 
@@ -132,7 +133,7 @@ describe("dashboard auth", () => {
       headers: { cookie: `gooseherd-session=${sessionValue}` }
     });
     const res = makeMockRes();
-    assert.equal(checkAuth(req, res, "mytoken", "/api/runs"), true);
+    assert.equal(checkAuth(req, res, { setupComplete: true, dashboardToken: "mytoken" }, "/api/runs"), true);
   });
 });
 

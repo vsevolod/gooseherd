@@ -7,6 +7,7 @@ import { describe, test, mock } from "node:test";
 import { mkdtemp, rm, writeFile, mkdir } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { createTestDb, type TestDb } from "./helpers/test-db.js";
 
 // ══════════════════════════════════════════════════════════
 // Setup Wizard Helpers
@@ -320,8 +321,8 @@ describe("team tagging", () => {
   // ── RunStore with teamId ──
 
   test("store.createRun saves teamId", async () => {
-    const tmpDir = await mkdtemp(path.join(os.tmpdir(), "gh-test-store-"));
-    const store = new RunStore(tmpDir);
+    const testDb = await createTestDb();
+    const store = new RunStore(testDb.db);
     await store.init();
 
     const run = await store.createRun({
@@ -340,12 +341,12 @@ describe("team tagging", () => {
     const fetched = await store.getRun(run.id);
     assert.equal(fetched?.teamId, "platform");
 
-    await rm(tmpDir, { recursive: true, force: true });
+    await testDb.cleanup();
   });
 
   test("store.createRun works without teamId", async () => {
-    const tmpDir = await mkdtemp(path.join(os.tmpdir(), "gh-test-store-"));
-    const store = new RunStore(tmpDir);
+    const testDb = await createTestDb();
+    const store = new RunStore(testDb.db);
     await store.init();
 
     const run = await store.createRun({
@@ -359,12 +360,12 @@ describe("team tagging", () => {
 
     assert.equal(run.teamId, undefined);
 
-    await rm(tmpDir, { recursive: true, force: true });
+    await testDb.cleanup();
   });
 
   test("store.listRuns filters by teamId", async () => {
-    const tmpDir = await mkdtemp(path.join(os.tmpdir(), "gh-test-store-"));
-    const store = new RunStore(tmpDir);
+    const testDb = await createTestDb();
+    const store = new RunStore(testDb.db);
     await store.init();
 
     await store.createRun({
@@ -423,7 +424,7 @@ describe("team tagging", () => {
     const oldStyle = await store.listRuns(2);
     assert.equal(oldStyle.length, 2);
 
-    await rm(tmpDir, { recursive: true, force: true });
+    await testDb.cleanup();
   });
 });
 
@@ -461,6 +462,7 @@ describe("ObserverDaemon tokenGetter", () => {
     // Just verify the type signature accepts the parameter without error
     const mod = await import("../src/observer/daemon.js");
     const ObserverDaemon = mod.ObserverDaemon;
+    const testDb = await createTestDb();
 
     // Minimal mock objects to instantiate
     const mockConfig = makeMinimalConfig({}) as any;
@@ -469,20 +471,25 @@ describe("ObserverDaemon tokenGetter", () => {
     const mockWebClient = {} as any;
     const tokenGetter = async () => "fresh-token";
 
-    // Should not throw
-    const daemon = new ObserverDaemon(mockConfig, mockRunManager, mockWebClient, tokenGetter);
+    // Should not throw — pass db as last argument
+    const daemon = new ObserverDaemon(mockConfig, mockRunManager, mockWebClient, tokenGetter, undefined, testDb.db);
     assert.ok(daemon, "Daemon should instantiate with tokenGetter");
+
+    await testDb.cleanup();
   });
 
   test("ObserverDaemon constructor works without tokenGetter", async () => {
     const mod = await import("../src/observer/daemon.js");
     const ObserverDaemon = mod.ObserverDaemon;
+    const testDb = await createTestDb();
 
     const mockConfig = makeMinimalConfig({}) as any;
     mockConfig.dataDir = os.tmpdir();
 
-    const daemon = new ObserverDaemon(mockConfig, {} as any, {} as any);
+    const daemon = new ObserverDaemon(mockConfig, {} as any, {} as any, undefined, undefined, testDb.db);
     assert.ok(daemon, "Daemon should instantiate without tokenGetter");
+
+    await testDb.cleanup();
   });
 });
 

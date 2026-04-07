@@ -58,8 +58,8 @@ function makeConfig(overrides?: Partial<SchedulerConfig>): SchedulerConfig {
 
 function makeSlotChecker(hasCapacity = true, activeRuns = 0): SchedulerSlotChecker {
   return {
-    hasCapacity: () => hasCapacity,
-    activeRunCount: () => activeRuns
+    hasCapacity: async () => hasCapacity,
+    activeRunCount: async () => activeRuns
   };
 }
 
@@ -108,13 +108,13 @@ describe("computePriority", () => {
 // ═══════════════════════════════════════════════════════
 
 describe("evaluateQueue", () => {
-  test("returns null when queue is empty", () => {
+  test("returns null when queue is empty", async () => {
     const queue: DeferredEvent[] = [];
-    const result = evaluateQueue(queue, makeConfig(), makeSlotChecker(), freshStats(), Date.now());
+    const result = await evaluateQueue(queue, makeConfig(), makeSlotChecker(), freshStats(), Date.now());
     assert.equal(result, null);
   });
 
-  test("triggers highest priority event when capacity available", () => {
+  test("triggers highest priority event when capacity available", async () => {
     const high = makeDeferredEvent({
       event: makeEvent({ id: "high", priority: "high" }),
       priority: 75
@@ -126,7 +126,7 @@ describe("evaluateQueue", () => {
     const queue = [low, high];
     const stats = freshStats();
 
-    const result = evaluateQueue(queue, makeConfig(), makeSlotChecker(true), stats, Date.now());
+    const result = await evaluateQueue(queue, makeConfig(), makeSlotChecker(true), stats, Date.now());
 
     assert.ok(result);
     assert.equal(result.event.id, "high");
@@ -135,28 +135,28 @@ describe("evaluateQueue", () => {
     assert.equal(queue[0]!.event.id, "low");
   });
 
-  test("returns null when no capacity", () => {
+  test("returns null when no capacity", async () => {
     const entry = makeDeferredEvent();
     const queue = [entry];
     const stats = freshStats();
 
-    const result = evaluateQueue(queue, makeConfig(), makeSlotChecker(false), stats, Date.now());
+    const result = await evaluateQueue(queue, makeConfig(), makeSlotChecker(false), stats, Date.now());
 
     assert.equal(result, null);
     assert.equal(queue.length, 1);
     assert.equal(stats.totalTriggered, 0);
   });
 
-  test("increments retryCount when no capacity", () => {
+  test("increments retryCount when no capacity", async () => {
     const entry = makeDeferredEvent({ retryCount: 3 });
     const queue = [entry];
 
-    evaluateQueue(queue, makeConfig(), makeSlotChecker(false), freshStats(), Date.now());
+    await evaluateQueue(queue, makeConfig(), makeSlotChecker(false), freshStats(), Date.now());
 
     assert.equal(queue[0]!.retryCount, 4);
   });
 
-  test("only triggers one event per cycle", () => {
+  test("only triggers one event per cycle", async () => {
     const queue = [
       makeDeferredEvent({ event: makeEvent({ id: "a", priority: "critical" }), priority: 100 }),
       makeDeferredEvent({ event: makeEvent({ id: "b", priority: "high" }), priority: 75 }),
@@ -164,13 +164,13 @@ describe("evaluateQueue", () => {
     ];
     const stats = freshStats();
 
-    evaluateQueue(queue, makeConfig(), makeSlotChecker(true), stats, Date.now());
+    await evaluateQueue(queue, makeConfig(), makeSlotChecker(true), stats, Date.now());
 
     assert.equal(stats.totalTriggered, 1);
     assert.equal(queue.length, 2);
   });
 
-  test("drops events older than maxAge", () => {
+  test("drops events older than maxAge", async () => {
     const now = Date.now();
     const oldEvent = makeDeferredEvent({
       deferredAt: new Date(now - 25 * 60 * 60 * 1000).toISOString() // 25h ago
@@ -181,26 +181,26 @@ describe("evaluateQueue", () => {
     const queue = [oldEvent, freshEvent];
     const stats = freshStats();
 
-    evaluateQueue(queue, makeConfig({ maxAge: 24 * 60 * 60 * 1000 }), makeSlotChecker(false), stats, now);
+    await evaluateQueue(queue, makeConfig({ maxAge: 24 * 60 * 60 * 1000 }), makeSlotChecker(false), stats, now);
 
     assert.equal(stats.totalDropped, 1);
     assert.equal(queue.length, 1);
   });
 
-  test("drops events exceeding maxRetries", () => {
+  test("drops events exceeding maxRetries", async () => {
     const overRetried = makeDeferredEvent({ retryCount: 10 });
     const fresh = makeDeferredEvent({ retryCount: 0 });
     const queue = [overRetried, fresh];
     const stats = freshStats();
 
-    evaluateQueue(queue, makeConfig({ maxRetries: 10 }), makeSlotChecker(false), stats, Date.now());
+    await evaluateQueue(queue, makeConfig({ maxRetries: 10 }), makeSlotChecker(false), stats, Date.now());
 
     assert.equal(stats.totalDropped, 1);
     assert.equal(queue.length, 1);
     assert.equal(queue[0]!.retryCount, 1); // The surviving one gets incremented
   });
 
-  test("sorts by priority then by age for tiebreaks", () => {
+  test("sorts by priority then by age for tiebreaks", async () => {
     const now = Date.now();
     const olderMedium = makeDeferredEvent({
       event: makeEvent({ id: "older-med", priority: "medium" }),
@@ -215,7 +215,7 @@ describe("evaluateQueue", () => {
     const queue = [newerMedium, olderMedium];
     const stats = freshStats();
 
-    const result = evaluateQueue(queue, makeConfig(), makeSlotChecker(true), stats, now);
+    const result = await evaluateQueue(queue, makeConfig(), makeSlotChecker(true), stats, now);
 
     // Older medium gets age bonus so it should be triggered first
     // (base 50 + 6 age bonus = 56 vs base 50 + 0 = 50)
@@ -223,7 +223,7 @@ describe("evaluateQueue", () => {
     assert.equal(result.event.id, "older-med");
   });
 
-  test("priority increases with age (urgency bonus)", () => {
+  test("priority increases with age (urgency bonus)", async () => {
     const now = Date.now();
     const entry = makeDeferredEvent({
       event: makeEvent({ priority: "low" }),
@@ -232,7 +232,7 @@ describe("evaluateQueue", () => {
     });
     const queue = [entry];
 
-    evaluateQueue(queue, makeConfig(), makeSlotChecker(false), freshStats(), now);
+    await evaluateQueue(queue, makeConfig(), makeSlotChecker(false), freshStats(), now);
 
     // base 25 + (120min / 10) = 25 + 12 = 37
     assert.equal(queue[0]!.priority, 37);
