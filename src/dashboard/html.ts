@@ -254,11 +254,33 @@ export function dashboardHtml(config: AppConfig): string {
       color: var(--muted); margin: 0 0 10px; font-weight: 700;
     }
     .settings-row {
-      display: flex; justify-content: space-between; align-items: center;
-      padding: 6px 0; font-size: 13px;
+      display: flex; justify-content: space-between; align-items: flex-start;
+      gap: 12px; padding: 6px 0; font-size: 13px;
     }
-    .settings-row .label { color: var(--muted); }
-    .settings-row .value { font-weight: 600; text-align: right; max-width: 55%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .settings-row .label { color: var(--muted); flex: 0 0 120px; }
+    .settings-row .value {
+      font-weight: 600; text-align: right; flex: 1 1 auto; min-width: 0;
+      overflow-wrap: anywhere; word-break: break-word;
+    }
+    .settings-row .value.compact {
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .settings-row.stacked {
+      display: block;
+    }
+    .settings-row.stacked .label {
+      display: block; flex: none; margin-bottom: 6px;
+    }
+    .settings-row.stacked .value {
+      display: block; text-align: left;
+    }
+    .settings-row .value.settings-code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      font-size: 12px;
+      line-height: 1.45;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
     .settings-badge {
       display: inline-block; padding: 2px 8px; border-radius: 999px;
       font-size: 11px; font-weight: 600;
@@ -317,6 +339,15 @@ export function dashboardHtml(config: AppConfig): string {
     .modal select { cursor: pointer; }
     .modal textarea { min-height: 80px; resize: vertical; }
     .modal input:focus, .modal textarea:focus, .modal select:focus { border-color: var(--ring); }
+    .modal-subactions { display: flex; gap: 8px; justify-content: space-between; margin-top: 8px; flex-wrap: wrap; }
+    .modal-inline-btn {
+      border: 1px solid var(--border); background: var(--button-bg); color: var(--text);
+      border-radius: 8px; padding: 6px 10px; font-size: 12px; font-weight: 600;
+      cursor: pointer; font-family: var(--font-ui);
+    }
+    .modal-inline-btn:hover { background: var(--button-bg-hover); }
+    .modal-inline-btn:disabled { opacity: 0.6; cursor: default; }
+    .modal-help { margin-top: 6px; font-size: 11px; color: var(--muted); line-height: 1.4; }
     .modal-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
     .modal-btn {
       border: 1px solid var(--border); background: var(--button-bg); color: var(--text);
@@ -1642,8 +1673,21 @@ export function dashboardHtml(config: AppConfig): string {
   <div class="modal-overlay" id="new-run-overlay">
     <div class="modal">
       <h2>New Run</h2>
-      <label for="nr-repo">Repository (owner/repo)</label>
-      <input type="text" id="nr-repo" placeholder="yourorg/yourrepo" />
+      <div id="nr-repo-select-wrap">
+        <label for="nr-repo-select">Repository</label>
+        <select id="nr-repo-select">
+          <option value="">Loading repositories...</option>
+        </select>
+      </div>
+      <div id="nr-repo-custom-wrap" style="display: none;">
+        <label for="nr-repo">Repository (owner/repo)</label>
+        <input type="text" id="nr-repo" placeholder="yourorg/yourrepo" />
+      </div>
+      <div class="modal-subactions">
+        <button type="button" class="modal-inline-btn" id="nr-repo-custom-toggle">Use custom repository</button>
+        <button type="button" class="modal-inline-btn" id="nr-repo-refresh">Refresh repositories</button>
+      </div>
+      <div class="modal-help" id="nr-repo-meta">Select a repository from the GitHub App installation or switch to manual entry.</div>
       <label for="nr-branch">Base branch</label>
       <input type="text" id="nr-branch" placeholder="main" />
       <label for="nr-task">Task description</label>
@@ -1739,7 +1783,13 @@ export function dashboardHtml(config: AppConfig): string {
       filterPills: document.getElementById('filter-pills'),
       newRunBtn: document.getElementById('new-run-btn'),
       newRunOverlay: document.getElementById('new-run-overlay'),
+      nrRepoSelectWrap: document.getElementById('nr-repo-select-wrap'),
+      nrRepoSelect: document.getElementById('nr-repo-select'),
+      nrRepoCustomWrap: document.getElementById('nr-repo-custom-wrap'),
       nrRepo: document.getElementById('nr-repo'),
+      nrRepoCustomToggle: document.getElementById('nr-repo-custom-toggle'),
+      nrRepoRefresh: document.getElementById('nr-repo-refresh'),
+      nrRepoMeta: document.getElementById('nr-repo-meta'),
       nrBranch: document.getElementById('nr-branch'),
       nrTask: document.getElementById('nr-task'),
       nrPipeline: document.getElementById('nr-pipeline'),
@@ -3024,11 +3074,11 @@ export function dashboardHtml(config: AppConfig): string {
         var badge = (on) => '<span class="settings-badge ' + (on ? 'on' : 'off') + '">' + (on ? 'On' : 'Off') + '</span>';
         el.settingsBody.innerHTML =
           '<div class="settings-section"><h3>Configuration</h3>' +
-          '<div class="settings-row"><span class="label">App Name</span><span class="value">' + esc(c.appName || '') + '</span></div>' +
-          '<div class="settings-row"><span class="label">Pipeline</span><span class="value">' + esc(c.pipelineFile || '') + '</span></div>' +
+          '<div class="settings-row"><span class="label">App Name</span><span class="value compact">' + esc(c.appName || '') + '</span></div>' +
+          '<div class="settings-row"><span class="label">Pipeline</span><span class="value compact">' + esc(c.pipelineFile || '') + '</span></div>' +
           '<div class="settings-row"><span class="label">Slack</span><span class="value">' + badge(c.slackConnected) + '</span></div>' +
-          '<div class="settings-row"><span class="label">GitHub Auth</span><span class="value">' + esc(c.githubAuthMode || 'none') + '</span></div>' +
-          '<div class="settings-row"><span class="label">Agent Command</span><span class="value" title="' + esc(c.agentCommandTemplate || '') + '">' + esc(c.agentCommandTemplate || '') + '</span></div>' +
+          '<div class="settings-row"><span class="label">GitHub Auth</span><span class="value compact">' + esc(c.githubAuthMode || 'none') + '</span></div>' +
+          '<div class="settings-row stacked"><span class="label">Agent Command</span><span class="value settings-code" title="' + esc(c.agentCommandTemplate || '') + '">' + esc(c.agentCommandTemplate || '') + '</span></div>' +
           '</div>' +
           '<div class="settings-section"><h3>Features</h3>' +
           '<div class="settings-row"><span class="label">Observer</span>' + badge(c.features?.observer) + '</div>' +
@@ -3039,10 +3089,10 @@ export function dashboardHtml(config: AppConfig): string {
           '<div class="settings-row"><span class="label">Dry Run</span>' + badge(c.features?.dryRun) + '</div>' +
           '</div>' +
           '<div class="settings-section"><h3>Models</h3>' +
-          '<div class="settings-row"><span class="label">Default</span><span class="value">' + esc(c.models?.default || '') + '</span></div>' +
-          '<div class="settings-row"><span class="label">Plan Task</span><span class="value">' + esc(c.models?.planTask || '') + '</span></div>' +
-          '<div class="settings-row"><span class="label">Orchestrator</span><span class="value">' + esc(c.models?.orchestrator || '') + '</span></div>' +
-          '<div class="settings-row"><span class="label">Browser Verify</span><span class="value">' + esc(c.models?.browserVerify || '') + '</span></div>' +
+          '<div class="settings-row"><span class="label">Default</span><span class="value compact">' + esc(c.models?.default || '') + '</span></div>' +
+          '<div class="settings-row"><span class="label">Plan Task</span><span class="value compact">' + esc(c.models?.planTask || '') + '</span></div>' +
+          '<div class="settings-row"><span class="label">Orchestrator</span><span class="value compact">' + esc(c.models?.orchestrator || '') + '</span></div>' +
+          '<div class="settings-row"><span class="label">Browser Verify</span><span class="value compact">' + esc(c.models?.browserVerify || '') + '</span></div>' +
           '</div>' +
           '<div class="settings-section"><h3>Aggregate Stats</h3>' +
           '<div class="stat-grid">' +
@@ -3081,6 +3131,74 @@ export function dashboardHtml(config: AppConfig): string {
     };
 
     // ── New Run modal ──
+    var newRunRepoMode = 'select';
+
+    function setNewRunRepoMode(mode) {
+      newRunRepoMode = mode === 'custom' ? 'custom' : 'select';
+      var selectMode = newRunRepoMode === 'select';
+      el.nrRepoSelectWrap.style.display = selectMode ? 'block' : 'none';
+      el.nrRepoCustomWrap.style.display = selectMode ? 'none' : 'block';
+      el.nrRepoCustomToggle.textContent = selectMode ? 'Use custom repository' : 'Use installation repository';
+      el.nrBranch.disabled = selectMode;
+      if (selectMode) {
+        applySelectedRepositoryDefaults();
+      }
+    }
+
+    function populateRepositoryOptions(repositories) {
+      var select = el.nrRepoSelect;
+      while (select.options.length > 0) select.remove(0);
+
+      var placeholder = document.createElement('option');
+      placeholder.value = '';
+      placeholder.textContent = repositories.length ? 'Select repository' : 'No repositories available';
+      select.appendChild(placeholder);
+
+      for (var i = 0; i < repositories.length; i++) {
+        var repo = repositories[i];
+        var opt = document.createElement('option');
+        opt.value = repo.fullName;
+        opt.textContent = repo.fullName + (repo.private ? '' : ' (public)');
+        if (repo.defaultBranch) opt.setAttribute('data-default-branch', repo.defaultBranch);
+        select.appendChild(opt);
+      }
+    }
+
+    function applySelectedRepositoryDefaults() {
+      if (newRunRepoMode !== 'select') return;
+      var option = el.nrRepoSelect.options[el.nrRepoSelect.selectedIndex];
+      var defaultBranch = option ? option.getAttribute('data-default-branch') : '';
+      el.nrBranch.value = defaultBranch || '';
+    }
+
+    async function loadRepositoryOptions(forceRefresh) {
+      el.nrRepoRefresh.disabled = true;
+      try {
+        var suffix = forceRefresh ? '?refresh=1' : '';
+        var res = await fetchJson('/api/github/repositories' + suffix);
+        var repositories = Array.isArray(res.repositories) ? res.repositories : [];
+        populateRepositoryOptions(repositories);
+        if (repositories.length > 0 && newRunRepoMode !== 'custom') {
+          setNewRunRepoMode('select');
+        } else if (repositories.length === 0) {
+          setNewRunRepoMode('custom');
+        }
+        if (res.stale) {
+          el.nrRepoMeta.textContent = 'Showing cached repositories because GitHub refresh failed. Manual entry is also available.';
+        } else if (repositories.length > 0) {
+          el.nrRepoMeta.textContent = 'Select a repository from the GitHub App installation or switch to manual entry.';
+        } else {
+          el.nrRepoMeta.textContent = 'No repositories returned by GitHub. Enter owner/repo manually.';
+        }
+      } catch (e) {
+        populateRepositoryOptions([]);
+        setNewRunRepoMode('custom');
+        el.nrRepoMeta.textContent = (e && e.message ? e.message + '. ' : '') + 'Enter owner/repo manually.';
+      } finally {
+        el.nrRepoRefresh.disabled = false;
+      }
+    }
+
     async function loadPipelineOptions() {
       try {
         var res = await fetchJson('/api/pipelines');
@@ -3102,15 +3220,38 @@ export function dashboardHtml(config: AppConfig): string {
     el.newRunBtn.onclick = () => {
       el.newRunOverlay.classList.add('open');
       el.nrError.style.display = 'none';
+      setNewRunRepoMode('select');
+      populateRepositoryOptions([]);
       el.nrRepo.value = '';
+      el.nrRepoSelect.value = '';
+      el.nrRepoMeta.textContent = 'Loading repositories...';
       el.nrBranch.value = '';
+      el.nrBranch.disabled = true;
       el.nrTask.value = '';
       el.nrPipeline.value = '';
       loadPipelineOptions();
-      el.nrRepo.focus();
+      loadRepositoryOptions(false).then(function() {
+        if (newRunRepoMode === 'custom') {
+          el.nrRepo.focus();
+        } else {
+          el.nrRepoSelect.focus();
+        }
+      });
     };
     el.nrCancel.onclick = () => el.newRunOverlay.classList.remove('open');
     el.newRunOverlay.onclick = (e) => { if (e.target === el.newRunOverlay) el.newRunOverlay.classList.remove('open'); };
+    el.nrRepoCustomToggle.onclick = () => {
+      setNewRunRepoMode(newRunRepoMode === 'custom' ? 'select' : 'custom');
+      if (newRunRepoMode === 'custom') {
+        el.nrBranch.disabled = false;
+        el.nrRepo.focus();
+      } else {
+        el.nrRepoSelect.focus();
+        applySelectedRepositoryDefaults();
+      }
+    };
+    el.nrRepoRefresh.onclick = () => { loadRepositoryOptions(true); };
+    el.nrRepoSelect.onchange = applySelectedRepositoryDefaults;
     document.addEventListener('keydown', function(e) {
       if (e.key === 'Escape') {
         el.settingsOverlay.classList.remove('open');
@@ -3119,7 +3260,7 @@ export function dashboardHtml(config: AppConfig): string {
       }
     });
     el.nrSubmit.onclick = async () => {
-      var repo = el.nrRepo.value.trim();
+      var repo = (newRunRepoMode === 'custom' ? el.nrRepo.value : el.nrRepoSelect.value).trim();
       var task = el.nrTask.value.trim();
       if (!repo || !task) {
         el.nrError.textContent = 'Repository and task are required.';
