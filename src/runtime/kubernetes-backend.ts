@@ -17,6 +17,7 @@ import type { TerminalFact } from "./terminal-fact.js";
 import { sleep } from "../utils/sleep.js";
 import { normalizeBaseUrl } from "./url.js";
 import { redactSecretToken, renderManifestYaml } from "./kubernetes/manifest-yaml.js";
+import { readKubernetesTerminalFact } from "./kubernetes/runtime-facts.js";
 
 interface KubernetesExecutionBackendDeps {
   controlPlaneStore: Pick<ControlPlaneStore, "createRunEnvelope" | "issueRunToken" | "getLatestCompletion" | "revokeRunToken">;
@@ -25,6 +26,9 @@ interface KubernetesExecutionBackendDeps {
   workRoot: string;
   runnerImage: string;
   internalBaseUrl: string;
+  dryRun: boolean;
+  runnerEnvSecretName?: string;
+  runnerEnvConfigMapName?: string;
   namespace?: string;
   resourceClient?: Pick<KubernetesResourceClient, "applySecret" | "applyJob" | "readJob" | "listPodsForJob" | "readJobLogs" | "deleteJob" | "deletePodsForJob" | "deleteSecret">;
   pollIntervalMs?: number;
@@ -79,6 +83,9 @@ export class KubernetesExecutionBackend implements RunExecutionBackend<"kubernet
       secretName,
       internalBaseUrl: normalizeBaseUrl(this.deps.internalBaseUrl),
       pipelineFile: ctx.pipelineFile ?? "pipelines/pipeline.yml",
+      dryRun: this.deps.dryRun,
+      runnerEnvSecretName: this.deps.runnerEnvSecretName,
+      runnerEnvConfigMapName: this.deps.runnerEnvConfigMapName,
       jobName,
     });
     await writeFile(manifestPath, renderManifestYaml(redactSecretToken(secret), job), "utf8");
@@ -125,35 +132,7 @@ export class KubernetesExecutionBackend implements RunExecutionBackend<"kubernet
   }
 
   private async readRuntimeFact(jobName: string): Promise<TerminalFact> {
-    const job = await this.resourceClient.readJob(jobName, this.namespace);
-    if (!job) {
-      return "missing";
-    }
-
-    const conditions = Array.isArray(job.status?.conditions) ? job.status.conditions as Array<{ type?: string; status?: string }> : [];
-    if (conditions.some((condition) => condition.type === "Complete" && condition.status === "True")) {
-      return "succeeded";
-    }
-    if (conditions.some((condition) => condition.type === "Failed" && condition.status === "True")) {
-      return "failed";
-    }
-
-    const pods = await this.resourceClient.listPodsForJob(jobName, this.namespace);
-    const pod = pods[0];
-    const phase = pod?.status?.phase;
-    if (phase === "Succeeded") {
-      return "succeeded";
-    }
-    if (phase === "Failed") {
-      return "failed";
-    }
-
-    const waitingReason = pod?.status?.containerStatuses?.[0]?.state?.waiting?.reason;
-    if (waitingReason === "ImagePullBackOff" || waitingReason === "ErrImagePull") {
-      return "failed";
-    }
-
-    return "running";
+    return readKubernetesTerminalFact(this.resourceClient, jobName, this.namespace);
   }
 
   private translateOutcome(

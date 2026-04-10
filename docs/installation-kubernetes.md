@@ -322,6 +322,8 @@ These values are appropriate for a `ConfigMap` or Helm values file.
 | `KUBERNETES_RUNNER_IMAGE` | Yes | `gooseherd/k8s-runner:dev` | Production runner image reference. Use an explicit immutable tag. |
 | `KUBERNETES_INTERNAL_BASE_URL` | Yes | falls back to minikube-oriented default | Cluster-internal Gooseherd base URL used by runner jobs. |
 | `KUBERNETES_NAMESPACE` | Recommended | `default` | Namespace where Gooseherd creates runner `Job` and `Secret` resources. |
+| `KUBERNETES_RUNNER_ENV_SECRET` | Recommended | `gooseherd-env` | Secret mounted into runner jobs via `envFrom`; should contain GitHub and LLM credentials needed by the runner process. |
+| `KUBERNETES_RUNNER_ENV_CONFIGMAP` | Recommended | `gooseherd-config` | ConfigMap mounted into runner jobs via `envFrom`; should contain shared non-secret runtime config such as `DRY_RUN`, `PIPELINE_FILE`, and related app settings. |
 
 ### Sandbox/docker legacy values
 
@@ -499,6 +501,8 @@ SANDBOX_RUNTIME=kubernetes
 KUBERNETES_RUNNER_IMAGE
 KUBERNETES_INTERNAL_BASE_URL
 KUBERNETES_NAMESPACE
+KUBERNETES_RUNNER_ENV_SECRET
+KUBERNETES_RUNNER_ENV_CONFIGMAP
 DEFAULT_BASE_BRANCH
 REPO_ALLOWLIST
 ```

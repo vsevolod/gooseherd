@@ -18,6 +18,14 @@ import { getRuntimeBackend, type RuntimeRegistry } from "./runtime/backend.js";
 import { ControlPlaneStore } from "./runtime/control-plane-store.js";
 import { FileArtifactStore } from "./runtime/file-artifact-store.js";
 
+function resolveKubernetesRunnerEnvSecretName(): string | undefined {
+  return process.env.KUBERNETES_RUNNER_ENV_SECRET?.trim() || "gooseherd-env";
+}
+
+function resolveKubernetesRunnerEnvConfigMapName(): string | undefined {
+  return process.env.KUBERNETES_RUNNER_ENV_CONFIGMAP?.trim() || "gooseherd-config";
+}
+
 function parseArgs(args: string[]): { repoSlug: string; baseBranch?: string; task: string } {
   if (args.length < 2) {
     throw new Error(
@@ -110,6 +118,9 @@ async function main(): Promise<void> {
       workRoot: config.workRoot,
       runnerImage: process.env.KUBERNETES_RUNNER_IMAGE?.trim() || "gooseherd/k8s-runner:dev",
       internalBaseUrl: process.env.KUBERNETES_INTERNAL_BASE_URL?.trim() || `http://host.minikube.internal:${String(config.dashboardPort)}`,
+      dryRun: config.dryRun,
+      runnerEnvSecretName: resolveKubernetesRunnerEnvSecretName(),
+      runnerEnvConfigMapName: resolveKubernetesRunnerEnvConfigMapName(),
       namespace: process.env.KUBERNETES_NAMESPACE?.trim() || "default",
     })
   };

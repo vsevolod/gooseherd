@@ -14,6 +14,9 @@ export interface KubernetesRunnerJobInput {
   secretName: string;
   internalBaseUrl: string;
   pipelineFile: string;
+  dryRun: boolean;
+  runnerEnvSecretName?: string;
+  runnerEnvConfigMapName?: string;
   jobName?: string;
 }
 
@@ -54,6 +57,10 @@ export interface JobManifest {
           image: string;
           imagePullPolicy: "IfNotPresent";
           volumeMounts: Array<{ name: "work"; mountPath: "/work" }>;
+          envFrom?: Array<
+            | { secretRef: { name: string } }
+            | { configMapRef: { name: string } }
+          >;
           securityContext: {
             allowPrivilegeEscalation: false;
             capabilities: {
@@ -126,6 +133,10 @@ export function buildRunTokenSecretManifest(input: KubernetesRunnerSecretInput):
 
 export function buildRunJobSpec(input: KubernetesRunnerJobInput): JobManifest {
   const jobName = input.jobName ?? defaultJobName(input.runId);
+  const envFrom = [
+    input.runnerEnvSecretName ? { secretRef: { name: input.runnerEnvSecretName } } : undefined,
+    input.runnerEnvConfigMapName ? { configMapRef: { name: input.runnerEnvConfigMapName } } : undefined,
+  ].filter((entry): entry is NonNullable<typeof entry> => entry !== undefined);
 
   return {
     apiVersion: "batch/v1",
@@ -157,6 +168,7 @@ export function buildRunJobSpec(input: KubernetesRunnerJobInput): JobManifest {
               image: input.image,
               imagePullPolicy: "IfNotPresent",
               volumeMounts: [{ name: "work", mountPath: "/work" }],
+              ...(envFrom.length > 0 ? { envFrom } : {}),
               securityContext: {
                 allowPrivilegeEscalation: false,
                 capabilities: {
@@ -191,7 +203,7 @@ export function buildRunJobSpec(input: KubernetesRunnerJobInput): JobManifest {
                 { name: "WORK_ROOT", value: "/work" },
                 { name: "PIPELINE_FILE", value: input.pipelineFile },
                 { name: "GOOSEHERD_RUNNER_PROTOCOL_VERSION", value: RUNNER_PROTOCOL_VERSION },
-                { name: "DRY_RUN", value: "1" },
+                { name: "DRY_RUN", value: String(input.dryRun) },
                 { name: "DASHBOARD_ENABLED", value: "false" },
                 { name: "OBSERVER_ENABLED", value: "false" },
                 { name: "SUPERVISOR_ENABLED", value: "false" },

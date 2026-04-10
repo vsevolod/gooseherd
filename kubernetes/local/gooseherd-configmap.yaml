@@ -12,3 +12,5 @@ data:
   KUBERNETES_NAMESPACE: gooseherd
   KUBERNETES_RUNNER_IMAGE: gooseherd/k8s-runner:dev
   KUBERNETES_INTERNAL_BASE_URL: http://gooseherd.gooseherd.svc.cluster.local:8787
+  KUBERNETES_RUNNER_ENV_SECRET: gooseherd-env
+  KUBERNETES_RUNNER_ENV_CONFIGMAP: gooseherd-config

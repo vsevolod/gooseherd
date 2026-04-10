@@ -35,6 +35,9 @@ test("buildRunJobSpec uses one Job per run with emptyDir workspace and runner en
     secretName,
     internalBaseUrl: "http://host.minikube.internal:8787",
     pipelineFile: "pipelines/kubernetes-smoke.yml",
+    dryRun: false,
+    runnerEnvSecretName: "gooseherd-env",
+    runnerEnvConfigMapName: "gooseherd-config",
   });
 
   assert.equal(spec.kind, "Job");
@@ -42,6 +45,10 @@ test("buildRunJobSpec uses one Job per run with emptyDir workspace and runner en
   assert.equal(spec.spec.backoffLimit, 0);
   assert.equal(spec.spec.template.spec.volumes[0]?.emptyDir != null, true);
   assert.equal(spec.spec.template.spec.containers[0]?.image, "gooseherd/k8s-runner:dev");
+  assert.deepEqual(spec.spec.template.spec.containers[0]?.envFrom, [
+    { secretRef: { name: "gooseherd-env" } },
+    { configMapRef: { name: "gooseherd-config" } },
+  ]);
   assert.deepEqual(spec.spec.template.spec.containers[0]?.securityContext, {
     allowPrivilegeEscalation: false,
     capabilities: {
@@ -90,6 +97,13 @@ test("buildRunJobSpec uses one Job per run with emptyDir workspace and runner en
     {
       name: "GOOSEHERD_RUNNER_PROTOCOL_VERSION",
       value: "1",
+    },
+  );
+  assert.deepEqual(
+    env.find((entry) => entry.name === "DRY_RUN"),
+    {
+      name: "DRY_RUN",
+      value: "false",
     },
   );
 });

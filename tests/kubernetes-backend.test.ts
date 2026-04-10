@@ -105,6 +105,9 @@ test("kubernetes backend launches job, waits for success, redacts manifest token
     workRoot: tmpRoot,
     runnerImage: "gooseherd/k8s-runner:dev",
     internalBaseUrl: "http://host.minikube.internal:8787/",
+    dryRun: false,
+    runnerEnvSecretName: "gooseherd-env",
+    runnerEnvConfigMapName: "gooseherd-config",
     namespace: "default",
     resourceClient,
     pollIntervalMs: 1,
@@ -126,6 +129,9 @@ test("kubernetes backend launches job, waits for success, redacts manifest token
     const manifest = await readFile(manifestPath, "utf8");
     assert.match(manifest, /host\.minikube\.internal:8787/);
     assert.match(manifest, /pipelines\/kubernetes-smoke\.yml/);
+    assert.match(manifest, /gooseherd-env/);
+    assert.match(manifest, /gooseherd-config/);
+    assert.match(manifest, /name: DRY_RUN[\s\S]*value: "false"/);
     assert.doesNotMatch(manifest, /issued-token/);
     assert.match(manifest, /REDACTED/);
     assert.equal(revokedRunId, "run-k8s-backend-1");
@@ -178,6 +184,7 @@ test("kubernetes backend fails when runtime becomes terminal without completion"
     workRoot: tmpRoot,
     runnerImage: "gooseherd/k8s-runner:dev",
     internalBaseUrl: "http://host.minikube.internal:8787",
+    dryRun: false,
     resourceClient,
     pollIntervalMs: 1,
     waitTimeoutMs: 5_000,
@@ -222,6 +229,7 @@ test("kubernetes backend does not load kubeconfig until it needs a real resource
       workRoot: "/tmp/gooseherd-k8s-backend",
       runnerImage: "gooseherd/k8s-runner:dev",
       internalBaseUrl: "http://host.minikube.internal:8787",
+      dryRun: true,
     });
 
     assert.equal(backend.runtime, "kubernetes");

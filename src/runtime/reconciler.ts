@@ -44,6 +44,11 @@ export class RuntimeReconciler {
         status: "completed",
         phase: "completed",
         finishedAt: new Date().toISOString(),
+        commitSha: completion.payload.commitSha,
+        changedFiles: completion.payload.changedFiles,
+        prUrl: completion.payload.prUrl,
+        tokenUsage: completion.payload.tokenUsage,
+        title: completion.payload.title,
       });
       return;
     }

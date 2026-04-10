@@ -132,3 +132,34 @@ test("recoverInProgressRuns requeues interrupted runs", async (t) => {
   assert.equal(recovered[0]?.phase, "queued");
   assert.equal(recovered[0]?.error, "Recovered after process restart. Auto-requeued.");
 });
+
+test("recoverInProgressRuns leaves kubernetes runs untouched for reconciliation", async (t) => {
+  const { store, cleanup } = await createStore();
+  t.after(cleanup);
+
+  const run = await store.createRun(
+    {
+      repoSlug: "owner/repo",
+      task: "reconcile me via kubernetes facts",
+      baseBranch: "main",
+      requestedBy: "U1",
+      channelId: "C1",
+      threadTs: "1",
+      runtime: "kubernetes"
+    },
+    "gooseherd"
+  );
+
+  await store.updateRun(run.id, {
+    status: "running",
+    phase: "agent",
+    startedAt: new Date().toISOString()
+  });
+
+  const recovered = await store.recoverInProgressRuns("Recovered after process restart. Auto-requeued.");
+  const unchanged = await store.getRun(run.id);
+
+  assert.equal(recovered.length, 0);
+  assert.equal(unchanged?.status, "running");
+  assert.equal(unchanged?.phase, "agent");
+});

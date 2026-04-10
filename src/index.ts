@@ -37,6 +37,8 @@ import { ControlPlaneStore } from "./runtime/control-plane-store.js";
 import { FileArtifactStore } from "./runtime/file-artifact-store.js";
 import type { ArtifactStore } from "./runtime/artifact-store.js";
 import { RuntimeReconciler } from "./runtime/reconciler.js";
+import { KubernetesRuntimeFactsReader } from "./runtime/kubernetes/runtime-facts.js";
+import { recoverRunsAfterRestart } from "./runtime/startup-recovery.js";
 import {
   hasSandboxRuntimeHotReloadChange,
   preflightSandboxRuntime
@@ -61,6 +63,7 @@ interface Services {
   conversationStore: ConversationStore;
   controlPlaneStore: ControlPlaneStore;
   runnerArtifactStore: ArtifactStore;
+  runtimeReconciler: RuntimeReconciler;
 }
 
 function resolveKubernetesRunnerImage(): string {
@@ -69,6 +72,14 @@ function resolveKubernetesRunnerImage(): string {
 
 function resolveKubernetesNamespace(): string {
   return process.env.KUBERNETES_NAMESPACE?.trim() || "default";
+}
+
+function resolveKubernetesRunnerEnvSecretName(): string | undefined {
+  return process.env.KUBERNETES_RUNNER_ENV_SECRET?.trim() || "gooseherd-env";
+}
+
+function resolveKubernetesRunnerEnvConfigMapName(): string | undefined {
+  return process.env.KUBERNETES_RUNNER_ENV_CONFIGMAP?.trim() || "gooseherd-config";
 }
 
 function resolveKubernetesInternalBaseUrl(config: AppConfig): string {
@@ -140,17 +151,16 @@ async function createServices(config: AppConfig, db: Database): Promise<Services
   const webClient = config.slackBotToken ? new WebClient(config.slackBotToken) : undefined;
 
   const controlPlaneStore = new ControlPlaneStore(db);
+  const runtimeFactsReader = config.sandboxRuntime === "kubernetes"
+    ? new KubernetesRuntimeFactsReader({
+      namespace: resolveKubernetesNamespace(),
+    })
+    : {
+      getTerminalFact: async () => "running" as const,
+    };
   const runtimeReconciler = new RuntimeReconciler(
     controlPlaneStore,
-    {
-      getTerminalFact: async (runId: string) => {
-        const run = await store.getRun(runId);
-        if (!run) return "missing";
-        if (run.status === "completed") return "succeeded";
-        if (run.status === "failed") return "failed";
-        return "running";
-      }
-    },
+    runtimeFactsReader,
     store
   );
   const publicBaseUrl = config.dashboardPublicUrl ?? `http://${config.dashboardHost}:${String(config.dashboardPort)}`;
@@ -167,6 +177,9 @@ async function createServices(config: AppConfig, db: Database): Promise<Services
       workRoot: config.workRoot,
       runnerImage: resolveKubernetesRunnerImage(),
       internalBaseUrl: resolveKubernetesInternalBaseUrl(config),
+      dryRun: config.dryRun,
+      runnerEnvSecretName: resolveKubernetesRunnerEnvSecretName(),
+      runnerEnvConfigMapName: resolveKubernetesRunnerEnvConfigMapName(),
       namespace: resolveKubernetesNamespace(),
     })
     : undefined;
@@ -194,7 +207,7 @@ async function createServices(config: AppConfig, db: Database): Promise<Services
   return {
     config, store, agentProfileStore, githubService, memoryProvider, hooks, containerManager,
     pipelineEngine, pipelineStore, learningStore, evalStore, webClient, runManager, conversationStore,
-    controlPlaneStore, runnerArtifactStore,
+    controlPlaneStore, runnerArtifactStore, runtimeReconciler,
   };
 }
 
@@ -261,22 +274,23 @@ async function main(): Promise<void> {
   globalRefs.config = config;
 
   // 5. Recover stale in-progress runs from before restart
-  const recoveredRuns = await svc.store.recoverInProgressRuns(
+  const recovery = await recoverRunsAfterRestart(
+    svc.store,
+    svc.runManager,
+    svc.runtimeReconciler,
     "Recovered after process restart. Auto-requeued."
   );
-  if (recoveredRuns.length > 0) {
-    logInfo("Recovered stale in-progress runs", { count: recoveredRuns.length });
-    const runsToRequeue = recoveredRuns.filter((run) => run.channelId !== "local");
-    for (const run of runsToRequeue) {
-      svc.runManager.requeueExistingRun(run.id);
-    }
-    if (runsToRequeue.length > 0) {
-      logInfo("Auto-requeued recovered runs", { count: runsToRequeue.length });
-    }
-    const skippedLocal = recoveredRuns.length - runsToRequeue.length;
-    if (skippedLocal > 0) {
-      logInfo("Skipped auto-requeue for local-trigger runs", { count: skippedLocal });
-    }
+  if (recovery.recoveredRuns.length > 0) {
+    logInfo("Recovered stale in-progress runs", { count: recovery.recoveredRuns.length });
+  }
+  if (recovery.requeuedCount > 0) {
+    logInfo("Auto-requeued recovered runs", { count: recovery.requeuedCount });
+  }
+  if (recovery.skippedLocalCount > 0) {
+    logInfo("Skipped auto-requeue for local-trigger runs", { count: recovery.skippedLocalCount });
+  }
+  if (recovery.kubernetesRuns.length > 0) {
+    logInfo("Reconciled in-progress kubernetes runs after restart", { count: recovery.kubernetesRuns.length });
   }
 
   // 6. Session manager (multi-run goal-oriented loops)

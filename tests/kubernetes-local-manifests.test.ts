@@ -53,6 +53,8 @@ test("local gooseherd configmap forces kubernetes runtime with cluster DNS callb
   assert.equal(data["SANDBOX_RUNTIME"], "kubernetes");
   assert.equal(data["KUBERNETES_NAMESPACE"], "gooseherd");
   assert.equal(data["KUBERNETES_INTERNAL_BASE_URL"], "http://gooseherd.gooseherd.svc.cluster.local:8787");
+  assert.equal(data["KUBERNETES_RUNNER_ENV_SECRET"], "gooseherd-env");
+  assert.equal(data["KUBERNETES_RUNNER_ENV_CONFIGMAP"], "gooseherd-config");
   assert.equal(data["WORK_ROOT"], "/app/.work");
   assert.equal(data["DATA_DIR"], "/app/data");
   assert.equal(data["DASHBOARD_HOST"], "0.0.0.0");

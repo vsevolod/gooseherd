@@ -252,6 +252,9 @@ test("reconciler finalizes completed when completion exists and runtime reports 
   assert.equal(updated?.status, "completed");
   assert.equal(updated?.phase, "completed");
   assert.ok(updated?.finishedAt);
+  assert.equal(updated?.commitSha, "abc123");
+  assert.deepEqual(updated?.changedFiles, ["a.ts"]);
+  assert.equal(updated?.title, "Complete run");
   await cleanup();
 });
 

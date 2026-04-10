@@ -45,6 +45,7 @@ test("resource client applies manifests and scopes calls by namespace", async ()
     secretName: secret.metadata.name,
     internalBaseUrl: "http://gooseherd.gooseherd.svc.cluster.local:8787",
     pipelineFile: "pipelines/kubernetes-smoke.yml",
+    dryRun: true,
   });
 
   await client.applySecret(secret);
