@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   assertImplementedSandboxRuntime,
+  formatSandboxRuntimeLabel,
   hasSandboxRuntimeHotReloadChange,
   preflightSandboxRuntime,
   resolveSandboxRuntime
@@ -45,26 +46,28 @@ test("resolveSandboxRuntime maps legacy SANDBOX_ENABLED=false to local", () => {
 test("assertImplementedSandboxRuntime allows implemented runtimes", () => {
   assert.doesNotThrow(() => assertImplementedSandboxRuntime("local"));
   assert.doesNotThrow(() => assertImplementedSandboxRuntime("docker"));
+  assert.doesNotThrow(() => assertImplementedSandboxRuntime("kubernetes"));
 });
 
-test("assertImplementedSandboxRuntime rejects kubernetes", () => {
-  assert.throws(
-    () => assertImplementedSandboxRuntime("kubernetes"),
-    /SANDBOX_RUNTIME=kubernetes is not supported yet/
-  );
+test("formatSandboxRuntimeLabel returns human-friendly runtime labels", () => {
+  assert.equal(formatSandboxRuntimeLabel("local"), "Local");
+  assert.equal(formatSandboxRuntimeLabel("docker"), "Docker");
+  assert.equal(formatSandboxRuntimeLabel("kubernetes"), "Kubernetes");
 });
 
-test("preflightSandboxRuntime rejects unsupported kubernetes runtime", async () => {
-  await assert.rejects(
-    () => preflightSandboxRuntime({
+test("preflightSandboxRuntime allows kubernetes without docker preflight", async () => {
+  await assert.deepEqual(
+    await preflightSandboxRuntime({
       sandboxRuntime: "kubernetes",
       sandboxRuntimeExplicit: true,
       sandboxEnabled: false,
       sandboxHostWorkPath: ""
     }, {
-      pingDocker: async () => true
+      pingDocker: async () => {
+        assert.fail("pingDocker should not run for kubernetes runtime");
+      }
     }),
-    /SANDBOX_RUNTIME=kubernetes is not supported yet/
+    { sandboxEnabled: false }
   );
 });
 

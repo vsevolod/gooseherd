@@ -20,6 +20,11 @@ test("buildRunTokenSecretManifest stores RUN_TOKEN in a namespaced secret", () =
   assert.equal(manifest.stringData.RUN_TOKEN, "secret-token");
 });
 
+test("default kubernetes resource names stay RFC1123-safe for hyphenated run ids", () => {
+  assert.equal(defaultSmokeSecretName("run-k8s-backend-1"), "gooseherd-run-token-run-k8s");
+  assert.equal(defaultSmokeJobName("run-k8s-backend-1"), "gooseherd-smoke-run-k8s");
+});
+
 test("buildRunJobSpec uses one Job per run with emptyDir workspace and runner env wiring", () => {
   const runId = "12345678-1234-5678-9abc-def012345678";
   const secretName = defaultSmokeSecretName(runId);

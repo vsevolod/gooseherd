@@ -34,6 +34,7 @@ import {
 } from "./agent-profile.js";
 import type { ControlPlaneStore } from "./runtime/control-plane-store.js";
 import { routeControlPlaneRequest, type RunnerArtifactStore } from "./runtime/control-plane-router.js";
+import { formatSandboxRuntimeLabel } from "./runtime/runtime-mode.js";
 
 /** Lean interface — dashboard only reads observer state, never mutates it. */
 export interface DashboardObserver {
@@ -674,6 +675,7 @@ export function startDashboardServer(
             appName: config.appName,
             pipelineFile: config.pipelineFile,
             sandboxRuntime: config.sandboxRuntime,
+            sandboxRuntimeLabel: formatSandboxRuntimeLabel(config.sandboxRuntime),
             sandboxStatus: {
               enabled: config.sandboxEnabled,
             },
@@ -1241,7 +1243,7 @@ export function startDashboardServer(
             sendJson(res, 400, { error: "Can only cancel in-progress runs" });
             return;
           }
-          const cancelled = runManager.cancelRun(run.id);
+          const cancelled = await runManager.cancelRun(run.id);
           sendJson(res, 200, { ok: true, cancelled });
           return;
         }

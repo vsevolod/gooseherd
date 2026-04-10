@@ -133,6 +133,8 @@ npm run local:trigger -- yourorg/yourrepo@main "make footer full width"
 
 See **[docs/deployment.md](docs/deployment.md)** for the full deployment guide — all environment variables, feature toggles, production tips, and docker-compose configuration.
 
+For DevOps teams preparing a Kubernetes deployment contract, see **[docs/installation-kubernetes.md](docs/installation-kubernetes.md)**.
+
 ## Architecture
 
 See **[docs/architecture.md](docs/architecture.md)** for the full system diagram — pipeline engine, 19 node handlers, YAML pipeline composition, and the observer auto-trigger system.
@@ -149,7 +151,7 @@ make docker-sandbox
 SANDBOX_RUNTIME=local
 # or
 SANDBOX_RUNTIME=docker
-# reserved for future Kubernetes support; rejected at startup today
+# or
 SANDBOX_RUNTIME=kubernetes
 SANDBOX_HOST_WORK_PATH=/absolute/path/to/.work
 ```
@@ -158,8 +160,8 @@ Or build everything at once with `make docker`.
 
 ### Local Kubernetes Smoke Check
 
-The stage-1 Kubernetes path is currently verified through a manual smoke run in `minikube`.
-This does not enable `SANDBOX_RUNTIME=kubernetes` for normal app runs yet; it validates the runner/control-plane contract by launching one Kubernetes `Job` and reconciling the run back into Gooseherd.
+`SANDBOX_RUNTIME=kubernetes` is supported for normal runs when the Gooseherd process can reach the Kubernetes API and the runner pod can reach `GOOSEHERD_INTERNAL_BASE_URL`.
+For the quickest local verification path, use the smoke run in `minikube`.
 
 Prerequisites:
 
@@ -178,10 +180,10 @@ What this does:
 
 - builds `gooseherd/k8s-runner:dev`
 - loads it into the `minikube` node Docker daemon
-- seeds a `kubernetes` run plus one-time `RUN_TOKEN`
-- creates a Kubernetes `Secret` and `Job`
+- creates a `kubernetes` run plus one-time `RUN_TOKEN`
+- launches a Kubernetes `Secret` and `Job`
 - waits for the runner pod to finish
-- finalizes the run via the runtime reconciler
+- reconciles the run back into Gooseherd and cleans up Kubernetes resources
 
 Expected success signal:
 

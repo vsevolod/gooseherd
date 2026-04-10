@@ -52,36 +52,47 @@ function makeConfig(overrides?: Partial<AppConfig>): AppConfig {
   } as AppConfig;
 }
 
-test("enqueueRun rejects kubernetes sandbox runtime before accepting a run", async () => {
+test("enqueueRun accepts kubernetes sandbox runtime when backend is registered", async () => {
   let createRunCalled = false;
   const manager = new RunManager(
     makeConfig({ sandboxRuntime: "kubernetes", sandboxEnabled: false }),
     {
       createRun: async () => {
         createRunCalled = true;
-        throw new Error("should not create run");
+        return {
+          id: "run-k8s-123",
+          runtime: "kubernetes",
+          status: "queued",
+          repoSlug: "org/repo",
+          task: "fix the bug",
+          baseBranch: "main",
+          branchName: "testherd/run-k8s-123",
+          requestedBy: "U1234",
+          channelId: "C1234",
+          threadTs: "1234567890.000000",
+          createdAt: new Date().toISOString()
+        };
       }
     } as any,
     {
       local: { runtime: "local", execute: async () => { throw new Error("not used"); } },
       docker: { runtime: "docker", execute: async () => { throw new Error("not used"); } },
-      kubernetes: undefined
+      kubernetes: { runtime: "kubernetes", execute: async () => { throw new Error("not used"); } }
     } as RuntimeRegistry,
     undefined
   );
 
-  await assert.rejects(
-    () => manager.enqueueRun({
-      repoSlug: "org/repo",
-      task: "fix the bug",
-      baseBranch: "main",
-      requestedBy: "U1234",
-      channelId: "C1234",
-      threadTs: "1234567890.000000"
-    }),
-    /SANDBOX_RUNTIME=kubernetes is not supported yet/
-  );
-  assert.equal(createRunCalled, false);
+  const run = await manager.enqueueRun({
+    repoSlug: "org/repo",
+    task: "fix the bug",
+    baseBranch: "main",
+    requestedBy: "U1234",
+    channelId: "C1234",
+    threadTs: "1234567890.000000"
+  });
+
+  assert.equal(createRunCalled, true);
+  assert.equal(run.runtime, "kubernetes");
 });
 
 test("enqueueRun accepts explicit local runtime when config default is kubernetes", async () => {
@@ -110,7 +121,7 @@ test("enqueueRun accepts explicit local runtime when config default is kubernete
     {
       local: { runtime: "local", execute: async () => { throw new Error("not used"); } },
       docker: { runtime: "docker", execute: async () => { throw new Error("not used"); } },
-      kubernetes: undefined
+      kubernetes: { runtime: "kubernetes", execute: async () => { throw new Error("not used"); } }
     } as RuntimeRegistry,
     undefined
   );

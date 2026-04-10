@@ -136,10 +136,27 @@ async function waitForRunDone(store: RunStore, runId: string, timeoutMs = 15000)
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const run = await store.getRun(runId);
-    if (run && (run.status === "completed" || run.status === "failed")) return;
+    if (run && (run.status === "completed" || run.status === "failed" || run.status === "cancelled")) return;
     await new Promise((r) => setTimeout(r, 100));
   }
   throw new Error(`waitForRunDone: run ${runId} did not reach terminal status within ${timeoutMs}ms`);
+}
+
+async function waitForRunStatus(
+  store: RunStore,
+  runId: string,
+  expectedStatus: RunRecord["status"],
+  timeoutMs = 15000,
+): Promise<RunRecord> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const run = await store.getRun(runId);
+    if (run?.status === expectedStatus) {
+      return run;
+    }
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  throw new Error(`waitForRunStatus: run ${runId} did not reach status ${expectedStatus} within ${timeoutMs}ms`);
 }
 
 // ── enqueueRun ─────────────────────────────────────────
@@ -397,6 +414,129 @@ test("processRun with local channel skips Slack posts and still completes", asyn
   assert.equal(stored?.status, "completed");
   assert.equal(stored?.phase, "completed");
   assert.equal(mockClient._calls.length, 0, "No Slack API calls should be made for local runs");
+
+  await testDb.cleanup();
+});
+
+test("cancelRun marks kubernetes runs as cancel_requested and finalizes them as cancelled", async () => {
+  const { store, testDb } = await setupTestStore();
+  const mockClient = makeMockSlackClient();
+  let executionStarted = false;
+
+  const runtimeRegistry: RuntimeRegistry = {
+    local: undefined,
+    docker: undefined,
+    kubernetes: {
+      runtime: "kubernetes",
+      execute: async (run, { onPhase }) => {
+        await onPhase("agent");
+        executionStarted = true;
+        while (true) {
+          const latest = await store.getRun(run.id);
+          if (latest?.status === "cancel_requested") {
+            throw new Error("Run cancelled");
+          }
+          await new Promise((resolve) => setTimeout(resolve, 25));
+        }
+      },
+    },
+  };
+  const config = makeConfig({ sandboxRuntime: "kubernetes" });
+  const manager = new RunManager(config, store, runtimeRegistry, mockClient as any);
+
+  const run = await manager.enqueueRun({
+    repoSlug: "org/repo",
+    task: "cancel the kubernetes run",
+    baseBranch: "main",
+    requestedBy: "U1234",
+    channelId: "C1234",
+    threadTs: "1234567890.000000",
+    runtime: "kubernetes",
+  });
+
+  while (!executionStarted) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+
+  assert.equal(await manager.cancelRun(run.id), true);
+  const cancelling = await waitForRunStatus(store, run.id, "cancel_requested");
+  assert.equal(cancelling.phase, "cancel_requested");
+
+  const cancelled = await waitForRunStatus(store, run.id, "cancelled");
+  assert.equal(cancelled.phase, "cancelled");
+  assert.ok(cancelled.finishedAt);
+
+  await testDb.cleanup();
+});
+
+test("cancelRun cancels queued kubernetes runs before they start executing", async () => {
+  const { store, testDb } = await setupTestStore();
+  const mockClient = makeMockSlackClient();
+  let firstRunStarted = false;
+  let releaseFirstRun: (() => void) | undefined;
+  let kubernetesExecuted = false;
+  const firstRunReleased = new Promise<void>((resolve) => {
+    releaseFirstRun = resolve;
+  });
+
+  const runtimeRegistry: RuntimeRegistry = {
+    local: {
+      runtime: "local",
+      execute: async (_run, { onPhase }) => {
+        await onPhase("agent");
+        firstRunStarted = true;
+        await firstRunReleased;
+        return {
+          branchName: "testherd/local-branch",
+          logsPath: "/tmp/test-work/local/run.log",
+          commitSha: "abc12345",
+          changedFiles: [],
+        };
+      },
+    },
+    docker: undefined,
+    kubernetes: {
+      runtime: "kubernetes",
+      execute: async () => {
+        kubernetesExecuted = true;
+        throw new Error("queued kubernetes run should not execute after cancellation");
+      },
+    },
+  };
+
+  const manager = new RunManager(makeConfig({ runnerConcurrency: 1 }), store, runtimeRegistry, mockClient as any);
+
+  const first = await manager.enqueueRun({
+    repoSlug: "org/repo",
+    task: "block the queue",
+    baseBranch: "main",
+    requestedBy: "U1234",
+    channelId: "C1234",
+    threadTs: "1234567890.000000",
+    runtime: "local",
+  });
+
+  while (!firstRunStarted) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+
+  const queued = await manager.enqueueRun({
+    repoSlug: "org/repo",
+    task: "cancel before kubernetes starts",
+    baseBranch: "main",
+    requestedBy: "U1234",
+    channelId: "C1234",
+    threadTs: "1234567890.000000",
+    runtime: "kubernetes",
+  });
+
+  assert.equal(await manager.cancelRun(queued.id), true);
+  const cancelled = await waitForRunStatus(store, queued.id, "cancelled");
+  assert.equal(cancelled.phase, "cancelled");
+
+  releaseFirstRun?.();
+  await waitForRunDone(store, first.id);
+  assert.equal(kubernetesExecuted, false);
 
   await testDb.cleanup();
 });

@@ -20,10 +20,14 @@ export interface SandboxRuntimePreflightResult {
   fallbackReason?: SandboxRuntimeFallbackReason;
 }
 
+export function formatSandboxRuntimeLabel(runtime: SandboxRuntime): string {
+  if (runtime === "local") return "Local";
+  if (runtime === "docker") return "Docker";
+  return "Kubernetes";
+}
+
 export function assertImplementedSandboxRuntime(runtime: SandboxRuntime): void {
-  if (runtime === "kubernetes") {
-    throw new Error("SANDBOX_RUNTIME=kubernetes is not supported yet");
-  }
+  void runtime;
 }
 
 export async function preflightSandboxRuntime(

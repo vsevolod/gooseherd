@@ -32,6 +32,7 @@ import { AgentProfileStore } from "./db/agent-profile-store.js";
 import { DockerExecutionBackend } from "./runtime/docker-backend.js";
 import { LocalExecutionBackend } from "./runtime/local-backend.js";
 import type { RuntimeRegistry } from "./runtime/backend.js";
+import { KubernetesExecutionBackend } from "./runtime/kubernetes-backend.js";
 import { ControlPlaneStore } from "./runtime/control-plane-store.js";
 import { FileArtifactStore } from "./runtime/file-artifact-store.js";
 import type { RunnerArtifactStore } from "./runtime/control-plane-router.js";
@@ -60,6 +61,27 @@ interface Services {
   conversationStore: ConversationStore;
   controlPlaneStore: ControlPlaneStore;
   runnerArtifactStore: RunnerArtifactStore;
+}
+
+function resolveKubernetesRunnerImage(): string {
+  return process.env.KUBERNETES_RUNNER_IMAGE?.trim() || "gooseherd/k8s-runner:dev";
+}
+
+function resolveKubernetesNamespace(): string {
+  return process.env.KUBERNETES_NAMESPACE?.trim() || "default";
+}
+
+function resolveKubernetesInternalBaseUrl(config: AppConfig): string {
+  const explicit = process.env.KUBERNETES_INTERNAL_BASE_URL?.trim();
+  if (explicit) {
+    return explicit;
+  }
+
+  if (config.dashboardPublicUrl && !/localhost|127\.0\.0\.1/.test(config.dashboardPublicUrl)) {
+    return config.dashboardPublicUrl;
+  }
+
+  return `http://host.minikube.internal:${String(config.dashboardPort)}`;
 }
 
 async function createServices(config: AppConfig, db: Database): Promise<Services> {
@@ -109,12 +131,6 @@ async function createServices(config: AppConfig, db: Database): Promise<Services
 
   const pipelineEngine = new PipelineEngine(config, githubService, hooks, containerManager);
   logInfo("Pipeline engine ready", { pipelineFile: config.pipelineFile });
-  const runtimeRegistry: RuntimeRegistry = {
-    local: new LocalExecutionBackend(pipelineEngine),
-    docker: new DockerExecutionBackend(pipelineEngine),
-    kubernetes: undefined
-  };
-
   const learningStore = new LearningStore(db);
   await learningStore.load();
 
@@ -137,6 +153,25 @@ async function createServices(config: AppConfig, db: Database): Promise<Services
     },
     store
   );
+  const publicBaseUrl = config.dashboardPublicUrl ?? `http://${config.dashboardHost}:${String(config.dashboardPort)}`;
+  const runnerArtifactStore: RunnerArtifactStore = new FileArtifactStore(
+    config.workRoot,
+    publicBaseUrl,
+    controlPlaneStore,
+  );
+  const runtimeRegistry: RuntimeRegistry = {
+    local: new LocalExecutionBackend(pipelineEngine),
+    docker: new DockerExecutionBackend(pipelineEngine),
+    kubernetes: new KubernetesExecutionBackend({
+      controlPlaneStore,
+      artifactStore: runnerArtifactStore,
+      runStore: store,
+      workRoot: config.workRoot,
+      runnerImage: resolveKubernetesRunnerImage(),
+      internalBaseUrl: resolveKubernetesInternalBaseUrl(config),
+      namespace: resolveKubernetesNamespace(),
+    }),
+  };
   const runManager = new RunManager(config, store, runtimeRegistry, webClient, hooks, pipelineStore, learningStore);
   runManager.onRunTerminal((runId, _status, runtime) => {
     if (runtime !== "kubernetes") {
@@ -148,12 +183,6 @@ async function createServices(config: AppConfig, db: Database): Promise<Services
       logError("Failed to reconcile terminal kubernetes run", { runId, error: message });
     });
   });
-  const publicBaseUrl = config.dashboardPublicUrl ?? `http://${config.dashboardHost}:${String(config.dashboardPort)}`;
-  const runnerArtifactStore: RunnerArtifactStore = new FileArtifactStore(
-    config.workRoot,
-    publicBaseUrl,
-    controlPlaneStore,
-  );
 
   const conversationStore = new ConversationStore({ db });
   await conversationStore.load();

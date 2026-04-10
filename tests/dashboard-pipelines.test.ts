@@ -269,8 +269,20 @@ describe("Dashboard Pipeline API routes", () => {
     const res = await request(port, "GET", "/api/settings");
     assert.equal(res.status, 200);
     assert.equal((res.data.config as any).sandboxRuntime, "docker");
+    assert.equal((res.data.config as any).sandboxRuntimeLabel, "Docker");
     assert.equal((res.data.config as any).sandboxStatus?.enabled, false);
     assert.equal((res.data.config as any).features?.sandbox, undefined);
+  });
+
+  test("GET /api/settings returns a human-friendly sandbox runtime label for kubernetes", async () => {
+    const port = await startServer(undefined, {
+      sandboxRuntime: "kubernetes",
+      sandboxEnabled: false,
+    });
+    const res = await request(port, "GET", "/api/settings");
+    assert.equal(res.status, 200);
+    assert.equal((res.data.config as any).sandboxRuntime, "kubernetes");
+    assert.equal((res.data.config as any).sandboxRuntimeLabel, "Kubernetes");
   });
 
   test("dashboard HTML surfaces sandbox runtime in the settings panel", async () => {
@@ -283,6 +295,7 @@ describe("Dashboard Pipeline API routes", () => {
       dashboardPort: port,
     } as AppConfig);
     assert.match(html, /Sandbox Runtime/);
+    assert.match(html, /c\.sandboxRuntimeLabel \|\| c\.sandboxRuntime \|\| ''/);
     assert.match(html, /c\.sandboxStatus && c\.sandboxStatus\.enabled === false/);
     assert.match(html, /Disabled/);
   });

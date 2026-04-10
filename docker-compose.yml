@@ -172,6 +172,7 @@ services:
       - SUPERVISOR_MAX_RETRIES_PER_DAY=${SUPERVISOR_MAX_RETRIES_PER_DAY:-20}
 
       # ── Sandbox (Docker-out-of-Docker) ──
+      - SANDBOX_RUNTIME=${SANDBOX_RUNTIME:-}
       - SANDBOX_ENABLED=${SANDBOX_ENABLED:-false}
       - SANDBOX_IMAGE=${SANDBOX_IMAGE:-gooseherd/sandbox:default}
       - SANDBOX_HOST_WORK_PATH=${SANDBOX_HOST_WORK_PATH:-}

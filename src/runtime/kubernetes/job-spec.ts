@@ -15,7 +15,7 @@ export interface KubernetesRunnerJobInput {
   jobName?: string;
 }
 
-interface SecretManifest {
+export interface SecretManifest {
   apiVersion: "v1";
   kind: "Secret";
   metadata: {
@@ -29,7 +29,7 @@ interface SecretManifest {
   };
 }
 
-interface JobManifest {
+export interface JobManifest {
   apiVersion: "batch/v1";
   kind: "Job";
   metadata: {
@@ -63,7 +63,12 @@ interface JobManifest {
 }
 
 function shortRunId(runId: string): string {
-  return runId.slice(0, 8).toLowerCase();
+  const normalized = runId
+    .toLowerCase()
+    .replace(/[^a-z0-9-]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  const shortened = normalized.slice(0, 8).replace(/-+$/g, "");
+  return shortened || "run";
 }
 
 export function defaultSmokeJobName(runId: string): string {
