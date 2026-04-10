@@ -32,6 +32,8 @@ import {
   type AgentProvider,
   type AgentProfileInput,
 } from "./agent-profile.js";
+import type { ControlPlaneStore } from "./runtime/control-plane-store.js";
+import { routeControlPlaneRequest, type RunnerArtifactStore } from "./runtime/control-plane-router.js";
 
 /** Lean interface — dashboard only reads observer state, never mutates it. */
 export interface DashboardObserver {
@@ -400,6 +402,8 @@ export function startDashboardServer(
   onSetupComplete?: () => Promise<void>,
   evalStore?: EvalStore,
   agentProfileStore?: AgentProfileStore,
+  controlPlaneStore?: ControlPlaneStore,
+  runnerArtifactStore?: RunnerArtifactStore,
 ): void {
   const githubService = GitHubService.create(config);
   let githubRepositoriesCache: CachedGitHubRepositories | undefined;
@@ -414,6 +418,11 @@ export function startDashboardServer(
 
       const requestUrl = new URL(req.url ?? "/", `http://${config.dashboardHost}:${String(config.dashboardPort)}`);
       const pathname = requestUrl.pathname;
+
+      if (controlPlaneStore && runnerArtifactStore) {
+        const handled = await routeControlPlaneRequest(req, res, pathname, controlPlaneStore, runnerArtifactStore);
+        if (handled) return;
+      }
 
       // Build auth options (async — reads wizard password hash from DB)
       const setupComplete = setupStore ? await setupStore.isComplete() : true;

@@ -17,6 +17,7 @@ import {
   jsonb,
   date,
   index,
+  uniqueIndex,
   primaryKey,
   customType,
 } from "drizzle-orm/pg-core";
@@ -79,6 +80,82 @@ export const runs = pgTable(
     index("runs_team_id_idx")
       .on(t.teamId)
       .where(sql`team_id IS NOT NULL`),
+  ]
+);
+
+// ── run control-plane ──
+
+export const runPayloads = pgTable(
+  "run_payloads",
+  {
+    runId: text("run_id").primaryKey(),
+    payloadRef: text("payload_ref").notNull(),
+    payloadJson: jsonb("payload_json").notNull().$type<Record<string, unknown>>(),
+    runtime: text("runtime").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("run_payloads_runtime_idx").on(t.runtime)]
+);
+
+export const runTokens = pgTable(
+  "run_tokens",
+  {
+    runId: text("run_id").primaryKey(),
+    tokenHash: text("token_hash").notNull(),
+    issuedAt: timestamp("issued_at", { withTimezone: true }).notNull().defaultNow(),
+    usedAt: timestamp("used_at", { withTimezone: true }),
+  },
+  (t) => [uniqueIndex("run_tokens_token_hash_idx").on(t.tokenHash)]
+);
+
+export const runEvents = pgTable(
+  "run_events",
+  {
+    runId: text("run_id").notNull(),
+    eventId: text("event_id").notNull(),
+    sequence: integer("sequence").notNull(),
+    eventType: text("event_type").notNull(),
+    payload: jsonb("payload").notNull().$type<Record<string, unknown>>().default({}),
+    timestamp: timestamp("timestamp", { withTimezone: true }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.runId, t.eventId] }),
+    index("run_events_run_id_sequence_idx").on(t.runId, t.sequence),
+  ]
+);
+
+export const runCompletions = pgTable(
+  "run_completions",
+  {
+    id: bigserial("id", { mode: "number" }).primaryKey(),
+    runId: text("run_id").notNull(),
+    idempotencyKey: text("idempotency_key").notNull(),
+    status: text("status").notNull(),
+    payload: jsonb("payload").notNull().$type<Record<string, unknown>>(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("run_completions_run_id_idempotency_key_idx").on(t.runId, t.idempotencyKey),
+    index("run_completions_run_id_created_at_idx").on(t.runId, t.createdAt),
+  ]
+);
+
+export const runArtifacts = pgTable(
+  "run_artifacts",
+  {
+    runId: text("run_id").notNull(),
+    artifactKey: text("artifact_key").notNull(),
+    artifactClass: text("artifact_class").notNull(),
+    status: text("status").notNull(),
+    metadata: jsonb("metadata").notNull().$type<Record<string, unknown>>().default({}),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.runId, t.artifactKey] }),
+    index("run_artifacts_run_id_idx").on(t.runId),
   ]
 );
 

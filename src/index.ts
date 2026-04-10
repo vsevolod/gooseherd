@@ -32,6 +32,9 @@ import { AgentProfileStore } from "./db/agent-profile-store.js";
 import { DockerExecutionBackend } from "./runtime/docker-backend.js";
 import { LocalExecutionBackend } from "./runtime/local-backend.js";
 import type { RuntimeRegistry } from "./runtime/backend.js";
+import { ControlPlaneStore } from "./runtime/control-plane-store.js";
+import { FileArtifactStore } from "./runtime/file-artifact-store.js";
+import type { RunnerArtifactStore } from "./runtime/control-plane-router.js";
 import {
   hasSandboxRuntimeHotReloadChange,
   preflightSandboxRuntime
@@ -54,6 +57,8 @@ interface Services {
   webClient: import("@slack/web-api").WebClient | undefined;
   runManager: RunManager;
   conversationStore: ConversationStore;
+  controlPlaneStore: ControlPlaneStore;
+  runnerArtifactStore: RunnerArtifactStore;
 }
 
 async function createServices(config: AppConfig, db: Database): Promise<Services> {
@@ -118,6 +123,13 @@ async function createServices(config: AppConfig, db: Database): Promise<Services
   const webClient = config.slackBotToken ? new WebClient(config.slackBotToken) : undefined;
 
   const runManager = new RunManager(config, store, runtimeRegistry, webClient, hooks, pipelineStore, learningStore);
+  const controlPlaneStore = new ControlPlaneStore(db);
+  const publicBaseUrl = config.dashboardPublicUrl ?? `http://${config.dashboardHost}:${String(config.dashboardPort)}`;
+  const runnerArtifactStore: RunnerArtifactStore = new FileArtifactStore(
+    config.workRoot,
+    publicBaseUrl,
+    controlPlaneStore,
+  );
 
   const conversationStore = new ConversationStore({ db });
   await conversationStore.load();
@@ -126,6 +138,7 @@ async function createServices(config: AppConfig, db: Database): Promise<Services
   return {
     config, store, agentProfileStore, githubService, memoryProvider, hooks, containerManager,
     pipelineEngine, pipelineStore, learningStore, evalStore, webClient, runManager, conversationStore,
+    controlPlaneStore, runnerArtifactStore,
   };
 }
 
@@ -286,6 +299,8 @@ async function main(): Promise<void> {
       },
       svc.evalStore,
       svc.agentProfileStore,
+      svc.controlPlaneStore,
+      svc.runnerArtifactStore,
     );
   }
 
