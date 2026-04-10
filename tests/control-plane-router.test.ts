@@ -199,6 +199,7 @@ async function startTestServer(
     undefined,
     undefined,
     undefined,
+    undefined,
     controlPlaneStore,
     resolvedRunnerArtifactStore,
   );
