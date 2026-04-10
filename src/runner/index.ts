@@ -1,5 +1,5 @@
 import dotenv from "dotenv";
-dotenv.config({ override: true });
+dotenv.config();
 
 import type { RunEnvelope } from "../runtime/control-plane-types.js";
 import type { RunRecord } from "../types.js";

@@ -98,6 +98,14 @@ test("local RBAC manifest grants Gooseherd the resource verbs required by the ku
       && rule.verbs.includes("get")),
     true,
   );
+  assert.equal(
+    rules.some((rule) =>
+      Array.isArray(rule.resources)
+      && rule.resources.includes("secrets")
+      && Array.isArray(rule.verbs)
+      && rule.verbs.includes("get")),
+    false,
+  );
 });
 
 test("local gooseherd deployment mounts work/data volumes and uses config plus secret env sources", async () => {
@@ -120,6 +128,19 @@ test("local gooseherd deployment mounts work/data volumes and uses config plus s
   const volumeMounts = container.volumeMounts as Array<Record<string, unknown>>;
   assert.equal(volumeMounts.some((mount) => mount.mountPath === "/app/.work"), true);
   assert.equal(volumeMounts.some((mount) => mount.mountPath === "/app/data"), true);
+});
+
+test("local manifests include a restrictive runner NetworkPolicy", async () => {
+  const [policy] = await loadYaml("kubernetes/local/gooseherd-runner-network-policy.yaml");
+  const manifest = requireObject(policy);
+  const spec = requireObject(manifest.spec);
+  const egress = spec.egress as Array<Record<string, unknown>>;
+
+  assert.equal(manifest.kind, "NetworkPolicy");
+  assert.equal(requireObject(manifest.metadata).name, "gooseherd-runner-egress");
+  assert.deepEqual(spec.policyTypes, ["Egress"]);
+  assert.equal(Array.isArray(egress), true);
+  assert.equal(egress.length, 1);
 });
 
 test("local gooseherd service exposes dashboard and webhook ports", async () => {

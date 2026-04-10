@@ -3,6 +3,8 @@ import type {
   RunnerCompletionPayload,
   RunnerEventPayload,
 } from "../runtime/control-plane-types.js";
+import { sleep } from "../utils/sleep.js";
+import { isRecord } from "../utils/type-guards.js";
 
 const DEFAULT_MAX_ATTEMPTS = 5;
 const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
@@ -30,28 +32,12 @@ interface ArtifactTargetsResponse {
   targets: Record<string, ArtifactTarget>;
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 function isRetryableStatus(status: number): boolean {
   return status === 408 || status >= 500;
 }
 
 function isTerminalStatus(status: number): boolean {
   return TERMINAL_STATUSES.has(status);
-}
-
-async function parseJsonOrEmpty<T>(res: Response): Promise<T> {
-  try {
-    return await res.json() as T;
-  } catch {
-    return {} as T;
-  }
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function isRunEnvelope(value: unknown): value is RunEnvelope {
@@ -106,6 +92,12 @@ function isTimeoutError(error: unknown): boolean {
 }
 
 type RequestSuffix = "payload" | "artifacts" | "events" | "complete" | "cancellation";
+
+function nextRetryDelayMs(attempt: number): number {
+  const baseDelay = BASE_RETRY_DELAY_MS * Math.pow(2, attempt - 1);
+  const jitter = Math.random() * baseDelay * 0.5;
+  return Math.round(baseDelay + jitter);
+}
 
 export class RunnerControlPlaneClient {
   constructor(private readonly cfg: RunnerControlPlaneClientConfig) {}
@@ -168,7 +160,7 @@ export class RunnerControlPlaneClient {
           const message = error instanceof Error ? error.message : String(error);
           throw new Error(`retry budget exhausted for ${suffix}: ${message}`);
         }
-        await sleep(BASE_RETRY_DELAY_MS * attempt);
+        await sleep(nextRetryDelayMs(attempt));
         continue;
       } finally {
         clearTimeout(timeoutHandle);
@@ -178,7 +170,7 @@ export class RunnerControlPlaneClient {
         if (onSuccess) {
           return onSuccess(response, suffix);
         }
-        return parseJsonOrEmpty<T>(response);
+        return undefined as T;
       }
 
       if (isTerminalStatus(response.status)) {
@@ -189,7 +181,7 @@ export class RunnerControlPlaneClient {
         throw new Error(`retry budget exhausted for ${suffix}: status ${response.status}`);
       }
 
-      await sleep(BASE_RETRY_DELAY_MS * attempt);
+      await sleep(nextRetryDelayMs(attempt));
     }
 
     throw new Error(`retry budget exhausted for ${suffix}`);

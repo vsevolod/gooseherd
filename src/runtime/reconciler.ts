@@ -1,7 +1,6 @@
 import type { RunStore } from "../store.js";
 import type { ControlPlaneStore } from "./control-plane-store.js";
-
-type TerminalFact = "succeeded" | "failed" | "missing" | "running";
+import type { TerminalFact } from "./terminal-fact.js";
 
 interface RuntimeFactsReader {
   getTerminalFact(runId: string): Promise<TerminalFact>;
@@ -26,6 +25,16 @@ export class RuntimeReconciler {
         phase: "cancelled",
         finishedAt: new Date().toISOString(),
         error: run.error,
+      });
+      return;
+    }
+
+    if (completion?.payload.status === "success" && fact !== "succeeded" && fact !== "running") {
+      await this.runStore.updateRun(runId, {
+        status: "failed",
+        phase: "failed",
+        finishedAt: new Date().toISOString(),
+        error: "success completion contradicted by runtime state",
       });
       return;
     }

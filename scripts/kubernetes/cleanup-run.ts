@@ -1,14 +1,11 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { readFile } from "node:fs/promises";
+import type { SmokeMetadata as SeedSmokeMetadata } from "./seed-smoke-run.ts";
 
 const execFileAsync = promisify(execFile);
 
-interface SmokeMetadata {
-  jobName: string;
-  namespace: string;
-  secretName: string;
-}
+type SmokeMetadata = Pick<SeedSmokeMetadata, "jobName" | "namespace" | "secretName">;
 
 function usage(): never {
   throw new Error("Usage: node scripts/kubernetes/cleanup-run.ts <metadata-path>");

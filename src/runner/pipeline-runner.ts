@@ -5,6 +5,8 @@ import type {
   RunnerEventPayload,
 } from "../runtime/control-plane-types.js";
 import { RunnerControlPlaneClient } from "./control-plane-client.js";
+import { sleep } from "../utils/sleep.js";
+import { isRecord } from "../utils/type-guards.js";
 
 export type RunnerPipelineExecutor = (
   run: RunRecord,
@@ -19,10 +21,6 @@ export type RunnerEventEmitter = (
 ) => Promise<void>;
 
 const DEFAULT_CANCELLATION_POLL_MS = 5_000;
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 function readString(record: Record<string, unknown>, key: string): string | undefined {
   const value = record[key];
@@ -80,10 +78,6 @@ function readCancellationPollMs(): number {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_CANCELLATION_POLL_MS;
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 export async function runPipelineRunner(
   client: RunnerControlPlaneClient,
   executePipeline: RunnerPipelineExecutor,
@@ -116,12 +110,16 @@ export async function runPipelineRunner(
 
   const pollingPromise = (async () => {
     while (!stopPolling && !abortController.signal.aborted) {
-      const cancellation = await client.getCancellation();
-      if (cancellation.cancelRequested) {
-        cancellationObserved = true;
-        await emit("run.cancellation_observed", { runId: run.id });
-        abortController.abort();
-        return;
+      try {
+        const cancellation = await client.getCancellation();
+        if (cancellation.cancelRequested) {
+          cancellationObserved = true;
+          await emit("run.cancellation_observed", { runId: run.id });
+          abortController.abort();
+          return;
+        }
+      } catch {
+        // Transient polling failures must not flip a successful run into failed.
       }
       await sleep(cancellationPollMs);
     }

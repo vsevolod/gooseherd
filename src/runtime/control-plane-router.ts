@@ -3,6 +3,7 @@ import type { RunnerCompletionPayload, RunnerEventPayload } from "./control-plan
 import { ControlPlaneConflictError, type ControlPlaneStore } from "./control-plane-store.js";
 import { authenticateRunnerRequest } from "./control-plane-auth.js";
 import type { ArtifactStore } from "./artifact-store.js";
+import { isRecord } from "../utils/type-guards.js";
 
 const MAX_BODY_BYTES = 1024 * 1024;
 
@@ -60,12 +61,6 @@ function parseRoute(pathname: string): { runId: string; action: ControlPlaneActi
   }
 }
 
-export type RunnerArtifactStore = ArtifactStore;
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 function validateRunnerEventPayload(value: unknown): value is RunnerEventPayload {
   if (!isRecord(value)) return false;
   if (typeof value.eventId !== "string" || value.eventId.trim() === "") return false;
@@ -89,7 +84,7 @@ export async function routeControlPlaneRequest(
   res: ServerResponse,
   pathname: string,
   controlPlaneStore: ControlPlaneStore,
-  artifactStore: RunnerArtifactStore,
+  artifactStore: ArtifactStore,
 ): Promise<boolean> {
   const route = parseRoute(pathname);
   if (!route) return false;
@@ -104,7 +99,7 @@ export async function routeControlPlaneRequest(
   if (req.method === "GET" && action === "payload") {
     const payload = await controlPlaneStore.getPayload(runId);
     if (!payload) {
-      sendJson(res, 404, { error: `Run payload not found: ${runId}` });
+      sendJson(res, 404, { error: "Run payload not found" });
       return true;
     }
     sendJson(res, 200, payload);
@@ -114,7 +109,7 @@ export async function routeControlPlaneRequest(
   if (req.method === "GET" && action === "artifacts") {
     const payload = await controlPlaneStore.getPayload(runId);
     if (!payload) {
-      sendJson(res, 404, { error: `Run payload not found: ${runId}` });
+      sendJson(res, 404, { error: "Run payload not found" });
       return true;
     }
     sendJson(res, 200, await artifactStore.allocateTargets(runId));

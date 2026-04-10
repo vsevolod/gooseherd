@@ -1,6 +1,5 @@
 import type { ExecutionResult, RunRecord } from "../types.js";
 import type { PipelinePhase } from "../pipeline/pipeline-engine.js";
-import { assertImplementedSandboxRuntime } from "./runtime-mode.js";
 
 export interface RunExecutionContext {
   onPhase: (phase: PipelinePhase) => Promise<void>;
@@ -25,9 +24,6 @@ export function getRuntimeBackend<Runtime extends RunRecord["runtime"]>(
   const backend = runtimeRegistry[runtime];
   if (backend) {
     return backend;
-  }
-  if (runtime === "kubernetes") {
-    assertImplementedSandboxRuntime(runtime);
   }
   throw new Error(`No execution backend registered for runtime: ${runtime}`);
 }

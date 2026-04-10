@@ -2,10 +2,7 @@ import { mkdir } from "node:fs/promises";
 import path from "node:path";
 import type { ArtifactStore } from "./artifact-store.js";
 import type { ControlPlaneStore } from "./control-plane-store.js";
-
-function normalizeBaseUrl(baseUrl: string): string {
-  return baseUrl.endsWith("/") ? baseUrl.slice(0, -1) : baseUrl;
-}
+import { normalizeBaseUrl } from "./url.js";
 
 export class FileArtifactStore implements ArtifactStore {
   constructor(

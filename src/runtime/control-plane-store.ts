@@ -2,6 +2,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { desc, eq, sql } from "drizzle-orm";
 import type { Database } from "../db/index.js";
 import { runArtifacts, runCompletions, runEvents, runPayloads, runTokens, runs } from "../db/schema.js";
+import { safeTokenCompare } from "../dashboard/auth.js";
 import type {
   CreateRunEnvelopeInput,
   IssuedRunToken,
@@ -13,6 +14,10 @@ import type {
 
 type PayloadRow = typeof runPayloads.$inferSelect;
 type CompletionRow = typeof runCompletions.$inferSelect;
+type TokenRow = typeof runTokens.$inferSelect;
+
+const RUN_TOKEN_CACHE_TTL_MS = 60_000;
+const DEFAULT_RUN_TOKEN_TTL_MS = 20 * 60 * 1_000;
 
 function toRunEnvelope(row: PayloadRow): RunEnvelope {
   return {
@@ -51,6 +56,13 @@ export class ControlPlaneConflictError extends Error {
 }
 
 export class ControlPlaneStore {
+  private readonly tokenCache = new Map<string, {
+    tokenHash: string;
+    expiresAt: number;
+    usedAt: Date | null;
+    cachedAt: number;
+  }>();
+
   constructor(private readonly db: Database) {}
 
   async createRunEnvelope(input: CreateRunEnvelopeInput): Promise<RunEnvelope> {
@@ -65,40 +77,49 @@ export class ControlPlaneStore {
         createdAt: now,
         updatedAt: now,
       })
-      .onConflictDoUpdate({
+      .onConflictDoNothing({
         target: runPayloads.runId,
-        set: {
-          payloadRef: input.payloadRef,
-          payloadJson: input.payloadJson,
-          runtime: input.runtime,
-          updatedAt: now,
-        },
       })
       .returning();
-    return toRunEnvelope(inserted[0]!);
+    if (inserted[0]) {
+      return toRunEnvelope(inserted[0]);
+    }
+
+    const existing = await this.getPayload(input.runId);
+    if (!existing) {
+      throw new Error(`Run payload missing after insert conflict for ${input.runId}`);
+    }
+    return existing;
   }
 
-  async issueRunToken(runId: string): Promise<IssuedRunToken> {
+  async issueRunToken(runId: string, ttlMs = DEFAULT_RUN_TOKEN_TTL_MS): Promise<IssuedRunToken> {
     const now = new Date();
     const token = randomBytes(24).toString("hex");
     const tokenHash = hashToken(token);
-    await this.db
+    const expiresAt = new Date(now.getTime() + Math.max(1, ttlMs));
+    const inserted = await this.db
       .insert(runTokens)
       .values({
         runId,
         tokenHash,
         issuedAt: now,
         usedAt: null,
+        expiresAt,
       })
-      .onConflictDoUpdate({
+      .onConflictDoNothing({
         target: runTokens.runId,
-        set: {
-          tokenHash,
-          issuedAt: now,
-          usedAt: null,
-        },
-      });
+      })
+      .returning({ runId: runTokens.runId });
+    if (inserted.length === 0) {
+      throw new ControlPlaneConflictError(`Run token already issued for run ${runId}`);
+    }
+    this.tokenCache.delete(runId);
     return { token };
+  }
+
+  async revokeRunToken(runId: string): Promise<void> {
+    await this.db.delete(runTokens).where(eq(runTokens.runId, runId));
+    this.tokenCache.delete(runId);
   }
 
   async recordCompletion(runId: string, payload: RunnerCompletionPayload): Promise<RunCompletionRecord> {
@@ -223,15 +244,70 @@ export class ControlPlaneStore {
   }
 
   async validateRunToken(runId: string, token: string): Promise<boolean> {
-    const rows = await this.db
-      .select()
-      .from(runTokens)
-      .where(eq(runTokens.runId, runId))
-      .limit(1);
+    const tokenHash = hashToken(token);
+    const cached = this.readCachedRunToken(runId);
+    if (cached) {
+      if (!safeTokenCompare(cached.tokenHash, tokenHash)) {
+        return false;
+      }
+      await this.stampTokenUse(runId, cached.usedAt);
+      return true;
+    }
+
+    const rows = await this.db.select().from(runTokens).where(eq(runTokens.runId, runId)).limit(1);
     const row = rows[0];
-    if (!row || row.usedAt) {
+    if (!row || row.expiresAt.getTime() <= Date.now()) {
+      this.tokenCache.delete(runId);
       return false;
     }
-    return row.tokenHash === hashToken(token);
+    if (!safeTokenCompare(row.tokenHash, tokenHash)) {
+      return false;
+    }
+
+    await this.stampTokenUse(runId, row.usedAt);
+    if (!row.usedAt) {
+      row.usedAt = new Date();
+    }
+    this.cacheRunToken(runId, row);
+    return true;
+  }
+
+  private readCachedRunToken(runId: string): { tokenHash: string; expiresAt: number; usedAt: Date | null; cachedAt: number } | null {
+    const cached = this.tokenCache.get(runId);
+    if (!cached) {
+      return null;
+    }
+    if (cached.cachedAt + RUN_TOKEN_CACHE_TTL_MS <= Date.now() || cached.expiresAt <= Date.now()) {
+      this.tokenCache.delete(runId);
+      return null;
+    }
+    return cached;
+  }
+
+  private cacheRunToken(runId: string, row: TokenRow): void {
+    this.tokenCache.set(runId, {
+      tokenHash: row.tokenHash,
+      expiresAt: row.expiresAt.getTime(),
+      usedAt: row.usedAt,
+      cachedAt: Date.now(),
+    });
+  }
+
+  private async stampTokenUse(runId: string, usedAt: Date | null): Promise<void> {
+    if (usedAt) {
+      return;
+    }
+
+    const stampedAt = new Date();
+    await this.db
+      .update(runTokens)
+      .set({ usedAt: stampedAt })
+      .where(eq(runTokens.runId, runId));
+
+    const cached = this.tokenCache.get(runId);
+    if (cached) {
+      cached.usedAt = stampedAt;
+      cached.cachedAt = Date.now();
+    }
   }
 }

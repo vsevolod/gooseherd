@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  assertImplementedSandboxRuntime,
   formatSandboxRuntimeLabel,
   hasSandboxRuntimeHotReloadChange,
   preflightSandboxRuntime,
@@ -41,12 +40,6 @@ test("resolveSandboxRuntime maps legacy SANDBOX_ENABLED=true to docker", () => {
 
 test("resolveSandboxRuntime maps legacy SANDBOX_ENABLED=false to local", () => {
   assert.equal(resolveSandboxRuntime({ SANDBOX_ENABLED: "false" }), "local");
-});
-
-test("assertImplementedSandboxRuntime allows implemented runtimes", () => {
-  assert.doesNotThrow(() => assertImplementedSandboxRuntime("local"));
-  assert.doesNotThrow(() => assertImplementedSandboxRuntime("docker"));
-  assert.doesNotThrow(() => assertImplementedSandboxRuntime("kubernetes"));
 });
 
 test("formatSandboxRuntimeLabel returns human-friendly runtime labels", () => {

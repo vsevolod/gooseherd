@@ -4,10 +4,7 @@ dotenv.config({ override: true });
 import { readFile } from "node:fs/promises";
 import { closeDatabase, initDatabase } from "../../src/db/index.js";
 import { RunStore } from "../../src/store.js";
-
-interface SmokeMetadata {
-  runId: string;
-}
+import type { SmokeMetadata } from "./seed-smoke-run.ts";
 
 function usage(): never {
   throw new Error("Usage: node --import tsx scripts/kubernetes/request-cancel.ts <metadata-path>");

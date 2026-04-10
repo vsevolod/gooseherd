@@ -6,7 +6,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { KubernetesExecutionBackend } from "../src/runtime/kubernetes-backend.js";
 import type { RunCompletionRecord } from "../src/runtime/control-plane-types.js";
 import type { RunRecord } from "../src/types.js";
-import type { KubernetesResourceClient } from "../src/runtime/kubernetes/resource-client.js";
+import { KubernetesResourceClient, type KubernetesResourceClient as KubernetesResourceClientType } from "../src/runtime/kubernetes/resource-client.js";
 
 function makeRun(overrides?: Partial<RunRecord>): RunRecord {
   return {
@@ -42,12 +42,13 @@ function makeCompletion(overrides?: Partial<RunCompletionRecord["payload"]>): Ru
   };
 }
 
-test("kubernetes backend launches job, waits for success, and cleans up resources", async () => {
+test("kubernetes backend launches job, waits for success, redacts manifest token, and cleans up resources", async () => {
   const tmpRoot = await mkdtemp(path.join(os.tmpdir(), "gooseherd-k8s-backend-"));
   const resourceCalls: string[] = [];
   let jobReads = 0;
+  let revokedRunId: string | undefined;
 
-  const resourceClient: Pick<KubernetesResourceClient, "applySecret" | "applyJob" | "readJob" | "listPodsForJob" | "readJobLogs" | "deleteJob" | "deletePodsForJob" | "deleteSecret"> = {
+  const resourceClient: Pick<KubernetesResourceClientType, "applySecret" | "applyJob" | "readJob" | "listPodsForJob" | "readJobLogs" | "deleteJob" | "deletePodsForJob" | "deleteSecret"> = {
     applySecret: async () => {
       resourceCalls.push("applySecret");
     },
@@ -83,6 +84,9 @@ test("kubernetes backend launches job, waits for success, and cleans up resource
       createRunEnvelope: async () => undefined,
       issueRunToken: async () => ({ token: "issued-token" }),
       getLatestCompletion: async () => makeCompletion(),
+      revokeRunToken: async (runId: string) => {
+        revokedRunId = runId;
+      },
     },
     artifactStore: {
       allocateTargets: async () => ({
@@ -122,6 +126,9 @@ test("kubernetes backend launches job, waits for success, and cleans up resource
     const manifest = await readFile(manifestPath, "utf8");
     assert.match(manifest, /host\.minikube\.internal:8787/);
     assert.match(manifest, /pipelines\/kubernetes-smoke\.yml/);
+    assert.doesNotMatch(manifest, /issued-token/);
+    assert.match(manifest, /REDACTED/);
+    assert.equal(revokedRunId, "run-k8s-backend-1");
 
     assert.deepEqual(resourceCalls, [
       "applySecret",
@@ -142,7 +149,7 @@ test("kubernetes backend launches job, waits for success, and cleans up resource
 test("kubernetes backend fails when runtime becomes terminal without completion", async () => {
   const tmpRoot = await mkdtemp(path.join(os.tmpdir(), "gooseherd-k8s-backend-fail-"));
 
-  const resourceClient: Pick<KubernetesResourceClient, "applySecret" | "applyJob" | "readJob" | "listPodsForJob" | "readJobLogs" | "deleteJob" | "deletePodsForJob" | "deleteSecret"> = {
+  const resourceClient: Pick<KubernetesResourceClientType, "applySecret" | "applyJob" | "readJob" | "listPodsForJob" | "readJobLogs" | "deleteJob" | "deletePodsForJob" | "deleteSecret"> = {
     applySecret: async () => undefined,
     applyJob: async () => undefined,
     readJob: async () => ({ status: { conditions: [{ type: "Failed", status: "True" }] } }),
@@ -160,6 +167,7 @@ test("kubernetes backend fails when runtime becomes terminal without completion"
       createRunEnvelope: async () => undefined,
       issueRunToken: async () => ({ token: "issued-token" }),
       getLatestCompletion: async () => null,
+      revokeRunToken: async () => undefined,
     },
     artifactStore: {
       allocateTargets: async () => ({ targets: {} }),
@@ -186,5 +194,38 @@ test("kubernetes backend fails when runtime becomes terminal without completion"
     );
   } finally {
     await rm(tmpRoot, { recursive: true, force: true });
+  }
+});
+
+test("kubernetes backend does not load kubeconfig until it needs a real resource client", async () => {
+  const original = KubernetesResourceClient.fromDefaultConfig;
+  Object.assign(KubernetesResourceClient, {
+    fromDefaultConfig: () => {
+      throw new Error("constructor should not eagerly read kubeconfig");
+    },
+  });
+
+  try {
+    const backend = new KubernetesExecutionBackend({
+      controlPlaneStore: {
+        createRunEnvelope: async () => undefined,
+        issueRunToken: async () => ({ token: "issued-token" }),
+        getLatestCompletion: async () => makeCompletion(),
+        revokeRunToken: async () => undefined,
+      },
+      artifactStore: {
+        allocateTargets: async () => ({ targets: {} }),
+      },
+      runStore: {
+        getRun: async () => undefined,
+      },
+      workRoot: "/tmp/gooseherd-k8s-backend",
+      runnerImage: "gooseherd/k8s-runner:dev",
+      internalBaseUrl: "http://host.minikube.internal:8787",
+    });
+
+    assert.equal(backend.runtime, "kubernetes");
+  } finally {
+    Object.assign(KubernetesResourceClient, { fromDefaultConfig: original });
   }
 });

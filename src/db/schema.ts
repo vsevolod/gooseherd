@@ -20,6 +20,7 @@ import {
   uniqueIndex,
   primaryKey,
   customType,
+  foreignKey,
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 
@@ -88,31 +89,46 @@ export const runs = pgTable(
 export const runPayloads = pgTable(
   "run_payloads",
   {
-    runId: text("run_id").primaryKey(),
+    runId: uuid("run_id").primaryKey(),
     payloadRef: text("payload_ref").notNull(),
     payloadJson: jsonb("payload_json").notNull().$type<Record<string, unknown>>(),
     runtime: text("runtime").notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [index("run_payloads_runtime_idx").on(t.runtime)]
+  (t) => [
+    foreignKey({
+      columns: [t.runId],
+      foreignColumns: [runs.id],
+      name: "run_payloads_run_id_runs_id_fk",
+    }).onDelete("cascade"),
+    index("run_payloads_runtime_idx").on(t.runtime),
+  ]
 );
 
 export const runTokens = pgTable(
   "run_tokens",
   {
-    runId: text("run_id").primaryKey(),
+    runId: uuid("run_id").primaryKey(),
     tokenHash: text("token_hash").notNull(),
     issuedAt: timestamp("issued_at", { withTimezone: true }).notNull().defaultNow(),
     usedAt: timestamp("used_at", { withTimezone: true }),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
   },
-  (t) => [uniqueIndex("run_tokens_token_hash_idx").on(t.tokenHash)]
+  (t) => [
+    foreignKey({
+      columns: [t.runId],
+      foreignColumns: [runs.id],
+      name: "run_tokens_run_id_runs_id_fk",
+    }).onDelete("cascade"),
+    uniqueIndex("run_tokens_token_hash_idx").on(t.tokenHash),
+  ]
 );
 
 export const runEvents = pgTable(
   "run_events",
   {
-    runId: text("run_id").notNull(),
+    runId: uuid("run_id").notNull(),
     eventId: text("event_id").notNull(),
     sequence: integer("sequence").notNull(),
     eventType: text("event_type").notNull(),
@@ -121,8 +137,13 @@ export const runEvents = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
+    foreignKey({
+      columns: [t.runId],
+      foreignColumns: [runs.id],
+      name: "run_events_run_id_runs_id_fk",
+    }).onDelete("cascade"),
     primaryKey({ columns: [t.runId, t.eventId] }),
-    index("run_events_run_id_sequence_idx").on(t.runId, t.sequence),
+    uniqueIndex("run_events_run_id_sequence_idx").on(t.runId, t.sequence),
   ]
 );
 
@@ -130,13 +151,18 @@ export const runCompletions = pgTable(
   "run_completions",
   {
     id: bigserial("id", { mode: "number" }).primaryKey(),
-    runId: text("run_id").notNull(),
+    runId: uuid("run_id").notNull(),
     idempotencyKey: text("idempotency_key").notNull(),
     status: text("status").notNull(),
     payload: jsonb("payload").notNull().$type<Record<string, unknown>>(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
+    foreignKey({
+      columns: [t.runId],
+      foreignColumns: [runs.id],
+      name: "run_completions_run_id_runs_id_fk",
+    }).onDelete("cascade"),
     uniqueIndex("run_completions_run_id_idempotency_key_idx").on(t.runId, t.idempotencyKey),
     index("run_completions_run_id_created_at_idx").on(t.runId, t.createdAt),
   ]
@@ -145,7 +171,7 @@ export const runCompletions = pgTable(
 export const runArtifacts = pgTable(
   "run_artifacts",
   {
-    runId: text("run_id").notNull(),
+    runId: uuid("run_id").notNull(),
     artifactKey: text("artifact_key").notNull(),
     artifactClass: text("artifact_class").notNull(),
     status: text("status").notNull(),
@@ -154,6 +180,11 @@ export const runArtifacts = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
+    foreignKey({
+      columns: [t.runId],
+      foreignColumns: [runs.id],
+      name: "run_artifacts_run_id_runs_id_fk",
+    }).onDelete("cascade"),
     primaryKey({ columns: [t.runId, t.artifactKey] }),
     index("run_artifacts_run_id_idx").on(t.runId),
   ]

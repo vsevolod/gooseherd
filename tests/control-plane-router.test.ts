@@ -7,13 +7,13 @@ import { mkdir, mkdtemp } from "node:fs/promises";
 import { eq } from "drizzle-orm";
 import type { AppConfig } from "../src/config.js";
 import { startDashboardServer } from "../src/dashboard-server.js";
-import { runCompletions, runEvents } from "../src/db/schema.js";
+import { runCompletions, runEvents, runs } from "../src/db/schema.js";
 import { ControlPlaneStore } from "../src/runtime/control-plane-store.js";
 import { FileArtifactStore } from "../src/runtime/file-artifact-store.js";
 import { RunStore } from "../src/store.js";
 import { createTestDb } from "./helpers/test-db.js";
 import type { Database } from "../src/db/index.js";
-import type { RunnerArtifactStore } from "../src/runtime/control-plane-router.js";
+import type { ArtifactStore } from "../src/runtime/artifact-store.js";
 
 let nextPort = 30700 + Math.floor(Math.random() * 1000);
 function getPort(): number {
@@ -110,6 +110,22 @@ function makeConfig(port: number, dataDir: string): AppConfig {
   } as AppConfig;
 }
 
+async function insertRun(db: Database, runId: string): Promise<void> {
+  await db.insert(runs).values({
+    id: runId,
+    runtime: "kubernetes",
+    status: "running",
+    phase: "queued",
+    repoSlug: "owner/repo",
+    task: "control-plane router test",
+    baseBranch: "main",
+    branchName: "goose/control-plane-router-test",
+    requestedBy: "U1",
+    channelId: "C1",
+    threadTs: runId,
+  });
+}
+
 async function request(
   port: number,
   method: string,
@@ -173,7 +189,7 @@ async function waitForServer(port: number, maxMs = 3000): Promise<void> {
 async function startTestServer(
   db: Database,
   controlPlaneStore: ControlPlaneStore,
-  runnerArtifactStore?: RunnerArtifactStore,
+  runnerArtifactStore?: ArtifactStore,
 ): Promise<number> {
   const port = getPort();
   const tmpDir = await mkdtemp(path.join(os.tmpdir(), "gooseherd-control-plane-"));
@@ -210,15 +226,17 @@ async function startTestServer(
 test("GET /internal/runs/:runId/payload requires a valid bearer token", async () => {
   const { db, cleanup } = await createTestDb();
   const controlPlaneStore = new ControlPlaneStore(db);
+  const runId = "11111111-1111-1111-1111-111111111111";
+  await insertRun(db, runId);
   await controlPlaneStore.createRunEnvelope({
-    runId: "run-1",
-    payloadRef: "payload/run-1",
+    runId,
+    payloadRef: `payload/${runId}`,
     payloadJson: { task: "fix bug" },
     runtime: "kubernetes",
   });
 
   const port = await startTestServer(db, controlPlaneStore);
-  const res = await request(port, "GET", "/internal/runs/run-1/payload");
+  const res = await request(port, "GET", `/internal/runs/${runId}/payload`);
 
   assert.equal(res.status, 401);
   await cleanup();
@@ -227,10 +245,12 @@ test("GET /internal/runs/:runId/payload requires a valid bearer token", async ()
 test("GET /internal/runs/:runId/payload returns 404 when payload is missing", async () => {
   const { db, cleanup } = await createTestDb();
   const controlPlaneStore = new ControlPlaneStore(db);
-  const { token } = await controlPlaneStore.issueRunToken("run-missing");
+  const runId = "22222222-2222-2222-2222-222222222222";
+  await insertRun(db, runId);
+  const { token } = await controlPlaneStore.issueRunToken(runId);
 
   const port = await startTestServer(db, controlPlaneStore);
-  const res = await authedRequest(port, token, "GET", "/internal/runs/run-missing/payload");
+  const res = await authedRequest(port, token, "GET", `/internal/runs/${runId}/payload`);
 
   assert.equal(res.status, 404);
   await cleanup();
@@ -239,7 +259,9 @@ test("GET /internal/runs/:runId/payload returns 404 when payload is missing", as
 test("GET /internal/runs/:runId/artifacts returns 404 when payload is missing", async () => {
   const { db, cleanup } = await createTestDb();
   const controlPlaneStore = new ControlPlaneStore(db);
-  const { token } = await controlPlaneStore.issueRunToken("run-missing");
+  const runId = "33333333-3333-3333-3333-333333333333";
+  await insertRun(db, runId);
+  const { token } = await controlPlaneStore.issueRunToken(runId);
   let allocateCalls = 0;
 
   const port = await startTestServer(db, controlPlaneStore, {
@@ -248,7 +270,7 @@ test("GET /internal/runs/:runId/artifacts returns 404 when payload is missing", 
       return { runId, targets: [] };
     },
   });
-  const res = await authedRequest(port, token, "GET", "/internal/runs/run-missing/artifacts");
+  const res = await authedRequest(port, token, "GET", `/internal/runs/${runId}/artifacts`);
 
   assert.equal(res.status, 404);
   assert.equal(allocateCalls, 0);
@@ -258,17 +280,19 @@ test("GET /internal/runs/:runId/artifacts returns 404 when payload is missing", 
 test("GET /internal/runs/:runId/artifacts returns stable upload targets", async () => {
   const { db, cleanup } = await createTestDb();
   const controlPlaneStore = new ControlPlaneStore(db);
+  const runId = "44444444-4444-4444-4444-444444444444";
+  await insertRun(db, runId);
   await controlPlaneStore.createRunEnvelope({
-    runId: "run-1",
-    payloadRef: "payload/run-1",
+    runId,
+    payloadRef: `payload/${runId}`,
     payloadJson: { task: "fix bug" },
     runtime: "kubernetes",
   });
-  const { token } = await controlPlaneStore.issueRunToken("run-1");
+  const { token } = await controlPlaneStore.issueRunToken(runId);
 
   const port = await startTestServer(db, controlPlaneStore);
-  const first = await authedRequest(port, token, "GET", "/internal/runs/run-1/artifacts");
-  const second = await authedRequest(port, token, "GET", "/internal/runs/run-1/artifacts");
+  const first = await authedRequest(port, token, "GET", `/internal/runs/${runId}/artifacts`);
+  const second = await authedRequest(port, token, "GET", `/internal/runs/${runId}/artifacts`);
 
   assert.deepEqual(first.data.targets, second.data.targets);
   assert.equal((first.data.targets as Record<string, { class: string }>).log.class, "raw_run_log");
@@ -278,13 +302,15 @@ test("GET /internal/runs/:runId/artifacts returns stable upload targets", async 
 test("POST /internal/runs/:runId/events deduplicates repeated eventId", async () => {
   const { db, cleanup } = await createTestDb();
   const controlPlaneStore = new ControlPlaneStore(db);
+  const runId = "55555555-5555-5555-5555-555555555555";
+  await insertRun(db, runId);
   await controlPlaneStore.createRunEnvelope({
-    runId: "run-1",
-    payloadRef: "payload/run-1",
+    runId,
+    payloadRef: `payload/${runId}`,
     payloadJson: { task: "fix bug" },
     runtime: "kubernetes",
   });
-  const { token } = await controlPlaneStore.issueRunToken("run-1");
+  const { token } = await controlPlaneStore.issueRunToken(runId);
 
   const port = await startTestServer(db, controlPlaneStore);
   const eventBody = {
@@ -295,12 +321,12 @@ test("POST /internal/runs/:runId/events deduplicates repeated eventId", async ()
     payload: { phase: "running" },
   };
 
-  const first = await authedRequest(port, token, "POST", "/internal/runs/run-1/events", eventBody);
-  const second = await authedRequest(port, token, "POST", "/internal/runs/run-1/events", eventBody);
+  const first = await authedRequest(port, token, "POST", `/internal/runs/${runId}/events`, eventBody);
+  const second = await authedRequest(port, token, "POST", `/internal/runs/${runId}/events`, eventBody);
   assert.equal(first.status, 202);
   assert.equal(second.status, 202);
 
-  const eventRows = await db.select().from(runEvents).where(eq(runEvents.runId, "run-1"));
+  const eventRows = await db.select().from(runEvents).where(eq(runEvents.runId, runId));
   assert.equal(eventRows.length, 1);
   await cleanup();
 });
@@ -308,16 +334,18 @@ test("POST /internal/runs/:runId/events deduplicates repeated eventId", async ()
 test("POST /internal/runs/:runId/events returns 422 for invalid payload shape", async () => {
   const { db, cleanup } = await createTestDb();
   const controlPlaneStore = new ControlPlaneStore(db);
+  const runId = "66666666-6666-6666-6666-666666666666";
+  await insertRun(db, runId);
   await controlPlaneStore.createRunEnvelope({
-    runId: "run-1",
-    payloadRef: "payload/run-1",
+    runId,
+    payloadRef: `payload/${runId}`,
     payloadJson: { task: "fix bug" },
     runtime: "kubernetes",
   });
-  const { token } = await controlPlaneStore.issueRunToken("run-1");
+  const { token } = await controlPlaneStore.issueRunToken(runId);
 
   const port = await startTestServer(db, controlPlaneStore);
-  const res = await authedRequest(port, token, "POST", "/internal/runs/run-1/events", {
+  const res = await authedRequest(port, token, "POST", `/internal/runs/${runId}/events`, {
     eventType: "run.phase_changed",
     timestamp: new Date().toISOString(),
     sequence: 1,
@@ -330,16 +358,18 @@ test("POST /internal/runs/:runId/events returns 422 for invalid payload shape", 
 test("POST /internal/runs/:runId/complete returns 422 for invalid payload shape", async () => {
   const { db, cleanup } = await createTestDb();
   const controlPlaneStore = new ControlPlaneStore(db);
+  const runId = "77777777-7777-7777-7777-777777777777";
+  await insertRun(db, runId);
   await controlPlaneStore.createRunEnvelope({
-    runId: "run-1",
-    payloadRef: "payload/run-1",
+    runId,
+    payloadRef: `payload/${runId}`,
     payloadJson: { task: "fix bug" },
     runtime: "kubernetes",
   });
-  const { token } = await controlPlaneStore.issueRunToken("run-1");
+  const { token } = await controlPlaneStore.issueRunToken(runId);
 
   const port = await startTestServer(db, controlPlaneStore);
-  const res = await authedRequest(port, token, "POST", "/internal/runs/run-1/complete", {
+  const res = await authedRequest(port, token, "POST", `/internal/runs/${runId}/complete`, {
     status: "success",
     artifactState: "complete",
   });
@@ -351,21 +381,23 @@ test("POST /internal/runs/:runId/complete returns 422 for invalid payload shape"
 test("POST /internal/runs/:runId/complete returns 409 for conflicting completion idempotency key", async () => {
   const { db, cleanup } = await createTestDb();
   const controlPlaneStore = new ControlPlaneStore(db);
+  const runId = "88888888-8888-8888-8888-888888888888";
+  await insertRun(db, runId);
   await controlPlaneStore.createRunEnvelope({
-    runId: "run-1",
-    payloadRef: "payload/run-1",
+    runId,
+    payloadRef: `payload/${runId}`,
     payloadJson: { task: "fix bug" },
     runtime: "kubernetes",
   });
-  const { token } = await controlPlaneStore.issueRunToken("run-1");
+  const { token } = await controlPlaneStore.issueRunToken(runId);
 
   const port = await startTestServer(db, controlPlaneStore);
-  const first = await authedRequest(port, token, "POST", "/internal/runs/run-1/complete", {
+  const first = await authedRequest(port, token, "POST", `/internal/runs/${runId}/complete`, {
     idempotencyKey: "complete-1",
     status: "success",
     artifactState: "complete",
   });
-  const second = await authedRequest(port, token, "POST", "/internal/runs/run-1/complete", {
+  const second = await authedRequest(port, token, "POST", `/internal/runs/${runId}/complete`, {
     idempotencyKey: "complete-2",
     status: "success",
     artifactState: "complete",
@@ -373,7 +405,7 @@ test("POST /internal/runs/:runId/complete returns 409 for conflicting completion
 
   assert.equal(first.status, 202);
   assert.equal(second.status, 409);
-  const completionRows = await db.select().from(runCompletions).where(eq(runCompletions.runId, "run-1"));
+  const completionRows = await db.select().from(runCompletions).where(eq(runCompletions.runId, runId));
   assert.equal(completionRows.length, 1);
   assert.equal(completionRows[0]?.idempotencyKey, "complete-1");
   await cleanup();

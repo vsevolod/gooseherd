@@ -1,3 +1,5 @@
+import { RUNNER_PROTOCOL_VERSION } from "../protocol-version.js";
+
 export interface KubernetesRunnerSecretInput {
   runId: string;
   namespace: string;
@@ -52,6 +54,25 @@ export interface JobManifest {
           image: string;
           imagePullPolicy: "IfNotPresent";
           volumeMounts: Array<{ name: "work"; mountPath: "/work" }>;
+          securityContext: {
+            allowPrivilegeEscalation: false;
+            capabilities: {
+              drop: ["ALL"];
+            };
+            readOnlyRootFilesystem: false;
+            runAsNonRoot: true;
+            runAsUser: 1000;
+          };
+          resources: {
+            requests: {
+              cpu: "250m";
+              memory: "512Mi";
+            };
+            limits: {
+              cpu: "1";
+              memory: "1Gi";
+            };
+          };
           env: Array<
             | { name: string; value: string }
             | { name: string; valueFrom: { secretKeyRef: { name: string; key: "RUN_TOKEN" } } }
@@ -71,16 +92,19 @@ function shortRunId(runId: string): string {
   return shortened || "run";
 }
 
-export function defaultSmokeJobName(runId: string): string {
-  return `gooseherd-smoke-${shortRunId(runId)}`;
+export function defaultJobName(runId: string): string {
+  return `gooseherd-run-${shortRunId(runId)}`;
 }
 
-export function defaultSmokeSecretName(runId: string): string {
+export function defaultSecretName(runId: string): string {
   return `gooseherd-run-token-${shortRunId(runId)}`;
 }
 
+export const defaultSmokeJobName = defaultJobName;
+export const defaultSmokeSecretName = defaultSecretName;
+
 export function buildRunTokenSecretManifest(input: KubernetesRunnerSecretInput): SecretManifest {
-  const secretName = input.secretName ?? defaultSmokeSecretName(input.runId);
+  const secretName = input.secretName ?? defaultSecretName(input.runId);
 
   return {
     apiVersion: "v1",
@@ -101,7 +125,7 @@ export function buildRunTokenSecretManifest(input: KubernetesRunnerSecretInput):
 }
 
 export function buildRunJobSpec(input: KubernetesRunnerJobInput): JobManifest {
-  const jobName = input.jobName ?? defaultSmokeJobName(input.runId);
+  const jobName = input.jobName ?? defaultJobName(input.runId);
 
   return {
     apiVersion: "batch/v1",
@@ -133,6 +157,25 @@ export function buildRunJobSpec(input: KubernetesRunnerJobInput): JobManifest {
               image: input.image,
               imagePullPolicy: "IfNotPresent",
               volumeMounts: [{ name: "work", mountPath: "/work" }],
+              securityContext: {
+                allowPrivilegeEscalation: false,
+                capabilities: {
+                  drop: ["ALL"],
+                },
+                readOnlyRootFilesystem: false,
+                runAsNonRoot: true,
+                runAsUser: 1000,
+              },
+              resources: {
+                requests: {
+                  cpu: "250m",
+                  memory: "512Mi",
+                },
+                limits: {
+                  cpu: "1",
+                  memory: "1Gi",
+                },
+              },
               env: [
                 { name: "RUN_ID", value: input.runId },
                 {
@@ -147,6 +190,7 @@ export function buildRunJobSpec(input: KubernetesRunnerJobInput): JobManifest {
                 { name: "GOOSEHERD_INTERNAL_BASE_URL", value: input.internalBaseUrl },
                 { name: "WORK_ROOT", value: "/work" },
                 { name: "PIPELINE_FILE", value: input.pipelineFile },
+                { name: "GOOSEHERD_RUNNER_PROTOCOL_VERSION", value: RUNNER_PROTOCOL_VERSION },
                 { name: "DRY_RUN", value: "1" },
                 { name: "DASHBOARD_ENABLED", value: "false" },
                 { name: "OBSERVER_ENABLED", value: "false" },

@@ -146,7 +146,7 @@ test("resource client lists pods for a job and reads logs from the first pod", a
   });
 
   const pods = await client.listPodsForJob("gooseherd-smoke-run-1", "gooseherd");
-  const logs = await client.readJobLogs("gooseherd-smoke-run-1", "gooseherd");
+  const logs = await client.readJobLogs("gooseherd-smoke-run-1", "gooseherd", 1024);
 
   assert.equal(pods.length, 1);
   assert.equal(logs, "runner completed\n");
@@ -170,6 +170,7 @@ test("resource client lists pods for a job and reads logs from the first pod", a
       param: {
         name: "gooseherd-smoke-run-1-abc",
         namespace: "gooseherd",
+        limitBytes: 1024,
       },
     },
   ]);

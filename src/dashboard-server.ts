@@ -33,7 +33,8 @@ import {
   type AgentProfileInput,
 } from "./agent-profile.js";
 import type { ControlPlaneStore } from "./runtime/control-plane-store.js";
-import { routeControlPlaneRequest, type RunnerArtifactStore } from "./runtime/control-plane-router.js";
+import { routeControlPlaneRequest } from "./runtime/control-plane-router.js";
+import type { ArtifactStore } from "./runtime/artifact-store.js";
 import { formatSandboxRuntimeLabel } from "./runtime/runtime-mode.js";
 
 /** Lean interface — dashboard only reads observer state, never mutates it. */
@@ -404,7 +405,7 @@ export function startDashboardServer(
   evalStore?: EvalStore,
   agentProfileStore?: AgentProfileStore,
   controlPlaneStore?: ControlPlaneStore,
-  runnerArtifactStore?: RunnerArtifactStore,
+  runnerArtifactStore?: ArtifactStore,
 ): void {
   const githubService = GitHubService.create(config);
   let githubRepositoriesCache: CachedGitHubRepositories | undefined;

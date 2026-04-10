@@ -35,7 +35,7 @@ import type { RuntimeRegistry } from "./runtime/backend.js";
 import { KubernetesExecutionBackend } from "./runtime/kubernetes-backend.js";
 import { ControlPlaneStore } from "./runtime/control-plane-store.js";
 import { FileArtifactStore } from "./runtime/file-artifact-store.js";
-import type { RunnerArtifactStore } from "./runtime/control-plane-router.js";
+import type { ArtifactStore } from "./runtime/artifact-store.js";
 import { RuntimeReconciler } from "./runtime/reconciler.js";
 import {
   hasSandboxRuntimeHotReloadChange,
@@ -60,7 +60,7 @@ interface Services {
   runManager: RunManager;
   conversationStore: ConversationStore;
   controlPlaneStore: ControlPlaneStore;
-  runnerArtifactStore: RunnerArtifactStore;
+  runnerArtifactStore: ArtifactStore;
 }
 
 function resolveKubernetesRunnerImage(): string {
@@ -154,15 +154,13 @@ async function createServices(config: AppConfig, db: Database): Promise<Services
     store
   );
   const publicBaseUrl = config.dashboardPublicUrl ?? `http://${config.dashboardHost}:${String(config.dashboardPort)}`;
-  const runnerArtifactStore: RunnerArtifactStore = new FileArtifactStore(
+  const runnerArtifactStore: ArtifactStore = new FileArtifactStore(
     config.workRoot,
     publicBaseUrl,
     controlPlaneStore,
   );
-  const runtimeRegistry: RuntimeRegistry = {
-    local: new LocalExecutionBackend(pipelineEngine),
-    docker: new DockerExecutionBackend(pipelineEngine),
-    kubernetes: new KubernetesExecutionBackend({
+  const kubernetesBackend = config.sandboxRuntime === "kubernetes"
+    ? new KubernetesExecutionBackend({
       controlPlaneStore,
       artifactStore: runnerArtifactStore,
       runStore: store,
@@ -170,7 +168,12 @@ async function createServices(config: AppConfig, db: Database): Promise<Services
       runnerImage: resolveKubernetesRunnerImage(),
       internalBaseUrl: resolveKubernetesInternalBaseUrl(config),
       namespace: resolveKubernetesNamespace(),
-    }),
+    })
+    : undefined;
+  const runtimeRegistry: RuntimeRegistry = {
+    local: new LocalExecutionBackend(pipelineEngine),
+    docker: new DockerExecutionBackend(pipelineEngine),
+    kubernetes: kubernetesBackend,
   };
   const runManager = new RunManager(config, store, runtimeRegistry, webClient, hooks, pipelineStore, learningStore);
   runManager.onRunTerminal((runId, _status, runtime) => {

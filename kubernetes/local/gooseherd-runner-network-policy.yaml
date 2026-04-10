@@ -1,0 +1,19 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: gooseherd-runner-egress
+  namespace: gooseherd
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: gooseherd-runner
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: gooseherd
+      ports:
+        - protocol: TCP
+          port: 8787

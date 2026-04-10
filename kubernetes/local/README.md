@@ -11,7 +11,7 @@ The intended flow is:
 2. build/load the runner image
 3. create the `gooseherd` namespace and local PostgreSQL
 4. create the Gooseherd app secret from your local `.env`
-5. apply RBAC, config, deployment, and service
+5. apply RBAC, NetworkPolicy, config, deployment, and service
 6. bootstrap the setup wizard through a temporary local `port-forward`
 7. reach the dashboard with `kubectl port-forward`
 

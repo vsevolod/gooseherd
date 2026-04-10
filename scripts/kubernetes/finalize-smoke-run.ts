@@ -5,13 +5,9 @@ import { readFile } from "node:fs/promises";
 import { closeDatabase, initDatabase } from "../../src/db/index.js";
 import { ControlPlaneStore } from "../../src/runtime/control-plane-store.js";
 import { RuntimeReconciler } from "../../src/runtime/reconciler.js";
+import type { TerminalFact } from "../../src/runtime/terminal-fact.js";
 import { RunStore } from "../../src/store.js";
-
-type TerminalFact = "succeeded" | "failed" | "missing" | "running";
-
-interface SmokeMetadata {
-  runId: string;
-}
+import type { SmokeMetadata } from "./seed-smoke-run.ts";
 
 function usage(): never {
   throw new Error(

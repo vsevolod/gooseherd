@@ -3,22 +3,24 @@ import path from "node:path";
 import type { ExecutionResult, RunRecord } from "../types.js";
 import type { RunExecutionBackend, RunExecutionContext } from "./backend.js";
 import type { ControlPlaneStore } from "./control-plane-store.js";
-import type { RunnerArtifactStore } from "./control-plane-router.js";
+import type { ArtifactStore } from "./artifact-store.js";
 import type { RunCompletionRecord } from "./control-plane-types.js";
 import type { RunStore } from "../store.js";
 import {
   buildRunJobSpec,
   buildRunTokenSecretManifest,
-  defaultSmokeJobName,
-  defaultSmokeSecretName,
+  defaultJobName,
+  defaultSecretName,
 } from "./kubernetes/job-spec.js";
 import { KubernetesResourceClient } from "./kubernetes/resource-client.js";
-
-type TerminalFact = "succeeded" | "failed" | "missing" | "running";
+import type { TerminalFact } from "./terminal-fact.js";
+import { sleep } from "../utils/sleep.js";
+import { normalizeBaseUrl } from "./url.js";
+import { redactSecretToken, renderManifestYaml } from "./kubernetes/manifest-yaml.js";
 
 interface KubernetesExecutionBackendDeps {
-  controlPlaneStore: Pick<ControlPlaneStore, "createRunEnvelope" | "issueRunToken" | "getLatestCompletion">;
-  artifactStore: Pick<RunnerArtifactStore, "allocateTargets">;
+  controlPlaneStore: Pick<ControlPlaneStore, "createRunEnvelope" | "issueRunToken" | "getLatestCompletion" | "revokeRunToken">;
+  artifactStore: Pick<ArtifactStore, "allocateTargets">;
   runStore: Pick<RunStore, "getRun">;
   workRoot: string;
   runnerImage: string;
@@ -29,95 +31,18 @@ interface KubernetesExecutionBackendDeps {
   waitTimeoutMs?: number;
 }
 
-function toYamlValue(value: string): string {
-  return JSON.stringify(value);
-}
-
-function renderManifestYaml(
-  secret: ReturnType<typeof buildRunTokenSecretManifest>,
-  job: ReturnType<typeof buildRunJobSpec>,
-): string {
-  return [
-    "apiVersion: v1",
-    "kind: Secret",
-    "metadata:",
-    `  name: ${secret.metadata.name}`,
-    `  namespace: ${secret.metadata.namespace}`,
-    "  labels:",
-    `    app.kubernetes.io/name: ${secret.metadata.labels["app.kubernetes.io/name"]}`,
-    `    gooseherd.run/id: ${secret.metadata.labels["gooseherd.run/id"]}`,
-    "type: Opaque",
-    "stringData:",
-    `  RUN_TOKEN: ${toYamlValue(secret.stringData.RUN_TOKEN)}`,
-    "---",
-    "apiVersion: batch/v1",
-    "kind: Job",
-    "metadata:",
-    `  name: ${job.metadata.name}`,
-    `  namespace: ${job.metadata.namespace}`,
-    "  labels:",
-    `    app.kubernetes.io/name: ${job.metadata.labels["app.kubernetes.io/name"]}`,
-    `    gooseherd.run/id: ${job.metadata.labels["gooseherd.run/id"]}`,
-    "spec:",
-    `  backoffLimit: ${job.spec.backoffLimit}`,
-    `  ttlSecondsAfterFinished: ${job.spec.ttlSecondsAfterFinished}`,
-    "  template:",
-    "    metadata:",
-    "      labels:",
-    `        app.kubernetes.io/name: ${job.spec.template.metadata.labels["app.kubernetes.io/name"]}`,
-    `        gooseherd.run/id: ${job.spec.template.metadata.labels["gooseherd.run/id"]}`,
-    "    spec:",
-    `      restartPolicy: ${job.spec.template.spec.restartPolicy}`,
-    "      volumes:",
-    "        - name: work",
-    "          emptyDir: {}",
-    "      containers:",
-    "        - name: runner",
-    `          image: ${job.spec.template.spec.containers[0]!.image}`,
-    `          imagePullPolicy: ${job.spec.template.spec.containers[0]!.imagePullPolicy}`,
-    "          volumeMounts:",
-    "            - name: work",
-    "              mountPath: /work",
-    "          env:",
-    ...job.spec.template.spec.containers[0]!.env.map((entry) => {
-      if ("value" in entry) {
-        return [
-          `            - name: ${entry.name}`,
-          `              value: ${toYamlValue(entry.value)}`,
-        ].join("\n");
-      }
-      return [
-        `            - name: ${entry.name}`,
-        "              valueFrom:",
-        "                secretKeyRef:",
-        `                  name: ${entry.valueFrom.secretKeyRef.name}`,
-        `                  key: ${entry.valueFrom.secretKeyRef.key}`,
-      ].join("\n");
-    }),
-    "",
-  ].join("\n");
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function normalizeBaseUrl(baseUrl: string): string {
-  return baseUrl.endsWith("/") ? baseUrl.slice(0, -1) : baseUrl;
-}
-
 export class KubernetesExecutionBackend implements RunExecutionBackend<"kubernetes"> {
   readonly runtime = "kubernetes" as const;
   private readonly namespace: string;
   private readonly pollIntervalMs: number;
   private readonly waitTimeoutMs: number;
-  private readonly resourceClient: Pick<KubernetesResourceClient, "applySecret" | "applyJob" | "readJob" | "listPodsForJob" | "readJobLogs" | "deleteJob" | "deletePodsForJob" | "deleteSecret">;
+  private resourceClientInstance: Pick<KubernetesResourceClient, "applySecret" | "applyJob" | "readJob" | "listPodsForJob" | "readJobLogs" | "deleteJob" | "deletePodsForJob" | "deleteSecret"> | undefined;
 
   constructor(private readonly deps: KubernetesExecutionBackendDeps) {
     this.namespace = deps.namespace ?? "default";
     this.pollIntervalMs = Math.max(250, deps.pollIntervalMs ?? 2_000);
     this.waitTimeoutMs = Math.max(5_000, deps.waitTimeoutMs ?? 10 * 60 * 1_000);
-    this.resourceClient = deps.resourceClient ?? KubernetesResourceClient.fromDefaultConfig();
+    this.resourceClientInstance = deps.resourceClient;
   }
 
   async execute(run: RunRecord & { runtime: "kubernetes" }, ctx: RunExecutionContext): Promise<ExecutionResult> {
@@ -138,9 +63,9 @@ export class KubernetesExecutionBackend implements RunExecutionBackend<"kubernet
     });
     await this.deps.artifactStore.allocateTargets(run.id);
 
-    const token = await this.deps.controlPlaneStore.issueRunToken(run.id);
-    const secretName = defaultSmokeSecretName(run.id);
-    const jobName = defaultSmokeJobName(run.id);
+    const token = await this.deps.controlPlaneStore.issueRunToken(run.id, this.waitTimeoutMs * 2);
+    const secretName = defaultSecretName(run.id);
+    const jobName = defaultJobName(run.id);
     const secret = buildRunTokenSecretManifest({
       runId: run.id,
       namespace: this.namespace,
@@ -156,7 +81,7 @@ export class KubernetesExecutionBackend implements RunExecutionBackend<"kubernet
       pipelineFile: ctx.pipelineFile ?? "pipelines/pipeline.yml",
       jobName,
     });
-    await writeFile(manifestPath, renderManifestYaml(secret, job), "utf8");
+    await writeFile(manifestPath, renderManifestYaml(redactSecretToken(secret), job), "utf8");
 
     try {
       await this.resourceClient.applySecret(secret);
@@ -166,8 +91,13 @@ export class KubernetesExecutionBackend implements RunExecutionBackend<"kubernet
       const completion = await this.deps.controlPlaneStore.getLatestCompletion(run.id);
       return this.translateOutcome(run, completion, runtimeFact);
     } finally {
-      await this.cleanup(jobName, secretName).catch(() => {});
+      await this.cleanup(run.id, jobName, secretName).catch(() => {});
     }
+  }
+
+  private get resourceClient(): Pick<KubernetesResourceClient, "applySecret" | "applyJob" | "readJob" | "listPodsForJob" | "readJobLogs" | "deleteJob" | "deletePodsForJob" | "deleteSecret"> {
+    this.resourceClientInstance ??= KubernetesResourceClient.fromDefaultConfig();
+    return this.resourceClientInstance;
   }
 
   private async waitForTerminalFact(
@@ -258,10 +188,11 @@ export class KubernetesExecutionBackend implements RunExecutionBackend<"kubernet
     throw new Error("Kubernetes runtime did not produce a terminal success result");
   }
 
-  private async cleanup(jobName: string, secretName: string): Promise<void> {
+  private async cleanup(runId: string, jobName: string, secretName: string): Promise<void> {
     await this.resourceClient.deleteJob(jobName, this.namespace);
     await this.resourceClient.deletePodsForJob(jobName, this.namespace);
     await this.resourceClient.deleteSecret(secretName, this.namespace);
+    await this.deps.controlPlaneStore.revokeRunToken(runId);
   }
 
   private async captureLogs(jobName: string, logsPath: string): Promise<void> {

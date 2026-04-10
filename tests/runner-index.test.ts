@@ -19,6 +19,22 @@ interface CapturedCompletion {
   reason?: string;
 }
 
+function createRunnerEnv(overrides: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const {
+    SANDBOX_RUNTIME: _sandboxRuntime,
+    SANDBOX_ENABLED: _sandboxEnabled,
+    WORK_ROOT: _workRoot,
+    PIPELINE_FILE: _pipelineFile,
+    DRY_RUN: _dryRun,
+    ...baseEnv
+  } = process.env;
+
+  return {
+    ...baseEnv,
+    ...overrides,
+  };
+}
+
 function jsonResponse(res: ServerResponse, status: number, payload: unknown): void {
   const body = JSON.stringify(payload);
   res.statusCode = status;
@@ -118,15 +134,14 @@ test("runner bootstrap fetches payload, emits run.started, completes with succes
     ["--import", "tsx", "src/runner/index.ts"],
     {
       cwd: process.cwd(),
-      env: {
-        ...process.env,
+      env: createRunnerEnv({
         RUN_ID: runId,
         RUN_TOKEN: token,
         GOOSEHERD_INTERNAL_BASE_URL: baseUrl,
         PIPELINE_FILE: pipelinePath,
         WORK_ROOT: tmpRoot,
         DRY_RUN: "1",
-      },
+      }),
       stdio: ["ignore", "pipe", "pipe"],
     },
   );
@@ -257,8 +272,7 @@ test("runner observes cancellation, emits cancellation event, and exits non-zero
     ["--import", "tsx", "src/runner/index.ts"],
     {
       cwd: process.cwd(),
-      env: {
-        ...process.env,
+      env: createRunnerEnv({
         RUN_ID: runId,
         RUN_TOKEN: token,
         GOOSEHERD_INTERNAL_BASE_URL: baseUrl,
@@ -266,7 +280,7 @@ test("runner observes cancellation, emits cancellation event, and exits non-zero
         WORK_ROOT: tmpRoot,
         DRY_RUN: "1",
         RUNNER_CANCELLATION_POLL_MS: "25",
-      },
+      }),
       stdio: ["ignore", "pipe", "pipe"],
     },
   );
@@ -289,6 +303,122 @@ test("runner observes cancellation, emits cancellation event, and exits non-zero
   assert.equal(completions.length, 1);
   assert.equal(completions[0]?.status, "failed");
   assert.equal(completions[0]?.reason, "Run cancelled");
+
+  await rm(tmpRoot, { recursive: true, force: true });
+});
+
+test("runner keeps a successful run successful when cancellation polling has a transient 500", async () => {
+  const runId = "run-cancel-transient";
+  const token = "runner-token";
+  const tmpRoot = await mkdtemp(path.join(os.tmpdir(), "gooseherd-runner-transient-cancel-test-"));
+  const pipelinePath = path.join(tmpRoot, "runner-transient-cancel-test-pipeline.yml");
+  await writeFile(
+    pipelinePath,
+    [
+      "version: 1",
+      "name: runner-transient-cancel-test",
+      "nodes:",
+      "  - id: notify",
+      "    type: deterministic",
+      "    action: notify",
+    ].join("\n"),
+    "utf8",
+  );
+
+  const completions: CapturedCompletion[] = [];
+  let cancellationChecks = 0;
+
+  const server = http.createServer(async (req, res) => {
+    assert.equal(req.headers.authorization, `Bearer ${token}`);
+
+    if (req.method === "GET" && req.url === `/internal/runs/${runId}/payload`) {
+      jsonResponse(res, 200, {
+        runId,
+        payloadRef: "payload/run-cancel-transient",
+        payloadJson: {
+          run: {
+            id: runId,
+            runtime: "kubernetes",
+            repoSlug: "org/repo",
+            task: "runner transient cancellation integration test",
+            baseBranch: "main",
+            branchName: "goose/test-cancel-transient",
+            requestedBy: "U123",
+            channelId: "runner",
+            threadTs: "runner-thread",
+            createdAt: new Date("2026-04-10T00:00:00.000Z").toISOString(),
+          },
+        },
+        runtime: "kubernetes",
+        createdAt: new Date("2026-04-10T00:00:00.000Z").toISOString(),
+        updatedAt: new Date("2026-04-10T00:00:00.000Z").toISOString(),
+      });
+      return;
+    }
+
+    if (req.method === "GET" && req.url === `/internal/runs/${runId}/cancellation`) {
+      cancellationChecks += 1;
+      if (cancellationChecks === 1) {
+        jsonResponse(res, 500, { error: "temporary upstream failure" });
+        return;
+      }
+      jsonResponse(res, 200, { cancelRequested: false });
+      return;
+    }
+
+    if (req.method === "POST" && req.url === `/internal/runs/${runId}/events`) {
+      jsonResponse(res, 202, { accepted: true });
+      return;
+    }
+
+    if (req.method === "POST" && req.url === `/internal/runs/${runId}/complete`) {
+      const body = await readJsonBody(req) as { status: string; artifactState: string; reason?: string };
+      completions.push({ status: body.status, artifactState: body.artifactState, reason: body.reason });
+      jsonResponse(res, 202, { accepted: true });
+      return;
+    }
+
+    jsonResponse(res, 404, { error: "not found" });
+  });
+
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+
+  const child = spawn(
+    process.execPath,
+    ["--import", "tsx", "src/runner/index.ts"],
+    {
+      cwd: process.cwd(),
+      env: createRunnerEnv({
+        RUN_ID: runId,
+        RUN_TOKEN: token,
+        GOOSEHERD_INTERNAL_BASE_URL: baseUrl,
+        PIPELINE_FILE: pipelinePath,
+        WORK_ROOT: tmpRoot,
+        DRY_RUN: "1",
+        RUNNER_CANCELLATION_POLL_MS: "25",
+      }),
+      stdio: ["ignore", "pipe", "pipe"],
+    },
+  );
+
+  let stderr = "";
+  child.stderr.on("data", (chunk) => {
+    stderr += chunk.toString();
+  });
+
+  const [code, signal] = await once(child, "exit") as [number | null, NodeJS.Signals | null];
+
+  await new Promise<void>((resolve, reject) => {
+    server.close((error) => (error ? reject(error) : resolve()));
+  });
+
+  assert.equal(signal, null);
+  assert.equal(code, 0, stderr);
+  assert.equal(cancellationChecks >= 1, true);
+  assert.equal(completions.length, 1);
+  assert.equal(completions[0]?.status, "success");
 
   await rm(tmpRoot, { recursive: true, force: true });
 });

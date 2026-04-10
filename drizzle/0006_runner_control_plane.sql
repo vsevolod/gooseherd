@@ -1,5 +1,5 @@
 CREATE TABLE IF NOT EXISTS "run_payloads" (
-  "run_id" text PRIMARY KEY NOT NULL,
+  "run_id" uuid PRIMARY KEY NOT NULL REFERENCES "runs"("id") ON DELETE CASCADE,
   "payload_ref" text NOT NULL,
   "payload_json" jsonb NOT NULL,
   "runtime" text NOT NULL,
@@ -8,14 +8,15 @@ CREATE TABLE IF NOT EXISTS "run_payloads" (
 );
 --> statement-breakpoint
 CREATE TABLE IF NOT EXISTS "run_tokens" (
-  "run_id" text PRIMARY KEY NOT NULL,
+  "run_id" uuid PRIMARY KEY NOT NULL REFERENCES "runs"("id") ON DELETE CASCADE,
   "token_hash" text NOT NULL,
   "issued_at" timestamp with time zone DEFAULT now() NOT NULL,
-  "used_at" timestamp with time zone
+  "used_at" timestamp with time zone,
+  "expires_at" timestamp with time zone NOT NULL
 );
 --> statement-breakpoint
 CREATE TABLE IF NOT EXISTS "run_events" (
-  "run_id" text NOT NULL,
+  "run_id" uuid NOT NULL REFERENCES "runs"("id") ON DELETE CASCADE,
   "event_id" text NOT NULL,
   "sequence" integer NOT NULL,
   "event_type" text NOT NULL,
@@ -27,7 +28,7 @@ CREATE TABLE IF NOT EXISTS "run_events" (
 --> statement-breakpoint
 CREATE TABLE IF NOT EXISTS "run_completions" (
   "id" bigserial PRIMARY KEY NOT NULL,
-  "run_id" text NOT NULL,
+  "run_id" uuid NOT NULL REFERENCES "runs"("id") ON DELETE CASCADE,
   "idempotency_key" text NOT NULL,
   "status" text NOT NULL,
   "payload" jsonb NOT NULL,
@@ -35,7 +36,7 @@ CREATE TABLE IF NOT EXISTS "run_completions" (
 );
 --> statement-breakpoint
 CREATE TABLE IF NOT EXISTS "run_artifacts" (
-  "run_id" text NOT NULL,
+  "run_id" uuid NOT NULL REFERENCES "runs"("id") ON DELETE CASCADE,
   "artifact_key" text NOT NULL,
   "artifact_class" text NOT NULL,
   "status" text NOT NULL,
@@ -47,7 +48,7 @@ CREATE TABLE IF NOT EXISTS "run_artifacts" (
 --> statement-breakpoint
 CREATE UNIQUE INDEX IF NOT EXISTS "run_tokens_token_hash_idx" ON "run_tokens" ("token_hash");
 --> statement-breakpoint
-CREATE INDEX IF NOT EXISTS "run_events_run_id_sequence_idx" ON "run_events" ("run_id", "sequence");
+CREATE UNIQUE INDEX IF NOT EXISTS "run_events_run_id_sequence_idx" ON "run_events" ("run_id", "sequence");
 --> statement-breakpoint
 CREATE UNIQUE INDEX IF NOT EXISTS "run_completions_run_id_idempotency_key_idx"
   ON "run_completions" ("run_id", "idempotency_key");

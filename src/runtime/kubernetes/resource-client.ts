@@ -28,7 +28,7 @@ export interface KubernetesCoreApi {
 }
 
 export interface KubernetesPodLogReader {
-  readNamespacedPodLog(param: { name: string; namespace: string }): Promise<string>;
+  readNamespacedPodLog(param: { name: string; namespace: string; limitBytes?: number }): Promise<string>;
 }
 
 interface KubernetesResourceClientDeps {
@@ -54,10 +54,11 @@ function isNotFoundError(error: unknown): boolean {
 class DefaultPodLogReader implements KubernetesPodLogReader {
   constructor(private readonly coreApi: CoreV1Api) {}
 
-  async readNamespacedPodLog(param: { name: string; namespace: string }): Promise<string> {
+  async readNamespacedPodLog(param: { name: string; namespace: string; limitBytes?: number }): Promise<string> {
     const response = await this.coreApi.readNamespacedPodLog({
       name: param.name,
       namespace: param.namespace,
+      limitBytes: param.limitBytes,
     });
     return typeof response === "string" ? response : String(response ?? "");
   }
@@ -121,13 +122,13 @@ export class KubernetesResourceClient {
     return Array.isArray(response.items) ? response.items : [];
   }
 
-  async readJobLogs(jobName: string, namespace: string): Promise<string> {
+  async readJobLogs(jobName: string, namespace: string, limitBytes = 5 * 1024 * 1024): Promise<string> {
     const pods = await this.listPodsForJob(jobName, namespace);
     const podName = pods[0]?.metadata?.name;
     if (!podName) {
       throw new Error(`No pod found for Kubernetes job ${jobName}`);
     }
-    return this.podLogReader.readNamespacedPodLog({ name: podName, namespace });
+    return this.podLogReader.readNamespacedPodLog({ name: podName, namespace, limitBytes });
   }
 
   async deleteJob(name: string, namespace: string): Promise<void> {

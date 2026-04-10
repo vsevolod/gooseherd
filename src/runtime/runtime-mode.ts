@@ -26,16 +26,10 @@ export function formatSandboxRuntimeLabel(runtime: SandboxRuntime): string {
   return "Kubernetes";
 }
 
-export function assertImplementedSandboxRuntime(runtime: SandboxRuntime): void {
-  void runtime;
-}
-
 export async function preflightSandboxRuntime(
   config: SandboxRuntimePreflightConfig,
   deps: { pingDocker: () => Promise<boolean> }
 ): Promise<SandboxRuntimePreflightResult> {
-  assertImplementedSandboxRuntime(config.sandboxRuntime);
-
   if (!config.sandboxEnabled) {
     return { sandboxEnabled: false };
   }
