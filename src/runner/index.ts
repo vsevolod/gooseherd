@@ -48,6 +48,7 @@ async function executeSharedPipeline(
   run: RunRecord,
   _payload: RunEnvelope,
   emit: RunnerEventEmitter,
+  abortSignal: AbortSignal,
 ) {
   return services.pipelineEngine.execute(
     run,
@@ -60,13 +61,16 @@ async function executeSharedPipeline(
     },
     run.skipNodes,
     run.enableNodes,
+    abortSignal,
   );
 }
 
 export async function main(): Promise<void> {
   const client = buildRunnerClientFromEnv();
   const services = buildRunnerServices();
-  await runPipelineRunner(client, (run, payload, emit) => executeSharedPipeline(services, run, payload, emit));
+  await runPipelineRunner(client, (run, payload, emit, abortSignal) =>
+    executeSharedPipeline(services, run, payload, emit, abortSignal),
+  );
   logInfo("Runner completed", { runId: process.env.RUN_ID ?? "unknown" });
 }
 

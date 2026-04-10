@@ -156,6 +156,46 @@ SANDBOX_HOST_WORK_PATH=/absolute/path/to/.work
 
 Or build everything at once with `make docker`.
 
+### Local Kubernetes Smoke Check
+
+The stage-1 Kubernetes path is currently verified through a manual smoke run in `minikube`.
+This does not enable `SANDBOX_RUNTIME=kubernetes` for normal app runs yet; it validates the runner/control-plane contract by launching one Kubernetes `Job` and reconciling the run back into Gooseherd.
+
+Prerequisites:
+
+```bash
+minikube start --driver=docker
+docker compose up -d postgres gooseherd
+```
+
+Then run:
+
+```bash
+MINIKUBE_BUILD_IN_NODE=1 npm run k8s:smoke
+```
+
+What this does:
+
+- builds `gooseherd/k8s-runner:dev`
+- loads it into the `minikube` node Docker daemon
+- seeds a `kubernetes` run plus one-time `RUN_TOKEN`
+- creates a Kubernetes `Secret` and `Job`
+- waits for the runner pod to finish
+- finalizes the run via the runtime reconciler
+
+Expected success signal:
+
+```text
+[smoke] run <run-id> finalized as completed
+[smoke] success
+```
+
+Notes:
+
+- the smoke pipeline is `pipelines/kubernetes-smoke.yml`
+- the runner pod reaches Gooseherd through `http://host.minikube.internal:8787`
+- the flow is image-heavy; keep several GB of free disk space available before running it
+
 ## Testing
 
 ```bash

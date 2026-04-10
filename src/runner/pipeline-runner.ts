@@ -10,12 +10,15 @@ export type RunnerPipelineExecutor = (
   run: RunRecord,
   payload: RunEnvelope,
   emit: RunnerEventEmitter,
+  abortSignal: AbortSignal,
 ) => Promise<ExecutionResult>;
 
 export type RunnerEventEmitter = (
   eventType: RunnerEventPayload["eventType"],
   eventPayload?: Record<string, unknown>,
 ) => Promise<void>;
+
+const DEFAULT_CANCELLATION_POLL_MS = 5_000;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -70,6 +73,17 @@ export function deriveRunRecordFromPayload(payload: RunEnvelope): RunRecord {
   };
 }
 
+function readCancellationPollMs(): number {
+  const raw = process.env.RUNNER_CANCELLATION_POLL_MS;
+  if (!raw) return DEFAULT_CANCELLATION_POLL_MS;
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_CANCELLATION_POLL_MS;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 export async function runPipelineRunner(
   client: RunnerControlPlaneClient,
   executePipeline: RunnerPipelineExecutor,
@@ -95,8 +109,28 @@ export async function runPipelineRunner(
     payloadRef: payload.payloadRef,
   });
 
+  const abortController = new AbortController();
+  const cancellationPollMs = readCancellationPollMs();
+  let stopPolling = false;
+  let cancellationObserved = false;
+
+  const pollingPromise = (async () => {
+    while (!stopPolling && !abortController.signal.aborted) {
+      const cancellation = await client.getCancellation();
+      if (cancellation.cancelRequested) {
+        cancellationObserved = true;
+        await emit("run.cancellation_observed", { runId: run.id });
+        abortController.abort();
+        return;
+      }
+      await sleep(cancellationPollMs);
+    }
+  })();
+
   try {
-    const result = await executePipeline(run, payload, emit);
+    const result = await executePipeline(run, payload, emit, abortController.signal);
+    stopPolling = true;
+    await pollingPromise;
     await emit("run.completion_attempted", { status: "success" });
     await client.complete({
       idempotencyKey: randomUUID(),
@@ -109,9 +143,15 @@ export async function runPipelineRunner(
       title: result.title,
     });
   } catch (error) {
+    stopPolling = true;
+    await pollingPromise.catch(() => {});
     const reason = error instanceof Error ? error.message : String(error);
     await emit("run.warning", { reason });
-    await emit("run.completion_attempted", { status: "failed", reason });
+    await emit("run.completion_attempted", {
+      status: "failed",
+      reason,
+      ...(cancellationObserved ? { cancellationObserved: true } : {}),
+    });
     await client.complete({
       idempotencyKey: randomUUID(),
       status: "failed",

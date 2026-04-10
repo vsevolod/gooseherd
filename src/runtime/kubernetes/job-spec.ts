@@ -1,0 +1,157 @@
+export interface KubernetesRunnerSecretInput {
+  runId: string;
+  namespace: string;
+  secretName?: string;
+  runToken: string;
+}
+
+export interface KubernetesRunnerJobInput {
+  runId: string;
+  namespace: string;
+  image: string;
+  secretName: string;
+  internalBaseUrl: string;
+  pipelineFile: string;
+  jobName?: string;
+}
+
+interface SecretManifest {
+  apiVersion: "v1";
+  kind: "Secret";
+  metadata: {
+    name: string;
+    namespace: string;
+    labels: Record<string, string>;
+  };
+  type: "Opaque";
+  stringData: {
+    RUN_TOKEN: string;
+  };
+}
+
+interface JobManifest {
+  apiVersion: "batch/v1";
+  kind: "Job";
+  metadata: {
+    name: string;
+    namespace: string;
+    labels: Record<string, string>;
+  };
+  spec: {
+    backoffLimit: 0;
+    ttlSecondsAfterFinished: 300;
+    template: {
+      metadata: {
+        labels: Record<string, string>;
+      };
+      spec: {
+        restartPolicy: "Never";
+        volumes: Array<{ name: "work"; emptyDir: Record<string, never> }>;
+        containers: Array<{
+          name: "runner";
+          image: string;
+          imagePullPolicy: "IfNotPresent";
+          volumeMounts: Array<{ name: "work"; mountPath: "/work" }>;
+          env: Array<
+            | { name: string; value: string }
+            | { name: string; valueFrom: { secretKeyRef: { name: string; key: "RUN_TOKEN" } } }
+          >;
+        }>;
+      };
+    };
+  };
+}
+
+function shortRunId(runId: string): string {
+  return runId.slice(0, 8).toLowerCase();
+}
+
+export function defaultSmokeJobName(runId: string): string {
+  return `gooseherd-smoke-${shortRunId(runId)}`;
+}
+
+export function defaultSmokeSecretName(runId: string): string {
+  return `gooseherd-run-token-${shortRunId(runId)}`;
+}
+
+export function buildRunTokenSecretManifest(input: KubernetesRunnerSecretInput): SecretManifest {
+  const secretName = input.secretName ?? defaultSmokeSecretName(input.runId);
+
+  return {
+    apiVersion: "v1",
+    kind: "Secret",
+    metadata: {
+      name: secretName,
+      namespace: input.namespace,
+      labels: {
+        "app.kubernetes.io/name": "gooseherd-runner",
+        "gooseherd.run/id": input.runId,
+      },
+    },
+    type: "Opaque",
+    stringData: {
+      RUN_TOKEN: input.runToken,
+    },
+  };
+}
+
+export function buildRunJobSpec(input: KubernetesRunnerJobInput): JobManifest {
+  const jobName = input.jobName ?? defaultSmokeJobName(input.runId);
+
+  return {
+    apiVersion: "batch/v1",
+    kind: "Job",
+    metadata: {
+      name: jobName,
+      namespace: input.namespace,
+      labels: {
+        "app.kubernetes.io/name": "gooseherd-runner",
+        "gooseherd.run/id": input.runId,
+      },
+    },
+    spec: {
+      backoffLimit: 0,
+      ttlSecondsAfterFinished: 300,
+      template: {
+        metadata: {
+          labels: {
+            "app.kubernetes.io/name": "gooseherd-runner",
+            "gooseherd.run/id": input.runId,
+          },
+        },
+        spec: {
+          restartPolicy: "Never",
+          volumes: [{ name: "work", emptyDir: {} }],
+          containers: [
+            {
+              name: "runner",
+              image: input.image,
+              imagePullPolicy: "IfNotPresent",
+              volumeMounts: [{ name: "work", mountPath: "/work" }],
+              env: [
+                { name: "RUN_ID", value: input.runId },
+                {
+                  name: "RUN_TOKEN",
+                  valueFrom: {
+                    secretKeyRef: {
+                      name: input.secretName,
+                      key: "RUN_TOKEN",
+                    },
+                  },
+                },
+                { name: "GOOSEHERD_INTERNAL_BASE_URL", value: input.internalBaseUrl },
+                { name: "WORK_ROOT", value: "/work" },
+                { name: "PIPELINE_FILE", value: input.pipelineFile },
+                { name: "DRY_RUN", value: "1" },
+                { name: "DASHBOARD_ENABLED", value: "false" },
+                { name: "OBSERVER_ENABLED", value: "false" },
+                { name: "SUPERVISOR_ENABLED", value: "false" },
+                { name: "CI_WAIT_ENABLED", value: "false" },
+              ],
+            },
+          ],
+        },
+      },
+    },
+  };
+}

@@ -1,0 +1,64 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import {
+  buildRunJobSpec,
+  buildRunTokenSecretManifest,
+  defaultSmokeJobName,
+  defaultSmokeSecretName,
+} from "../src/runtime/kubernetes/job-spec.js";
+
+test("buildRunTokenSecretManifest stores RUN_TOKEN in a namespaced secret", () => {
+  const manifest = buildRunTokenSecretManifest({
+    runId: "12345678-1234-5678-9abc-def012345678",
+    namespace: "default",
+    runToken: "secret-token",
+  });
+
+  assert.equal(manifest.kind, "Secret");
+  assert.equal(manifest.metadata.name, defaultSmokeSecretName("12345678-1234-5678-9abc-def012345678"));
+  assert.equal(manifest.metadata.namespace, "default");
+  assert.equal(manifest.stringData.RUN_TOKEN, "secret-token");
+});
+
+test("buildRunJobSpec uses one Job per run with emptyDir workspace and runner env wiring", () => {
+  const runId = "12345678-1234-5678-9abc-def012345678";
+  const secretName = defaultSmokeSecretName(runId);
+  const spec = buildRunJobSpec({
+    runId,
+    namespace: "default",
+    image: "gooseherd/k8s-runner:dev",
+    secretName,
+    internalBaseUrl: "http://host.minikube.internal:8787",
+    pipelineFile: "pipelines/kubernetes-smoke.yml",
+  });
+
+  assert.equal(spec.kind, "Job");
+  assert.equal(spec.metadata.name, defaultSmokeJobName(runId));
+  assert.equal(spec.spec.backoffLimit, 0);
+  assert.equal(spec.spec.template.spec.volumes[0]?.emptyDir != null, true);
+  assert.equal(spec.spec.template.spec.containers[0]?.image, "gooseherd/k8s-runner:dev");
+
+  const env = spec.spec.template.spec.containers[0]?.env ?? [];
+  assert.equal(env.some((entry) => entry.name === "RUN_ID"), true);
+  assert.equal(env.some((entry) => entry.name === "GOOSEHERD_INTERNAL_BASE_URL"), true);
+  assert.equal(env.some((entry) => entry.name === "PIPELINE_FILE"), true);
+  assert.deepEqual(
+    env.find((entry) => entry.name === "PIPELINE_FILE"),
+    {
+      name: "PIPELINE_FILE",
+      value: "pipelines/kubernetes-smoke.yml",
+    },
+  );
+  assert.deepEqual(
+    env.find((entry) => entry.name === "RUN_TOKEN"),
+    {
+      name: "RUN_TOKEN",
+      valueFrom: {
+        secretKeyRef: {
+          name: secretName,
+          key: "RUN_TOKEN",
+        },
+      },
+    },
+  );
+});

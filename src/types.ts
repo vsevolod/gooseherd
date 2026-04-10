@@ -7,8 +7,10 @@ export type RunStatus =
   | "pushing"
   | "awaiting_ci"
   | "ci_fixing"
+  | "cancel_requested"
   | "completed"
-  | "failed";
+  | "failed"
+  | "cancelled";
 
 export type RunPhase =
   | "queued"
@@ -18,8 +20,10 @@ export type RunPhase =
   | "pushing"
   | "awaiting_ci"
   | "ci_fixing"
+  | "cancel_requested"
   | "completed"
-  | "failed";
+  | "failed"
+  | "cancelled";
 
 export interface TokenUsage {
   qualityGateInputTokens: number;

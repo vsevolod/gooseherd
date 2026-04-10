@@ -17,7 +17,18 @@ export class RuntimeReconciler {
   async reconcileRun(runId: string): Promise<void> {
     const completion = await this.controlPlaneStore.getLatestCompletion(runId);
     const fact = await this.runtimeFacts.getTerminalFact(runId);
+    const run = await this.runStore.getRun(runId);
     const terminalWithoutCompletion = !completion && (fact === "succeeded" || fact === "failed" || fact === "missing");
+
+    if (run?.status === "cancel_requested" && fact !== "running") {
+      await this.runStore.updateRun(runId, {
+        status: "cancelled",
+        phase: "cancelled",
+        finishedAt: new Date().toISOString(),
+        error: run.error,
+      });
+      return;
+    }
 
     if (completion?.payload.status === "success" && fact === "succeeded") {
       await this.runStore.updateRun(runId, {

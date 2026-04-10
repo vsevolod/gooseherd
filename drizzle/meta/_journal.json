@@ -36,6 +36,34 @@
       "when": 1778600000000,
       "tag": "0004_agent_profiles",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1775580000000,
+      "tag": "0004_sandbox_runtime_modes",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1775590000000,
+      "tag": "0005_runner_control_plane",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1778600000000,
+      "tag": "0006_runs_runtime_repair",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1778603600000,
+      "tag": "0007_control_plane_schema_repair",
+      "breakpoints": true
     }
   ]
 }

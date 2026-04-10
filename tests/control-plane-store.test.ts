@@ -171,3 +171,41 @@ test("reconciler finalizes completed when completion exists and runtime reports 
   assert.ok(updated?.finishedAt);
   await cleanup();
 });
+
+test("reconciler gives cancellation precedence to terminal kubernetes runs", async () => {
+  const { db, cleanup } = await createTestDb();
+  const controlPlaneStore = new ControlPlaneStore(db);
+  const runStore = new RunStore(db);
+  await runStore.init();
+
+  const run = await runStore.createRun(
+    {
+      repoSlug: "owner/repo",
+      task: "reconcile cancelled-with-terminal-fact",
+      baseBranch: "main",
+      requestedBy: "U1",
+      channelId: "C1",
+      threadTs: "1",
+      runtime: "kubernetes",
+    },
+    "gooseherd",
+  );
+
+  await runStore.updateRun(run.id, {
+    status: "cancel_requested",
+    phase: "cancel_requested",
+  });
+
+  const fakeRuntimeFacts = {
+    getTerminalFact: async () => "failed" as const,
+  };
+
+  const reconciler = new RuntimeReconciler(controlPlaneStore, fakeRuntimeFacts, runStore);
+  await reconciler.reconcileRun(run.id);
+  const updated = await runStore.getRun(run.id);
+
+  assert.equal(updated?.status, "cancelled");
+  assert.equal(updated?.phase, "cancelled");
+  assert.ok(updated?.finishedAt);
+  await cleanup();
+});
