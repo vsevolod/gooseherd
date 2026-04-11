@@ -43,6 +43,7 @@ import { WorkItemStore } from "./work-items/store.js";
 import { ReviewRequestStore } from "./work-items/review-request-store.js";
 import { WorkItemEventsStore } from "./work-items/events-store.js";
 import { WorkItemService } from "./work-items/service.js";
+import { postWorkItemReviewNotifications } from "./work-items/slack-actions.js";
 import {
   hasSandboxRuntimeHotReloadChange,
   preflightSandboxRuntime
@@ -69,6 +70,7 @@ interface Services {
   runnerArtifactStore: ArtifactStore;
   runtimeReconciler: RuntimeReconciler;
   dashboardWorkItemsSource: DashboardWorkItemsSource;
+  workItemService: WorkItemService;
 }
 
 function resolveKubernetesRunnerImage(): string {
@@ -222,7 +224,16 @@ async function createServices(config: AppConfig, db: Database): Promise<Services
     listReviewRequestsForWorkItem: (workItemId) => reviewRequestStore.listReviewRequestsForWorkItem(workItemId),
     listEventsForWorkItem: (workItemId) => workItemEventsStore.listForWorkItem(workItemId),
     createDiscoveryWorkItem: (input) => workItemService.createDiscoveryWorkItem(input),
-    createReviewRequests: (input) => workItemService.requestReview(input),
+    createReviewRequests: async (input) => {
+      const reviewRequests = await workItemService.requestReview(input);
+      if (webClient) {
+        const workItem = await workItemService.getWorkItem(input.workItemId);
+        if (workItem) {
+          await postWorkItemReviewNotifications(webClient, config, workItem, reviewRequests);
+        }
+      }
+      return reviewRequests;
+    },
     respondToReviewRequest: (input) => workItemService.recordReviewOutcome(input),
     confirmDiscovery: (input) => workItemService.confirmDiscovery(input),
     guardedOverrideState: (input) => workItemService.guardedOverrideState({
@@ -234,7 +245,7 @@ async function createServices(config: AppConfig, db: Database): Promise<Services
   return {
     config, store, agentProfileStore, githubService, memoryProvider, hooks, containerManager,
     pipelineEngine, pipelineStore, learningStore, evalStore, webClient, runManager, conversationStore,
-    controlPlaneStore, runnerArtifactStore, runtimeReconciler, dashboardWorkItemsSource,
+    controlPlaneStore, runnerArtifactStore, runtimeReconciler, dashboardWorkItemsSource, workItemService,
   };
 }
 
@@ -404,7 +415,7 @@ async function main(): Promise<void> {
 
   const slackConfigured = Boolean(config.slackBotToken && config.slackAppToken && config.slackSigningSecret);
   if (slackConfigured) {
-    await startSlackApp(config, svc.runManager, globalRefs.observer, svc.memoryProvider, svc.githubService, svc.conversationStore);
+    await startSlackApp(config, svc.runManager, globalRefs.observer, svc.memoryProvider, svc.githubService, svc.conversationStore, svc.workItemService);
   } else {
     logInfo("Slack tokens not configured — running in dashboard-only mode");
   }

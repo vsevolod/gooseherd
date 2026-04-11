@@ -2380,6 +2380,17 @@ export function dashboardHtml(config: AppConfig): string {
       return id.slice(0, 8);
     }
 
+    function currentHashTarget() {
+      var hash = window.location.hash || '';
+      if (hash.startsWith('#run/')) {
+        return { type: 'run', prefix: hash.slice(5) };
+      }
+      if (hash.startsWith('#work-item/')) {
+        return { type: 'workItem', prefix: decodeURIComponent(hash.slice(11)) };
+      }
+      return null;
+    }
+
     function branchRefForUrl(value) {
       return encodeURIComponent(value).replace(/%2F/g, '/');
     }
@@ -3424,10 +3435,9 @@ export function dashboardHtml(config: AppConfig): string {
         state.selectedId = null;
       }
       if (!state.selectedId && state.runs.length > 0) {
-        // Check URL hash for permalink
-        var hash = window.location.hash;
-        if (hash && hash.startsWith('#run/')) {
-          var prefix = hash.slice(5);
+        var hashTarget = currentHashTarget();
+        if (hashTarget && hashTarget.type === 'run') {
+          var prefix = hashTarget.prefix;
           var match = state.runs.find(function(r) { return r.id.startsWith(prefix); });
           if (match) { state.selectedId = match.id; }
           else { state.selectedId = state.runs[0].id; }
@@ -3442,6 +3452,17 @@ export function dashboardHtml(config: AppConfig): string {
       var workflow = state.boardWorkflow || 'product_discovery';
       var data = await fetchJson('/api/work-items?workflow=' + encodeURIComponent(workflow));
       state.workItems = Array.isArray(data.workItems) ? data.workItems : [];
+      var hashTarget = currentHashTarget();
+      if (hashTarget && hashTarget.type === 'workItem') {
+        var hashMatch = state.workItems.find(function(item) {
+          return item.id === hashTarget.prefix || item.id.startsWith(hashTarget.prefix);
+        });
+        if (hashMatch) {
+          state.selectedWorkItemId = hashMatch.id;
+          state.viewMode = 'board';
+          updateDashboardChrome();
+        }
+      }
       if (state.selectedWorkItemId && !state.workItems.some(function(item) { return item.id === state.selectedWorkItemId; })) {
         state.selectedWorkItemId = null;
         state.selectedWorkItem = null;
@@ -3517,6 +3538,7 @@ export function dashboardHtml(config: AppConfig): string {
           card.onclick = (function(workItemId) {
             return function() {
               state.selectedWorkItemId = workItemId;
+              window.location.hash = '#work-item/' + encodeURIComponent(workItemId.slice(0, 8));
               renderBoard();
               refreshSelectedWorkItem().catch(function(error) {
                 setBoardStatusMessage(error.message || 'Failed to load work item detail', 'error');
