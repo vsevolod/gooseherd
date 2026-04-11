@@ -117,6 +117,8 @@ const envSchema = z.object({
   CI_MAX_WAIT_SECONDS: z.string().optional(),
   CI_CHECK_FILTER: z.string().optional(),
   CI_MAX_FIX_ROUNDS: z.string().optional(),
+  FEATURE_DELIVERY_RESET_ENGINEERING_REVIEW_ON_NEW_COMMITS: z.string().optional(),
+  FEATURE_DELIVERY_RESET_QA_REVIEW_ON_NEW_COMMITS: z.string().optional(),
 
   DASHBOARD_TOKEN: z.string().optional(),
 
@@ -296,6 +298,8 @@ export interface AppConfig {
   ciMaxWaitSeconds: number;
   ciCheckFilter: string[];
   ciMaxFixRounds: number;
+  featureDeliveryResetEngineeringReviewOnNewCommits: boolean;
+  featureDeliveryResetQaReviewOnNewCommits: boolean;
 
   dashboardToken?: string;
 
@@ -541,6 +545,14 @@ export function loadConfig(): AppConfig {
     ciMaxWaitSeconds: parseInteger(parsed.CI_MAX_WAIT_SECONDS, 1800),
     ciCheckFilter: parseList(parsed.CI_CHECK_FILTER),
     ciMaxFixRounds: parseInteger(parsed.CI_MAX_FIX_ROUNDS, 2),
+    featureDeliveryResetEngineeringReviewOnNewCommits: parseBoolean(
+      parsed.FEATURE_DELIVERY_RESET_ENGINEERING_REVIEW_ON_NEW_COMMITS,
+      false
+    ),
+    featureDeliveryResetQaReviewOnNewCommits: parseBoolean(
+      parsed.FEATURE_DELIVERY_RESET_QA_REVIEW_ON_NEW_COMMITS,
+      false
+    ),
 
     dashboardToken: parsed.DASHBOARD_TOKEN?.trim() || undefined,
 
