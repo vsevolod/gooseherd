@@ -105,6 +105,15 @@ export function dashboardHtml(config: AppConfig): string {
         "sidebar main";
       gap: 0;
     }
+    .app.board-mode {
+      grid-template-columns: 1fr;
+      grid-template-areas:
+        "top"
+        "main";
+    }
+    .app.board-mode .sidebar {
+      display: none;
+    }
     .topbar {
       grid-area: top;
       display: flex;
@@ -149,6 +158,30 @@ export function dashboardHtml(config: AppConfig): string {
       gap: 8px;
       flex-wrap: wrap;
       justify-content: flex-end;
+    }
+    .view-switch {
+      display: flex;
+      border: 1px solid var(--border);
+      background: var(--panel-3);
+      border-radius: 999px;
+      padding: 2px;
+      gap: 2px;
+    }
+    .view-btn {
+      border: 0;
+      background: transparent;
+      color: var(--muted);
+      border-radius: 999px;
+      padding: 6px 10px;
+      font-size: 12px;
+      font-weight: 700;
+      cursor: pointer;
+      font-family: var(--font-ui);
+    }
+    .view-btn.active {
+      color: var(--text);
+      background: var(--panel-2);
+      border: 1px solid var(--border);
     }
     .top-meta {
       color: var(--muted);
@@ -377,6 +410,156 @@ export function dashboardHtml(config: AppConfig): string {
       min-width: 0;
       width: 100%;
       max-width: none;
+    }
+    .board-view {
+      display: none;
+      min-width: 0;
+    }
+    .board-view.active {
+      display: block;
+    }
+    .board-shell {
+      display: grid;
+      gap: 12px;
+      min-width: 0;
+    }
+    .board-toolbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+    .board-toolbar-left {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+    .board-toolbar label {
+      font-size: 11px;
+      font-weight: 700;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+    .board-toolbar select {
+      border: 1px solid var(--border);
+      background: var(--panel-3);
+      color: var(--text);
+      border-radius: 8px;
+      padding: 8px 10px;
+      font-size: 13px;
+      font-family: var(--font-ui);
+      min-width: 220px;
+    }
+    .board-columns {
+      display: grid;
+      grid-auto-flow: column;
+      grid-auto-columns: minmax(260px, 1fr);
+      gap: 12px;
+      overflow-x: auto;
+      align-items: start;
+      padding-bottom: 8px;
+    }
+    .board-column {
+      border: 1px solid var(--border);
+      background: color-mix(in srgb, var(--panel) 92%, transparent);
+      border-radius: 14px;
+      min-height: 240px;
+      padding: 12px;
+      display: grid;
+      gap: 10px;
+    }
+    .board-column-head {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 8px;
+    }
+    .board-column-title {
+      font-size: 12px;
+      font-weight: 700;
+      color: var(--text);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+    .board-column-count {
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .board-column-items {
+      display: grid;
+      gap: 10px;
+    }
+    .board-card {
+      border: 1px solid var(--border);
+      background: var(--panel-3);
+      border-radius: 12px;
+      padding: 12px;
+      display: grid;
+      gap: 8px;
+      box-shadow: var(--shadow);
+    }
+    .board-card-top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+    .board-card-key {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      color: var(--badge-text);
+      background: var(--badge-bg);
+      border: 1px solid color-mix(in srgb, var(--badge-text) 35%, var(--border));
+      border-radius: 999px;
+      padding: 3px 8px;
+      white-space: nowrap;
+    }
+    .board-card-title {
+      font-size: 14px;
+      font-weight: 700;
+      line-height: 1.35;
+    }
+    .board-card-summary {
+      font-size: 12px;
+      color: var(--muted);
+      line-height: 1.45;
+      white-space: pre-wrap;
+    }
+    .board-card-meta {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+      color: var(--muted);
+      font-size: 11px;
+    }
+    .board-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      border: 1px solid var(--border);
+      background: var(--panel-2);
+      border-radius: 999px;
+      padding: 3px 8px;
+      font-size: 11px;
+      color: var(--muted);
+    }
+    .board-flags {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+    .board-empty {
+      border: 1px dashed var(--border);
+      border-radius: 10px;
+      padding: 14px 12px;
+      color: var(--muted);
+      font-size: 12px;
+      text-align: center;
+      background: color-mix(in srgb, var(--panel-3) 88%, transparent);
     }
     .stack-top {
       display: grid;
@@ -1369,7 +1552,7 @@ export function dashboardHtml(config: AppConfig): string {
   </style>
 </head>
 <body>
-  <div class="app">
+  <div class="app" id="app-root">
     <header class="topbar">
       <div class="brand">
         <span class="brand-dot"></span>
@@ -1380,6 +1563,10 @@ export function dashboardHtml(config: AppConfig): string {
       </div>
       <div class="top-controls">
         <div class="top-meta" id="top-meta">0 runs</div>
+        <div class="view-switch" id="view-switch">
+          <button class="view-btn active" data-view="runs">Runs</button>
+          <button class="view-btn" data-view="board">Board</button>
+        </div>
         <button class="top-btn" id="new-run-btn">
           <span class="material-symbols-rounded">add</span>
           <span>New Run</span>
@@ -1422,7 +1609,7 @@ export function dashboardHtml(config: AppConfig): string {
     </header>
     <aside class="sidebar">
       <div class="sidebar-head">
-        <div class="sidebar-title">Runs</div>
+        <div class="sidebar-title" id="sidebar-title">Runs</div>
         <div class="meta" id="meta">Loading...</div>
       </div>
       <div class="sidebar-search">
@@ -1437,7 +1624,7 @@ export function dashboardHtml(config: AppConfig): string {
       <div id="runs"></div>
     </aside>
     <main class="main">
-      <div class="stack">
+      <div class="stack" id="runs-view">
         <div class="stack-top">
           <div class="card">
             <div class="toolbar">
@@ -1590,6 +1777,29 @@ export function dashboardHtml(config: AppConfig): string {
           <div class="meta" id="chat-status"></div>
         </div>
       </div>
+      <div class="board-view" id="board-view">
+        <div class="board-shell">
+          <div class="card">
+            <div class="board-toolbar">
+              <div class="board-toolbar-left">
+                <div>
+                  <div class="card-title">Work Item Board</div>
+                  <div class="card-subtitle">Workflow-specific Kanban view for managed automation.</div>
+                </div>
+                <div>
+                  <label for="board-workflow">Workflow</label>
+                  <select id="board-workflow">
+                    <option value="product_discovery">Product Discovery</option>
+                    <option value="feature_delivery">Feature Delivery</option>
+                  </select>
+                </div>
+              </div>
+              <div class="meta" id="board-meta">Loading work items...</div>
+            </div>
+          </div>
+          <div class="board-columns" id="board-columns"></div>
+        </div>
+      </div>
     </main>
   </div>
 
@@ -1718,9 +1928,12 @@ export function dashboardHtml(config: AppConfig): string {
   <script>
     const state = {
       runs: [],
+      workItems: [],
       selectedId: null,
       interval: null,
       themePreference: 'system',
+      viewMode: 'runs',
+      boardWorkflow: 'product_discovery',
     };
 
     var logStreamState = { runId: null, offset: 0 };
@@ -1732,9 +1945,17 @@ export function dashboardHtml(config: AppConfig): string {
     var lastRenderedEventCount = -1;
 
     const el = {
+      appRoot: document.getElementById('app-root'),
       meta: document.getElementById('meta'),
       topMeta: document.getElementById('top-meta'),
+      sidebarTitle: document.getElementById('sidebar-title'),
       runs: document.getElementById('runs'),
+      viewSwitch: document.getElementById('view-switch'),
+      runsView: document.getElementById('runs-view'),
+      boardView: document.getElementById('board-view'),
+      boardWorkflow: document.getElementById('board-workflow'),
+      boardMeta: document.getElementById('board-meta'),
+      boardColumns: document.getElementById('board-columns'),
       summary: document.getElementById('summary'),
       summarySubtitle: document.getElementById('summary-subtitle'),
       retryRun: document.getElementById('retry-run'),
@@ -1854,6 +2075,59 @@ export function dashboardHtml(config: AppConfig): string {
         throw new Error(msg);
       }
       return response.json();
+    }
+
+    var BOARD_COLUMNS = {
+      product_discovery: [
+        'backlog',
+        'in_progress',
+        'waiting_for_review',
+        'waiting_for_pm_confirmation',
+        'done',
+        'cancelled',
+      ],
+      feature_delivery: [
+        'backlog',
+        'in_progress',
+        'auto_review',
+        'engineering_review',
+        'qa_preparation',
+        'product_review',
+        'qa_review',
+        'ready_for_merge',
+        'done',
+        'cancelled',
+      ],
+    };
+
+    function titleCaseWorkItemState(value) {
+      return String(value || '')
+        .split('_')
+        .filter(Boolean)
+        .map(function(part) {
+          return part.charAt(0).toUpperCase() + part.slice(1);
+        })
+        .join(' ');
+    }
+
+    function workItemDisplayId(item) {
+      return item.jiraIssueKey || shortId(item.id);
+    }
+
+    function updateDashboardChrome() {
+      var boardMode = state.viewMode === 'board';
+      el.appRoot.classList.toggle('board-mode', boardMode);
+      el.runsView.style.display = boardMode ? 'none' : '';
+      el.boardView.classList.toggle('active', boardMode);
+      if (el.sidebarTitle) {
+        el.sidebarTitle.textContent = boardMode ? 'Work Items' : 'Runs';
+      }
+      if (el.viewSwitch) {
+        el.viewSwitch.querySelectorAll('[data-view]').forEach(function(button) {
+          var isActive = button.getAttribute('data-view') === state.viewMode;
+          button.classList.toggle('active', isActive);
+        });
+      }
     }
 
     function shortId(id) {
@@ -2918,8 +3192,125 @@ export function dashboardHtml(config: AppConfig): string {
       renderRuns();
     }
 
+    async function loadWorkItems() {
+      var workflow = state.boardWorkflow || 'product_discovery';
+      var data = await fetchJson('/api/work-items?workflow=' + encodeURIComponent(workflow));
+      state.workItems = Array.isArray(data.workItems) ? data.workItems : [];
+      if (el.boardMeta) {
+        el.boardMeta.textContent = state.workItems.length + ' work items';
+      }
+      if (state.viewMode === 'board' && el.topMeta) {
+        el.topMeta.textContent = state.workItems.length + ' work items';
+      }
+      renderBoard();
+    }
+
     function canRetry(run) {
       return run.status === 'failed' || run.status === 'completed';
+    }
+
+    function renderBoard() {
+      if (!el.boardColumns) return;
+      el.boardColumns.innerHTML = '';
+
+      var workflow = state.boardWorkflow || 'product_discovery';
+      var columns = BOARD_COLUMNS[workflow] || [];
+
+      for (var i = 0; i < columns.length; i++) {
+        var columnState = columns[i];
+        var items = state.workItems.filter(function(item) {
+          return item.state === columnState;
+        });
+
+        var column = document.createElement('section');
+        column.className = 'board-column';
+
+        var head = document.createElement('div');
+        head.className = 'board-column-head';
+
+        var title = document.createElement('div');
+        title.className = 'board-column-title';
+        title.textContent = titleCaseWorkItemState(columnState);
+
+        var count = document.createElement('div');
+        count.className = 'board-column-count';
+        count.textContent = String(items.length);
+
+        head.appendChild(title);
+        head.appendChild(count);
+        column.appendChild(head);
+
+        var list = document.createElement('div');
+        list.className = 'board-column-items';
+
+        if (items.length === 0) {
+          var empty = document.createElement('div');
+          empty.className = 'board-empty';
+          empty.textContent = 'No work items in this state.';
+          list.appendChild(empty);
+        }
+
+        for (var j = 0; j < items.length; j++) {
+          var item = items[j];
+          var card = document.createElement('article');
+          card.className = 'board-card';
+
+          var top = document.createElement('div');
+          top.className = 'board-card-top';
+
+          var key = document.createElement('span');
+          key.className = 'board-card-key';
+          key.textContent = workItemDisplayId(item);
+          top.appendChild(key);
+
+          if (item.substate) {
+            var substate = document.createElement('span');
+            substate.className = 'board-chip';
+            substate.textContent = titleCaseWorkItemState(item.substate);
+            top.appendChild(substate);
+          }
+
+          var titleNode = document.createElement('div');
+          titleNode.className = 'board-card-title';
+          titleNode.textContent = item.title || '(untitled work item)';
+
+          var summary = document.createElement('div');
+          summary.className = 'board-card-summary';
+          summary.textContent = truncateTask(item.summary || '', 180);
+
+          var meta = document.createElement('div');
+          meta.className = 'board-card-meta';
+          meta.textContent = 'Updated ' + timeAgo(item.updatedAt);
+
+          card.appendChild(top);
+          card.appendChild(titleNode);
+          card.appendChild(summary);
+          card.appendChild(meta);
+
+          if (Array.isArray(item.flags) && item.flags.length > 0) {
+            var flags = document.createElement('div');
+            flags.className = 'board-flags';
+            item.flags.slice(0, 4).forEach(function(flag) {
+              var chip = document.createElement('span');
+              chip.className = 'board-chip';
+              chip.textContent = titleCaseWorkItemState(flag);
+              flags.appendChild(chip);
+            });
+            if (item.flags.length > 4) {
+              var moreChip = document.createElement('span');
+              moreChip.className = 'board-chip';
+              moreChip.textContent = '+' + String(item.flags.length - 4) + ' more';
+              flags.appendChild(moreChip);
+            }
+            card.appendChild(flags);
+          }
+
+          list.appendChild(card);
+        }
+
+        column.appendChild(list);
+        el.boardColumns.appendChild(column);
+      }
     }
 
     async function refreshSelected() {
@@ -3305,6 +3696,27 @@ export function dashboardHtml(config: AppConfig): string {
     // ── Search and filter ──
     var currentStatusFilter = 'all';
     var currentSearchQuery = '';
+
+    if (el.viewSwitch) {
+      el.viewSwitch.onclick = function(e) {
+        var button = e.target.closest('[data-view]');
+        if (!button) return;
+        state.viewMode = button.getAttribute('data-view') === 'board' ? 'board' : 'runs';
+        updateDashboardChrome();
+        if (state.viewMode === 'board') {
+          loadWorkItems().catch(console.error);
+        } else if (el.topMeta) {
+          el.topMeta.textContent = state.runs.length + ' runs';
+        }
+      };
+    }
+
+    if (el.boardWorkflow) {
+      el.boardWorkflow.onchange = function() {
+        state.boardWorkflow = el.boardWorkflow.value || 'product_discovery';
+        loadWorkItems().catch(console.error);
+      };
+    }
 
     el.runSearch.oninput = function() {
       currentSearchQuery = el.runSearch.value.trim().toLowerCase();
@@ -4071,11 +4483,16 @@ export function dashboardHtml(config: AppConfig): string {
 
     async function refreshAll() {
       await loadRuns();
+      await loadWorkItems();
       await refreshSelected();
       await refreshObserver();
     }
 
     initTheme();
+    if (el.boardWorkflow) {
+      el.boardWorkflow.value = state.boardWorkflow;
+    }
+    updateDashboardChrome();
     refreshAll().catch(console.error);
     state.interval = setInterval(() => {
       refreshAll().catch(console.error);
