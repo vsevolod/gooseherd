@@ -10,7 +10,7 @@ import { CemsProvider } from "./memory/cems-provider.js";
 import { RunLifecycleHooks } from "./hooks/run-lifecycle.js";
 import { RunManager } from "./run-manager.js";
 import { startSlackApp } from "./slack-app.js";
-import { startDashboardServer } from "./dashboard-server.js";
+import { startDashboardServer, type DashboardWorkItemsSource } from "./dashboard-server.js";
 import { WorkspaceCleaner } from "./workspace-cleaner.js";
 import { ObserverDaemon } from "./observer/index.js";
 import { execSync } from "node:child_process";
@@ -39,6 +39,9 @@ import type { ArtifactStore } from "./runtime/artifact-store.js";
 import { RuntimeReconciler } from "./runtime/reconciler.js";
 import { KubernetesRuntimeFactsReader } from "./runtime/kubernetes/runtime-facts.js";
 import { recoverRunsAfterRestart } from "./runtime/startup-recovery.js";
+import { WorkItemStore } from "./work-items/store.js";
+import { ReviewRequestStore } from "./work-items/review-request-store.js";
+import { WorkItemEventsStore } from "./work-items/events-store.js";
 import {
   hasSandboxRuntimeHotReloadChange,
   preflightSandboxRuntime
@@ -64,6 +67,7 @@ interface Services {
   controlPlaneStore: ControlPlaneStore;
   runnerArtifactStore: ArtifactStore;
   runtimeReconciler: RuntimeReconciler;
+  dashboardWorkItemsSource: DashboardWorkItemsSource;
 }
 
 function resolveKubernetesRunnerImage(): string {
@@ -151,6 +155,9 @@ async function createServices(config: AppConfig, db: Database): Promise<Services
   const webClient = config.slackBotToken ? new WebClient(config.slackBotToken) : undefined;
 
   const controlPlaneStore = new ControlPlaneStore(db);
+  const workItemStore = new WorkItemStore(db);
+  const reviewRequestStore = new ReviewRequestStore(db);
+  const workItemEventsStore = new WorkItemEventsStore(db);
   const runtimeFactsReader = config.sandboxRuntime === "kubernetes"
     ? new KubernetesRuntimeFactsReader({
       namespace: resolveKubernetesNamespace(),
@@ -204,10 +211,20 @@ async function createServices(config: AppConfig, db: Database): Promise<Services
   await conversationStore.load();
   conversationStore.startCleanupTimer();
 
+  const dashboardWorkItemsSource: DashboardWorkItemsSource = {
+    listWorkItems: async (workflow?: string) => {
+      const workItems = await workItemStore.listWorkItems();
+      return workflow ? workItems.filter((workItem) => workItem.workflow === workflow) : workItems;
+    },
+    getWorkItem: (id) => workItemStore.getWorkItem(id),
+    listReviewRequestsForWorkItem: (workItemId) => reviewRequestStore.listReviewRequestsForWorkItem(workItemId),
+    listEventsForWorkItem: (workItemId) => workItemEventsStore.listForWorkItem(workItemId),
+  };
+
   return {
     config, store, agentProfileStore, githubService, memoryProvider, hooks, containerManager,
     pipelineEngine, pipelineStore, learningStore, evalStore, webClient, runManager, conversationStore,
-    controlPlaneStore, runnerArtifactStore, runtimeReconciler,
+    controlPlaneStore, runnerArtifactStore, runtimeReconciler, dashboardWorkItemsSource,
   };
 }
 
@@ -371,6 +388,7 @@ async function main(): Promise<void> {
       svc.agentProfileStore,
       svc.controlPlaneStore,
       svc.runnerArtifactStore,
+      svc.dashboardWorkItemsSource,
     );
   }
 
