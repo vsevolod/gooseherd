@@ -105,4 +105,13 @@ test("dashboard HTML includes work item board controls and data fetch hooks", ()
   assert.match(html, /id="board-workflow"/);
   assert.match(html, /id="board-columns"/);
   assert.match(html, /\/api\/work-items\?workflow=/);
+  assert.match(html, /id="board-detail"/);
+  assert.match(html, /id="board-detail-reviews"/);
+  assert.match(html, /id="board-detail-events"/);
+  assert.match(html, /id="board-override-state"/);
+  assert.match(html, /id="board-confirm-approve"/);
+  assert.match(html, /id="board-confirm-rework"/);
+  assert.match(html, /\/api\/review-requests\//);
+  assert.match(html, /confirm-discovery/);
+  assert.match(html, /override-state/);
 });
