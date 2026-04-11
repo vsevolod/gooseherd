@@ -55,6 +55,46 @@ export interface DashboardWorkItemsSource {
   getWorkItem(id: string): Promise<WorkItemRecord | undefined>;
   listReviewRequestsForWorkItem(workItemId: string): Promise<ReviewRequestRecord[]>;
   listEventsForWorkItem(workItemId: string): Promise<WorkItemEventRecord[]>;
+  createDiscoveryWorkItem(input: {
+    title: string;
+    summary?: string;
+    ownerTeamId: string;
+    homeChannelId: string;
+    homeThreadTs: string;
+    originChannelId?: string;
+    originThreadTs?: string;
+    createdByUserId: string;
+  }): Promise<WorkItemRecord>;
+  createReviewRequests(input: {
+    workItemId: string;
+    requestedByUserId: string;
+    requests: Array<{
+      type: ReviewRequestRecord["type"];
+      targetType: ReviewRequestRecord["targetType"];
+      targetRef: Record<string, unknown>;
+      title: string;
+      requestMessage?: string;
+      focusPoints?: string[];
+    }>;
+  }): Promise<ReviewRequestRecord[]>;
+  respondToReviewRequest(input: {
+    reviewRequestId: string;
+    outcome: NonNullable<ReviewRequestRecord["outcome"]>;
+    authorUserId?: string;
+    comment?: string;
+  }): Promise<WorkItemRecord>;
+  confirmDiscovery(input: {
+    workItemId: string;
+    approved: boolean;
+    actorUserId?: string;
+  }): Promise<WorkItemRecord>;
+  guardedOverrideState(input: {
+    workItemId: string;
+    state: WorkItemRecord["state"];
+    substate?: string;
+    actorUserId?: string;
+    reason: string;
+  }): Promise<WorkItemRecord>;
 }
 
 function sendJson(res: ServerResponse, status: number, payload: unknown): void {
@@ -925,6 +965,54 @@ export function startDashboardServer(
         return;
       }
 
+      if (req.method === "POST" && pathname === "/api/work-items/discovery") {
+        if (!workItemsSource) {
+          sendJson(res, 501, { error: "Work item APIs are unavailable" });
+          return;
+        }
+
+        const raw = await readBody(req);
+        if (raw === null) { sendJson(res, 413, { error: "Request body too large" }); return; }
+        let parsed: {
+          title?: string;
+          summary?: string;
+          ownerTeamId?: string;
+          homeChannelId?: string;
+          homeThreadTs?: string;
+          originChannelId?: string;
+          originThreadTs?: string;
+          createdByUserId?: string;
+        } = {};
+        try {
+          parsed = JSON.parse(raw) as typeof parsed;
+        } catch {
+          sendJson(res, 400, { error: "Invalid JSON body" });
+          return;
+        }
+
+        if (!parsed.title || !parsed.ownerTeamId || !parsed.homeChannelId || !parsed.homeThreadTs || !parsed.createdByUserId) {
+          sendJson(res, 400, { error: "title, ownerTeamId, homeChannelId, homeThreadTs, and createdByUserId are required" });
+          return;
+        }
+
+        try {
+          const workItem = await workItemsSource.createDiscoveryWorkItem({
+            title: parsed.title,
+            summary: parsed.summary,
+            ownerTeamId: parsed.ownerTeamId,
+            homeChannelId: parsed.homeChannelId,
+            homeThreadTs: parsed.homeThreadTs,
+            originChannelId: parsed.originChannelId,
+            originThreadTs: parsed.originThreadTs,
+            createdByUserId: parsed.createdByUserId,
+          });
+          sendJson(res, 201, { workItem });
+        } catch (error) {
+          sendJson(res, 400, { error: error instanceof Error ? error.message : "Failed to create discovery work item" });
+        }
+        return;
+      }
+
       const parts = pathname.split("/").filter(Boolean);
       if (parts[0] === "api" && parts[1] === "agent-profiles" && parts[2]) {
         if (!agentProfileStore) {
@@ -1355,6 +1443,140 @@ export function startDashboardServer(
           sendJson(res, 200, { events });
           return;
         }
+
+        if (parts.length === 4 && parts[3] === "review-requests" && req.method === "POST") {
+          const raw = await readBody(req);
+          if (raw === null) { sendJson(res, 413, { error: "Request body too large" }); return; }
+          let parsed: {
+            requestedByUserId?: string;
+            requests?: Array<{
+              type: ReviewRequestRecord["type"];
+              targetType: ReviewRequestRecord["targetType"];
+              targetRef: Record<string, unknown>;
+              title: string;
+              requestMessage?: string;
+              focusPoints?: string[];
+            }>;
+          } = {};
+          try {
+            parsed = JSON.parse(raw) as typeof parsed;
+          } catch {
+            sendJson(res, 400, { error: "Invalid JSON body" });
+            return;
+          }
+          if (!parsed.requestedByUserId || !parsed.requests || parsed.requests.length === 0) {
+            sendJson(res, 400, { error: "requestedByUserId and at least one request are required" });
+            return;
+          }
+
+          try {
+            const reviewRequests = await workItemsSource.createReviewRequests({
+              workItemId,
+              requestedByUserId: parsed.requestedByUserId,
+              requests: parsed.requests,
+            });
+            sendJson(res, 201, { reviewRequests });
+          } catch (error) {
+            sendJson(res, 400, { error: error instanceof Error ? error.message : "Failed to create review requests" });
+          }
+          return;
+        }
+
+        if (parts.length === 4 && parts[3] === "confirm-discovery" && req.method === "POST") {
+          const raw = await readBody(req);
+          if (raw === null) { sendJson(res, 413, { error: "Request body too large" }); return; }
+          let parsed: { approved?: boolean; actorUserId?: string } = {};
+          try {
+            parsed = JSON.parse(raw) as typeof parsed;
+          } catch {
+            sendJson(res, 400, { error: "Invalid JSON body" });
+            return;
+          }
+          if (typeof parsed.approved !== "boolean") {
+            sendJson(res, 400, { error: "approved must be a boolean" });
+            return;
+          }
+
+          try {
+            const workItem = await workItemsSource.confirmDiscovery({
+              workItemId,
+              approved: parsed.approved,
+              actorUserId: parsed.actorUserId,
+            });
+            sendJson(res, 200, { workItem });
+          } catch (error) {
+            sendJson(res, 400, { error: error instanceof Error ? error.message : "Failed to confirm discovery" });
+          }
+          return;
+        }
+
+        if (parts.length === 4 && parts[3] === "override-state" && req.method === "POST") {
+          const raw = await readBody(req);
+          if (raw === null) { sendJson(res, 413, { error: "Request body too large" }); return; }
+          let parsed: { state?: WorkItemRecord["state"]; substate?: string; actorUserId?: string; reason?: string } = {};
+          try {
+            parsed = JSON.parse(raw) as typeof parsed;
+          } catch {
+            sendJson(res, 400, { error: "Invalid JSON body" });
+            return;
+          }
+          if (!parsed.state || !parsed.reason) {
+            sendJson(res, 400, { error: "state and reason are required" });
+            return;
+          }
+
+          try {
+            const workItem = await workItemsSource.guardedOverrideState({
+              workItemId,
+              state: parsed.state,
+              substate: parsed.substate,
+              actorUserId: parsed.actorUserId,
+              reason: parsed.reason,
+            });
+            sendJson(res, 200, { workItem });
+          } catch (error) {
+            sendJson(res, 409, { error: error instanceof Error ? error.message : "Guarded override rejected" });
+          }
+          return;
+        }
+      }
+
+      if (parts[0] === "api" && parts[1] === "review-requests" && parts[2] && parts[3] === "respond" && req.method === "POST") {
+        if (!workItemsSource) {
+          sendJson(res, 501, { error: "Work item APIs are unavailable" });
+          return;
+        }
+
+        const raw = await readBody(req);
+        if (raw === null) { sendJson(res, 413, { error: "Request body too large" }); return; }
+        let parsed: {
+          outcome?: NonNullable<ReviewRequestRecord["outcome"]>;
+          authorUserId?: string;
+          comment?: string;
+        } = {};
+        try {
+          parsed = JSON.parse(raw) as typeof parsed;
+        } catch {
+          sendJson(res, 400, { error: "Invalid JSON body" });
+          return;
+        }
+        if (!parsed.outcome) {
+          sendJson(res, 400, { error: "outcome is required" });
+          return;
+        }
+
+        try {
+          const workItem = await workItemsSource.respondToReviewRequest({
+            reviewRequestId: decodeURIComponent(parts[2]),
+            outcome: parsed.outcome,
+            authorUserId: parsed.authorUserId,
+            comment: parsed.comment,
+          });
+          sendJson(res, 200, { workItem });
+        } catch (error) {
+          sendJson(res, 400, { error: error instanceof Error ? error.message : "Failed to record review response" });
+        }
+        return;
       }
 
       // ── Observer API routes ──

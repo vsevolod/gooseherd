@@ -271,6 +271,38 @@ export class WorkItemService {
     return delivery;
   }
 
+  async guardedOverrideState(input: {
+    workItemId: string;
+    state: WorkItemRecord["state"];
+    substate?: string;
+    actorUserId?: string;
+    reason: string;
+    hasActiveProcessing?: (workItem: WorkItemRecord) => Promise<boolean>;
+  }): Promise<WorkItemRecord> {
+    const workItem = await this.requireWorkItem(input.workItemId);
+    if (input.hasActiveProcessing && await input.hasActiveProcessing(workItem)) {
+      throw new Error("Cannot override state while work item processing is active");
+    }
+
+    const updated = await this.workItems.updateState(workItem.id, {
+      state: input.state,
+      substate: input.substate,
+    });
+    await this.events.append({
+      workItemId: workItem.id,
+      eventType: "override.applied",
+      actorUserId: input.actorUserId,
+      payload: {
+        previousState: workItem.state,
+        previousSubstate: workItem.substate,
+        nextState: updated.state,
+        nextSubstate: updated.substate,
+        reason: input.reason,
+      },
+    });
+    return updated;
+  }
+
   async attachRunToWorkItem(input: {
     workItemId: string;
     runId: string;

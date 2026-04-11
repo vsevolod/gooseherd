@@ -132,10 +132,27 @@ function createMockRunDatabase() {
   };
 }
 
-async function request(port: number, method: string, pathname: string): Promise<{ status: number; data: Record<string, unknown> }> {
+async function request(
+  port: number,
+  method: string,
+  pathname: string,
+  body?: unknown
+): Promise<{ status: number; data: Record<string, unknown> }> {
   return new Promise((resolve, reject) => {
+    const bodyStr = body ? JSON.stringify(body) : undefined;
     const req = http.request(
-      { hostname: "127.0.0.1", port, path: pathname, method },
+      {
+        hostname: "127.0.0.1",
+        port,
+        path: pathname,
+        method,
+        headers: bodyStr
+          ? {
+            "content-type": "application/json",
+            "content-length": Buffer.byteLength(bodyStr),
+          }
+          : undefined,
+      },
       (res) => {
         const chunks: Buffer[] = [];
         res.on("data", (chunk: Buffer) => chunks.push(chunk));
@@ -148,6 +165,7 @@ async function request(port: number, method: string, pathname: string): Promise<
       },
     );
     req.on("error", reject);
+    if (bodyStr) req.write(bodyStr);
     req.end();
   });
 }
@@ -201,7 +219,12 @@ describe("Dashboard Work Item API routes", () => {
     return port;
   }
 
-  async function createWorkItemsSource(): Promise<DashboardWorkItemsSource & { discoveryId: string }> {
+  async function createWorkItemsSource(): Promise<DashboardWorkItemsSource & {
+    discoveryId: string;
+    pmUserId: string;
+    reviewerUserId: string;
+    ownerTeamId: string;
+  }> {
     const testDb = await createTestDb();
     cleanups.push(testDb.cleanup);
 
@@ -260,6 +283,9 @@ describe("Dashboard Work Item API routes", () => {
 
     return {
       discoveryId: discovery.id,
+      pmUserId,
+      reviewerUserId,
+      ownerTeamId,
       listWorkItems: async (workflow?: string) => {
         const items = await workItemStore.listWorkItems();
         return workflow ? items.filter((item) => item.workflow === workflow) : items;
@@ -267,6 +293,13 @@ describe("Dashboard Work Item API routes", () => {
       getWorkItem: (id: string) => workItemStore.getWorkItem(id),
       listReviewRequestsForWorkItem: (workItemId: string) => reviewRequestStore.listReviewRequestsForWorkItem(workItemId),
       listEventsForWorkItem: (workItemId: string) => eventsStore.listForWorkItem(workItemId),
+      createDiscoveryWorkItem: (input) => service.createDiscoveryWorkItem(input),
+      createReviewRequests: (input) => service.requestReview(input),
+      respondToReviewRequest: (input) => service.recordReviewOutcome(input),
+      confirmDiscovery: (input) => service.confirmDiscovery(input),
+      guardedOverrideState: async () => {
+        throw new Error("Cannot override state while work item processing is active");
+      },
     };
   }
 
@@ -316,5 +349,95 @@ describe("Dashboard Work Item API routes", () => {
     const events = res.data.events as Array<{ workItemId: string }>;
     assert.ok(events.length >= 2);
     assert.equal(events[0]?.workItemId, source.discoveryId);
+  });
+
+  test("POST /api/work-items/discovery creates a discovery item", async () => {
+    const source = await createWorkItemsSource();
+    const port = await startServer(source);
+
+    const res = await request(port, "POST", "/api/work-items/discovery", {
+      title: "New discovery item",
+      summary: "Draft spec",
+      ownerTeamId: source.ownerTeamId,
+      homeChannelId: "C_DISCOVERY",
+      homeThreadTs: "1740000001.100",
+      createdByUserId: source.pmUserId,
+    });
+
+    assert.equal(res.status, 201);
+    assert.equal((res.data.workItem as { workflow: string }).workflow, "product_discovery");
+  });
+
+  test("POST /api/work-items/:id/review-requests creates review requests", async () => {
+    const source = await createWorkItemsSource();
+    const port = await startServer(source);
+
+    const res = await request(port, "POST", `/api/work-items/${source.discoveryId}/review-requests`, {
+      requestedByUserId: source.pmUserId,
+      requests: [
+        {
+          type: "review",
+          targetType: "team",
+          targetRef: { teamId: source.ownerTeamId },
+          title: "Second review round",
+          requestMessage: "Need more feedback",
+          focusPoints: ["naming"],
+        },
+      ],
+    });
+
+    assert.equal(res.status, 201);
+    const reviewRequests = res.data.reviewRequests as Array<{ workItemId: string }>;
+    assert.equal(reviewRequests.length, 1);
+    assert.equal(reviewRequests[0]?.workItemId, source.discoveryId);
+  });
+
+  test("POST /api/review-requests/:id/respond records review outcome", async () => {
+    const source = await createWorkItemsSource();
+    const port = await startServer(source);
+    const existingRequests = await source.listReviewRequestsForWorkItem(source.discoveryId);
+
+    const res = await request(port, "POST", `/api/review-requests/${existingRequests[0]!.id}/respond`, {
+      outcome: "approved",
+      authorUserId: source.reviewerUserId,
+      comment: "Looks fine",
+    });
+
+    assert.equal(res.status, 200);
+    assert.equal((res.data.workItem as { state: string }).state, "waiting_for_pm_confirmation");
+  });
+
+  test("POST /api/work-items/:id/confirm-discovery finalizes PM decision", async () => {
+    const source = await createWorkItemsSource();
+    const port = await startServer(source);
+    const existingRequests = await source.listReviewRequestsForWorkItem(source.discoveryId);
+    await source.respondToReviewRequest({
+      reviewRequestId: existingRequests[0]!.id,
+      outcome: "approved",
+      authorUserId: source.reviewerUserId,
+      comment: "Ready for PM",
+    });
+
+    const res = await request(port, "POST", `/api/work-items/${source.discoveryId}/confirm-discovery`, {
+      approved: true,
+      actorUserId: source.pmUserId,
+    });
+
+    assert.equal(res.status, 200);
+    assert.equal((res.data.workItem as { state: string }).state, "done");
+  });
+
+  test("POST /api/work-items/:id/override-state rejects when guarded override is blocked", async () => {
+    const source = await createWorkItemsSource();
+    const port = await startServer(source);
+
+    const res = await request(port, "POST", `/api/work-items/${source.discoveryId}/override-state`, {
+      state: "cancelled",
+      reason: "stuck worker",
+      actorUserId: source.pmUserId,
+    });
+
+    assert.equal(res.status, 409);
+    assert.match(String(res.data.error), /processing is active/);
   });
 });

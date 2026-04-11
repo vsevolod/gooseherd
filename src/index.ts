@@ -42,6 +42,7 @@ import { recoverRunsAfterRestart } from "./runtime/startup-recovery.js";
 import { WorkItemStore } from "./work-items/store.js";
 import { ReviewRequestStore } from "./work-items/review-request-store.js";
 import { WorkItemEventsStore } from "./work-items/events-store.js";
+import { WorkItemService } from "./work-items/service.js";
 import {
   hasSandboxRuntimeHotReloadChange,
   preflightSandboxRuntime
@@ -158,6 +159,7 @@ async function createServices(config: AppConfig, db: Database): Promise<Services
   const workItemStore = new WorkItemStore(db);
   const reviewRequestStore = new ReviewRequestStore(db);
   const workItemEventsStore = new WorkItemEventsStore(db);
+  const workItemService = new WorkItemService(db);
   const runtimeFactsReader = config.sandboxRuntime === "kubernetes"
     ? new KubernetesRuntimeFactsReader({
       namespace: resolveKubernetesNamespace(),
@@ -219,6 +221,14 @@ async function createServices(config: AppConfig, db: Database): Promise<Services
     getWorkItem: (id) => workItemStore.getWorkItem(id),
     listReviewRequestsForWorkItem: (workItemId) => reviewRequestStore.listReviewRequestsForWorkItem(workItemId),
     listEventsForWorkItem: (workItemId) => workItemEventsStore.listForWorkItem(workItemId),
+    createDiscoveryWorkItem: (input) => workItemService.createDiscoveryWorkItem(input),
+    createReviewRequests: (input) => workItemService.requestReview(input),
+    respondToReviewRequest: (input) => workItemService.recordReviewOutcome(input),
+    confirmDiscovery: (input) => workItemService.confirmDiscovery(input),
+    guardedOverrideState: (input) => workItemService.guardedOverrideState({
+      ...input,
+      hasActiveProcessing: async () => true,
+    }),
   };
 
   return {
