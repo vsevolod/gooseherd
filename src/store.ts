@@ -43,6 +43,7 @@ function rowToRecord(row: RunRow): RunRecord {
     title: row.title ?? undefined,
     tokenUsage: row.tokenUsage as RunRecord["tokenUsage"],
     teamId: row.teamId ?? undefined,
+    workItemId: row.workItemId ?? undefined,
   };
 }
 
@@ -221,6 +222,7 @@ export class RunStore {
         | "feedbackNote"
         | "tokenUsage"
         | "title"
+        | "workItemId"
       >
     >
   ): Promise<RunRecord> {
@@ -244,11 +246,16 @@ export class RunStore {
     if (update.feedbackNote !== undefined) dbUpdate.feedbackNote = update.feedbackNote;
     if (update.tokenUsage !== undefined) dbUpdate.tokenUsage = update.tokenUsage;
     if (update.title !== undefined) dbUpdate.title = update.title;
+    if (update.workItemId !== undefined) dbUpdate.workItemId = update.workItemId;
 
     await this.db.update(runs).set(dbUpdate).where(eq(runs.id, id));
     const result = await this.getRun(id);
     if (!result) throw new Error(`Run not found: ${id}`);
     return result;
+  }
+
+  async linkToWorkItem(runId: string, workItemId: string): Promise<RunRecord> {
+    return this.updateRun(runId, { workItemId });
   }
 
   async failInProgressRuns(reason: string): Promise<number> {

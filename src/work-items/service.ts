@@ -1,4 +1,5 @@
 import type { Database } from "../db/index.js";
+import { RunStore } from "../store.js";
 import { WorkItemEventsStore } from "./events-store.js";
 import { nextDiscoveryStateAfterPmConfirmation, evaluateDiscoveryReviewRound } from "./product-discovery-policy.js";
 import { ReviewRequestStore } from "./review-request-store.js";
@@ -13,11 +14,13 @@ export class WorkItemService {
   private readonly workItems: WorkItemStore;
   private readonly reviewRequests: ReviewRequestStore;
   private readonly events: WorkItemEventsStore;
+  private readonly runs: RunStore;
 
   constructor(db: Database) {
     this.workItems = new WorkItemStore(db);
     this.reviewRequests = new ReviewRequestStore(db);
     this.events = new WorkItemEventsStore(db);
+    this.runs = new RunStore(db);
   }
 
   async getWorkItem(id: string): Promise<WorkItemRecord | undefined> {
@@ -217,6 +220,71 @@ export class WorkItemService {
     });
 
     return delivery;
+  }
+
+  async createDeliveryFromJira(input: {
+    title: string;
+    summary?: string;
+    ownerTeamId: string;
+    homeChannelId: string;
+    homeThreadTs: string;
+    originChannelId?: string;
+    originThreadTs?: string;
+    jiraIssueKey: string;
+    createdByUserId: string;
+    githubPrNumber?: number;
+    githubPrUrl?: string;
+    initialState?: Extract<WorkItemRecord["state"], "backlog" | "auto_review">;
+    initialSubstate?: string;
+    flags?: string[];
+  }): Promise<WorkItemRecord> {
+    const delivery = await this.workItems.createWorkItem({
+      workflow: "feature_delivery",
+      state: input.initialState ?? "backlog",
+      substate: input.initialSubstate,
+      title: input.title,
+      summary: input.summary,
+      ownerTeamId: input.ownerTeamId,
+      homeChannelId: input.homeChannelId,
+      homeThreadTs: input.homeThreadTs,
+      originChannelId: input.originChannelId,
+      originThreadTs: input.originThreadTs,
+      jiraIssueKey: input.jiraIssueKey,
+      githubPrNumber: input.githubPrNumber,
+      githubPrUrl: input.githubPrUrl,
+      createdByUserId: input.createdByUserId,
+      flags: input.flags ?? [],
+    });
+
+    await this.events.append({
+      workItemId: delivery.id,
+      eventType: "work_item.created",
+      actorUserId: input.createdByUserId,
+      payload: {
+        workflow: delivery.workflow,
+        state: delivery.state,
+        jiraIssueKey: delivery.jiraIssueKey,
+        githubPrNumber: delivery.githubPrNumber,
+      },
+    });
+
+    return delivery;
+  }
+
+  async attachRunToWorkItem(input: {
+    workItemId: string;
+    runId: string;
+    actorUserId?: string;
+  }): Promise<WorkItemRecord> {
+    const workItem = await this.requireWorkItem(input.workItemId);
+    await this.runs.linkToWorkItem(input.runId, input.workItemId);
+    await this.events.append({
+      workItemId: workItem.id,
+      eventType: "run.attached",
+      actorUserId: input.actorUserId,
+      payload: { runId: input.runId },
+    });
+    return workItem;
   }
 
   private async requireWorkItem(id: string): Promise<WorkItemRecord> {

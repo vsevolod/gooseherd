@@ -5,6 +5,7 @@ import { eq } from "drizzle-orm";
 import { createTestDb } from "./helpers/test-db.js";
 import { teams, users, workItems, reviewRequests, workItemEvents } from "../src/db/schema.js";
 import { WorkItemService } from "../src/work-items/service.js";
+import { RunStore } from "../src/store.js";
 
 async function createServiceFixture() {
   const testDb = await createTestDb();
@@ -143,4 +144,61 @@ test("service creates discovery item, manages review round, and creates delivery
 
   const events = await db.select().from(workItemEvents).where(eq(workItemEvents.workItemId, discovery.id));
   assert.ok(events.length >= 4, "expected discovery lifecycle events to be recorded");
+});
+
+test("service creates delivery item directly from jira trigger", async (t) => {
+  const { service, cleanup, pmUserId, ownerTeamId } = await createServiceFixture();
+  t.after(cleanup);
+
+  const delivery = await service.createDeliveryFromJira({
+    title: "Automate CI recovery",
+    summary: "Created from Jira webhook",
+    ownerTeamId,
+    homeChannelId: "C_GROWTH",
+    homeThreadTs: "1740000000.300",
+    jiraIssueKey: "HBL-202",
+    createdByUserId: pmUserId,
+  });
+
+  assert.equal(delivery.workflow, "feature_delivery");
+  assert.equal(delivery.state, "backlog");
+  assert.equal(delivery.jiraIssueKey, "HBL-202");
+});
+
+test("service can attach an existing run to a work item", async (t) => {
+  const { db, service, cleanup, pmUserId, ownerTeamId } = await createServiceFixture();
+  t.after(cleanup);
+
+  const workItem = await service.createDeliveryFromJira({
+    title: "Adopt run chain",
+    summary: "Attach ad-hoc run",
+    ownerTeamId,
+    homeChannelId: "C_GROWTH",
+    homeThreadTs: "1740000000.400",
+    jiraIssueKey: "HBL-303",
+    createdByUserId: pmUserId,
+  });
+
+  const runStore = new RunStore(db);
+  const run = await runStore.createRun(
+    {
+      runtime: "local",
+      repoSlug: "hubstaff/gooseherd",
+      task: "Fix specs",
+      baseBranch: "main",
+      requestedBy: "U_PM",
+      channelId: "C_GROWTH",
+      threadTs: "1740000000.400",
+    },
+    "gooseherd"
+  );
+
+  await service.attachRunToWorkItem({
+    workItemId: workItem.id,
+    runId: run.id,
+    actorUserId: pmUserId,
+  });
+
+  const storedRun = await runStore.getRun(run.id);
+  assert.equal(storedRun?.workItemId, workItem.id);
 });
