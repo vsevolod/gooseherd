@@ -1,11 +1,13 @@
 import type { Database } from "../db/index.js";
 import { RunStore } from "../store.js";
+import { WorkItemAuthorization } from "./authorization.js";
 import { WorkItemEventsStore } from "./events-store.js";
 import { nextDiscoveryStateAfterPmConfirmation, evaluateDiscoveryReviewRound } from "./product-discovery-policy.js";
 import { ReviewRequestStore } from "./review-request-store.js";
 import { WorkItemStore } from "./store.js";
 import type {
   CreateWorkItemInput,
+  ReviewRequestCommentSource,
   ReviewRequestRecord,
   WorkItemRecord,
 } from "./types.js";
@@ -15,23 +17,31 @@ export class WorkItemService {
   private readonly reviewRequests: ReviewRequestStore;
   private readonly events: WorkItemEventsStore;
   private readonly runs: RunStore;
+  private readonly authorization: WorkItemAuthorization;
 
   constructor(db: Database) {
     this.workItems = new WorkItemStore(db);
     this.reviewRequests = new ReviewRequestStore(db);
     this.events = new WorkItemEventsStore(db);
     this.runs = new RunStore(db);
+    this.authorization = new WorkItemAuthorization(db);
   }
 
   async getWorkItem(id: string): Promise<WorkItemRecord | undefined> {
     return this.workItems.getWorkItem(id);
   }
 
+  async listReviewRequestComments(reviewRequestId: string) {
+    return this.reviewRequests.listComments(reviewRequestId);
+  }
+
   async createDiscoveryWorkItem(input: Omit<CreateWorkItemInput, "workflow" | "state">): Promise<WorkItemRecord> {
+    await this.authorization.assertCanCreateForTeam(input.createdByUserId, input.ownerTeamId);
     const workItem = await this.workItems.createWorkItem({
       ...input,
       workflow: "product_discovery",
       state: "backlog",
+      flags: Array.from(new Set([...(input.flags ?? []), ...(input.jiraIssueKey ? ["jira_created"] : [])])),
     });
     await this.events.append({
       workItemId: workItem.id,
@@ -69,6 +79,7 @@ export class WorkItemService {
     }>;
   }): Promise<ReviewRequestRecord[]> {
     const workItem = await this.requireWorkItem(input.workItemId);
+    await this.authorization.assertCanManageWorkItem(input.requestedByUserId, workItem);
     const currentRequests = await this.reviewRequests.listReviewRequestsForWorkItem(workItem.id);
     const nextReviewRound = Math.max(0, ...currentRequests.map((request) => request.reviewRound)) + 1;
 
@@ -114,7 +125,15 @@ export class WorkItemService {
     outcome: NonNullable<ReviewRequestRecord["outcome"]>;
     authorUserId?: string;
     comment?: string;
+    source?: ReviewRequestCommentSource;
   }): Promise<WorkItemRecord> {
+    const existingReviewRequest = await this.reviewRequests.getReviewRequest(input.reviewRequestId);
+    if (!existingReviewRequest) {
+      throw new Error(`ReviewRequest not found: ${input.reviewRequestId}`);
+    }
+    const workItem = await this.requireWorkItem(existingReviewRequest.workItemId);
+    await this.authorization.assertCanRespondToReviewRequest(input.authorUserId, workItem, existingReviewRequest);
+
     const completed = await this.reviewRequests.completeReviewRequest(input.reviewRequestId, {
       outcome: input.outcome,
     });
@@ -123,12 +142,25 @@ export class WorkItemService {
       await this.reviewRequests.addComment({
         reviewRequestId: input.reviewRequestId,
         authorUserId: input.authorUserId,
-        source: "dashboard",
+        source: input.source ?? "dashboard",
         body: input.comment,
       });
+      await this.events.append({
+        workItemId: completed.workItemId,
+        eventType: "review_request.comment_added",
+        actorUserId: input.authorUserId,
+        payload: { reviewRequestId: input.reviewRequestId, source: input.source ?? "dashboard" },
+      });
+      if (input.source === "slack") {
+        await this.events.append({
+          workItemId: completed.workItemId,
+          eventType: "slack.action_observed",
+          actorUserId: input.authorUserId,
+          payload: { reviewRequestId: input.reviewRequestId, outcome: input.outcome },
+        });
+      }
     }
 
-    const workItem = await this.requireWorkItem(completed.workItemId);
     const currentRound = await this.reviewRequests.listReviewRequestsForWorkItem(completed.workItemId, completed.reviewRound);
     const roundResult = evaluateDiscoveryReviewRound(workItem, currentRound);
 
@@ -158,7 +190,67 @@ export class WorkItemService {
     return updated;
   }
 
-  async confirmDiscovery(input: { workItemId: string; approved: boolean; actorUserId?: string }): Promise<WorkItemRecord> {
+  async confirmDiscovery(input: {
+    workItemId: string;
+    approved: boolean;
+    actorUserId?: string;
+    jiraIssueKey?: string;
+  }): Promise<WorkItemRecord> {
+    const workItem = await this.requireWorkItem(input.workItemId);
+    await this.authorization.assertCanManageWorkItem(input.actorUserId, workItem);
+
+    if (input.approved) {
+      const jiraIssueKey = input.jiraIssueKey?.trim() || workItem.jiraIssueKey;
+      if (!jiraIssueKey) {
+        throw new Error("Jira issue key is required before completing discovery");
+      }
+
+      const existingDelivery = (await this.workItems.listWorkItems()).find((candidate) => candidate.sourceWorkItemId === workItem.id);
+      if (existingDelivery) {
+        throw new Error(`Delivery work item already exists for discovery ${workItem.id}`);
+      }
+
+      if (!workItem.jiraIssueKey) {
+        await this.workItems.setJiraIssueKey(workItem.id, jiraIssueKey);
+      }
+
+      const delivery = await this.workItems.createWorkItem({
+        workflow: "feature_delivery",
+        state: "backlog",
+        title: workItem.title,
+        summary: workItem.summary,
+        ownerTeamId: workItem.ownerTeamId,
+        homeChannelId: workItem.homeChannelId,
+        homeThreadTs: workItem.homeThreadTs,
+        originChannelId: workItem.originChannelId,
+        originThreadTs: workItem.originThreadTs,
+        jiraIssueKey,
+        sourceWorkItemId: workItem.id,
+        createdByUserId: input.actorUserId ?? workItem.createdByUserId,
+        flags: [],
+      });
+
+      const updated = await this.workItems.updateState(input.workItemId, {
+        state: "done",
+        flagsToAdd: ["pm_approved", "jira_created", "delivery_work_item_created"],
+      });
+
+      await this.events.append({
+        workItemId: input.workItemId,
+        eventType: "work_item.state_changed",
+        actorUserId: input.actorUserId,
+        payload: { state: updated.state, approved: input.approved, jiraIssueKey },
+      });
+      await this.events.append({
+        workItemId: delivery.id,
+        eventType: "work_item.created",
+        actorUserId: input.actorUserId,
+        payload: { workflow: delivery.workflow, sourceWorkItemId: workItem.id, jiraIssueKey },
+      });
+
+      return await this.requireWorkItem(input.workItemId);
+    }
+
     const nextState = nextDiscoveryStateAfterPmConfirmation(input.approved);
     const updated = await this.workItems.updateState(input.workItemId, {
       state: nextState,
@@ -280,9 +372,21 @@ export class WorkItemService {
     hasActiveProcessing?: (workItem: WorkItemRecord) => Promise<boolean>;
   }): Promise<WorkItemRecord> {
     const workItem = await this.requireWorkItem(input.workItemId);
+    await this.authorization.assertCanManageWorkItem(input.actorUserId, workItem);
     if (input.hasActiveProcessing && await input.hasActiveProcessing(workItem)) {
       throw new Error("Cannot override state while work item processing is active");
     }
+
+    await this.events.append({
+      workItemId: workItem.id,
+      eventType: "override.requested",
+      actorUserId: input.actorUserId,
+      payload: {
+        requestedState: input.state,
+        requestedSubstate: input.substate,
+        reason: input.reason,
+      },
+    });
 
     const updated = await this.workItems.updateState(workItem.id, {
       state: input.state,
@@ -314,6 +418,7 @@ export class WorkItemService {
     cancelRun: (runId: string) => Promise<boolean>;
   }): Promise<{ workItem: WorkItemRecord; stoppedRunIds: string[]; alreadyIdleRunIds: string[]; failedRunIds: string[] }> {
     const workItem = await this.requireWorkItem(input.workItemId);
+    await this.authorization.assertCanManageWorkItem(input.actorUserId, workItem);
     const runs = await this.runs.listRunsForWorkItem(workItem.id);
 
     const stoppedRunIds: string[] = [];

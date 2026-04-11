@@ -170,6 +170,17 @@ export class GitHubWorkItemSync {
 
     const existing = await this.workItems.findByGitHubPrNumber(prNumber);
     if (existing) {
+      await this.events.append({
+        workItemId: existing.id,
+        eventType: "github.label_observed",
+        actorUserId: existing.createdByUserId,
+        payload: {
+          action: payload.action,
+          prNumber,
+          labels: payload.labels ?? [],
+          merged: payload.merged ?? false,
+        },
+      });
       if (payload.action === "closed" && payload.merged) {
         return this.markPullRequestMerged(existing, payload);
       }
@@ -192,6 +203,16 @@ export class GitHubWorkItemSync {
 
     const existingByJira = await this.workItems.findByJiraIssueKey(jiraIssueKey);
     if (existingByJira?.workflow === "feature_delivery") {
+      await this.events.append({
+        workItemId: existingByJira.id,
+        eventType: "github.label_observed",
+        actorUserId: existingByJira.createdByUserId,
+        payload: {
+          action: payload.action,
+          prNumber,
+          labels: payload.labels ?? [],
+        },
+      });
       await this.workItems.linkPullRequest(existingByJira.id, {
         githubPrNumber: prNumber,
         githubPrUrl: payload.prUrl,
@@ -243,6 +264,17 @@ export class GitHubWorkItemSync {
 
     await this.events.append({
       workItemId: adopted.id,
+      eventType: "github.label_observed",
+      actorUserId: context.createdByUserId,
+      payload: {
+        action: payload.action,
+        prNumber,
+        labels: payload.labels ?? [],
+      },
+    });
+
+    await this.events.append({
+      workItemId: adopted.id,
       eventType: "github.pr_adopted",
       actorUserId: context.createdByUserId,
       payload: {
@@ -261,6 +293,18 @@ export class GitHubWorkItemSync {
     if (!workItem) {
       return undefined;
     }
+
+    await this.events.append({
+      workItemId: workItem.id,
+      eventType: "github.ci_updated",
+      actorUserId: workItem.createdByUserId,
+      payload: {
+        action: payload.action,
+        status: payload.status,
+        conclusion: payload.conclusion,
+        pullRequestNumbers: payload.pullRequestNumbers ?? [],
+      },
+    });
 
     const conclusion = payload.conclusion?.toLowerCase();
     if (conclusion === "success") {
@@ -326,6 +370,18 @@ export class GitHubWorkItemSync {
     if (!workItem) {
       return undefined;
     }
+
+    await this.events.append({
+      workItemId: workItem.id,
+      eventType: "github.review_submitted",
+      actorUserId: workItem.createdByUserId,
+      payload: {
+        prNumber: payload.prNumber,
+        reviewer: payload.reviewer,
+        reviewState: payload.state?.toLowerCase(),
+        action: payload.action,
+      },
+    });
 
     const reviewState = payload.state?.toLowerCase();
     if (reviewState !== "approved" && reviewState !== "changes_requested") {

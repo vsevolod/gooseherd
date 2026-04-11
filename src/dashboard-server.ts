@@ -54,15 +54,24 @@ export interface DashboardWorkItemsSource {
   listWorkItems(workflow?: string): Promise<WorkItemRecord[]>;
   getWorkItem(id: string): Promise<WorkItemRecord | undefined>;
   listReviewRequestsForWorkItem(workItemId: string): Promise<ReviewRequestRecord[]>;
+  listReviewRequestComments(reviewRequestId: string): Promise<Array<{
+    id: number;
+    reviewRequestId: string;
+    authorUserId?: string;
+    source: string;
+    body: string;
+    createdAt: string;
+  }>>;
   listEventsForWorkItem(workItemId: string): Promise<WorkItemEventRecord[]>;
   createDiscoveryWorkItem(input: {
     title: string;
     summary?: string;
-    ownerTeamId: string;
-    homeChannelId: string;
-    homeThreadTs: string;
+    ownerTeamId?: string;
+    homeChannelId?: string;
+    homeThreadTs?: string;
     originChannelId?: string;
     originThreadTs?: string;
+    jiraIssueKey?: string;
     createdByUserId: string;
   }): Promise<WorkItemRecord>;
   createReviewRequests(input: {
@@ -87,6 +96,7 @@ export interface DashboardWorkItemsSource {
     workItemId: string;
     approved: boolean;
     actorUserId?: string;
+    jiraIssueKey?: string;
   }): Promise<WorkItemRecord>;
   stopProcessing(input: {
     workItemId: string;
@@ -985,6 +995,7 @@ export function startDashboardServer(
           homeThreadTs?: string;
           originChannelId?: string;
           originThreadTs?: string;
+          jiraIssueKey?: string;
           createdByUserId?: string;
         } = {};
         try {
@@ -994,8 +1005,8 @@ export function startDashboardServer(
           return;
         }
 
-        if (!parsed.title || !parsed.ownerTeamId || !parsed.homeChannelId || !parsed.homeThreadTs || !parsed.createdByUserId) {
-          sendJson(res, 400, { error: "title, ownerTeamId, homeChannelId, homeThreadTs, and createdByUserId are required" });
+        if (!parsed.title || !parsed.createdByUserId) {
+          sendJson(res, 400, { error: "title and createdByUserId are required" });
           return;
         }
 
@@ -1008,6 +1019,7 @@ export function startDashboardServer(
             homeThreadTs: parsed.homeThreadTs,
             originChannelId: parsed.originChannelId,
             originThreadTs: parsed.originThreadTs,
+            jiraIssueKey: parsed.jiraIssueKey,
             createdByUserId: parsed.createdByUserId,
           });
           sendJson(res, 201, { workItem });
@@ -1442,6 +1454,13 @@ export function startDashboardServer(
           return;
         }
 
+        if (parts.length === 6 && parts[3] === "review-requests" && parts[5] === "comments" && req.method === "GET") {
+          const reviewRequestId = decodeURIComponent(parts[4]!);
+          const comments = await workItemsSource.listReviewRequestComments(reviewRequestId);
+          sendJson(res, 200, { comments });
+          return;
+        }
+
         if (parts.length === 4 && parts[3] === "events" && req.method === "GET") {
           const events = await workItemsSource.listEventsForWorkItem(workItemId);
           sendJson(res, 200, { events });
@@ -1489,7 +1508,7 @@ export function startDashboardServer(
         if (parts.length === 4 && parts[3] === "confirm-discovery" && req.method === "POST") {
           const raw = await readBody(req);
           if (raw === null) { sendJson(res, 413, { error: "Request body too large" }); return; }
-          let parsed: { approved?: boolean; actorUserId?: string } = {};
+          let parsed: { approved?: boolean; actorUserId?: string; jiraIssueKey?: string } = {};
           try {
             parsed = JSON.parse(raw) as typeof parsed;
           } catch {
@@ -1506,6 +1525,7 @@ export function startDashboardServer(
               workItemId,
               approved: parsed.approved,
               actorUserId: parsed.actorUserId,
+              jiraIssueKey: parsed.jiraIssueKey,
             });
             sendJson(res, 200, { workItem });
           } catch (error) {

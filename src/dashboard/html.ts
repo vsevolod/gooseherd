@@ -653,6 +653,31 @@ export function dashboardHtml(config: AppConfig): string {
       gap: 6px;
       flex-wrap: wrap;
     }
+    .board-review-comments {
+      display: grid;
+      gap: 6px;
+    }
+    .board-review-comment {
+      border: 1px solid var(--border);
+      background: color-mix(in srgb, var(--panel-2) 78%, transparent);
+      border-radius: 8px;
+      padding: 8px;
+      display: grid;
+      gap: 4px;
+    }
+    .board-review-comment-meta {
+      font-size: 11px;
+      color: var(--muted);
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .board-review-comment-body {
+      font-size: 12px;
+      color: var(--text);
+      white-space: pre-wrap;
+      line-height: 1.45;
+    }
     .board-detail-actions {
       display: flex;
       gap: 8px;
@@ -2137,12 +2162,14 @@ export function dashboardHtml(config: AppConfig): string {
       selectedWorkItemId: null,
       selectedWorkItem: null,
       selectedWorkItemReviewRequests: [],
+      selectedWorkItemReviewComments: {},
       selectedWorkItemEvents: [],
       selectedId: null,
       interval: null,
       themePreference: 'system',
       viewMode: 'runs',
       boardWorkflow: 'product_discovery',
+      boardActorUserId: '',
     };
 
     var logStreamState = { runId: null, offset: 0 };
@@ -3613,6 +3640,7 @@ export function dashboardHtml(config: AppConfig): string {
       if (!state.selectedWorkItemId) {
         state.selectedWorkItem = null;
         state.selectedWorkItemReviewRequests = [];
+        state.selectedWorkItemReviewComments = {};
         state.selectedWorkItemEvents = [];
         renderBoardDetail();
         return;
@@ -3628,6 +3656,21 @@ export function dashboardHtml(config: AppConfig): string {
       state.selectedWorkItem = results[0].workItem || null;
       state.selectedWorkItemReviewRequests = Array.isArray(results[1].reviewRequests) ? results[1].reviewRequests : [];
       state.selectedWorkItemEvents = Array.isArray(results[2].events) ? results[2].events : [];
+      state.selectedWorkItemReviewComments = {};
+      if (state.selectedWorkItemReviewRequests.length > 0) {
+        var commentResults = await Promise.all(state.selectedWorkItemReviewRequests.map(function(request) {
+          return fetchJson('/api/work-items/' + encodedId + '/review-requests/' + encodeURIComponent(request.id) + '/comments')
+            .then(function(payload) {
+              return [request.id, Array.isArray(payload.comments) ? payload.comments : []];
+            })
+            .catch(function() {
+              return [request.id, []];
+            });
+        }));
+        commentResults.forEach(function(entry) {
+          state.selectedWorkItemReviewComments[entry[0]] = entry[1];
+        });
+      }
       renderBoard();
       renderBoardDetail();
     }
@@ -3760,6 +3803,31 @@ export function dashboardHtml(config: AppConfig): string {
           wrapper.appendChild(resolution);
         }
 
+        var comments = state.selectedWorkItemReviewComments[request.id] || [];
+        if (comments.length > 0) {
+          var commentsWrap = document.createElement('div');
+          commentsWrap.className = 'board-review-comments';
+
+          comments.forEach(function(commentRecord) {
+            var commentNode = document.createElement('div');
+            commentNode.className = 'board-review-comment';
+
+            var commentMeta = document.createElement('div');
+            commentMeta.className = 'board-review-comment-meta';
+            commentMeta.textContent = describeReviewComment(commentRecord) + ' · ' + timeAgo(commentRecord.createdAt);
+            commentNode.appendChild(commentMeta);
+
+            var commentBody = document.createElement('div');
+            commentBody.className = 'board-review-comment-body';
+            commentBody.textContent = commentRecord.body || '';
+            commentNode.appendChild(commentBody);
+
+            commentsWrap.appendChild(commentNode);
+          });
+
+          wrapper.appendChild(commentsWrap);
+        }
+
         if (request.status === 'pending') {
           var actions = document.createElement('div');
           actions.className = 'board-inline-actions';
@@ -3854,6 +3922,34 @@ export function dashboardHtml(config: AppConfig): string {
         return 'Org role ' + (ref.role || ref.orgRole || 'unknown');
       }
       return titleCaseWorkItemState(request.targetType);
+    }
+
+    function describeReviewComment(commentRecord) {
+      var parts = [];
+      if (commentRecord.source) {
+        parts.push(titleCaseWorkItemState(commentRecord.source));
+      }
+      if (commentRecord.authorUserId) {
+        parts.push('User ' + commentRecord.authorUserId);
+      }
+      return parts.length > 0 ? parts.join(' · ') : 'System';
+    }
+
+    function ensureBoardActorUserId(defaultUserId, promptLabel) {
+      if (state.boardActorUserId) {
+        return state.boardActorUserId;
+      }
+      var suggested = defaultUserId || '';
+      var value = window.prompt(promptLabel || 'Actor user id', suggested);
+      if (value === null) {
+        return null;
+      }
+      value = String(value || '').trim();
+      if (!value) {
+        return null;
+      }
+      state.boardActorUserId = value;
+      return value;
     }
 
     async function refreshSelected() {
@@ -4264,6 +4360,15 @@ export function dashboardHtml(config: AppConfig): string {
 
     async function respondToReviewRequest(reviewRequestId, outcome, comment) {
       if (!reviewRequestId) return;
+      var request = (state.selectedWorkItemReviewRequests || []).find(function(entry) { return entry.id === reviewRequestId; }) || null;
+      var defaultActorUserId = request && request.targetType === 'user' && request.targetRef
+        ? request.targetRef.userId
+        : (state.selectedWorkItem && state.selectedWorkItem.createdByUserId) || '';
+      var authorUserId = ensureBoardActorUserId(defaultActorUserId, 'Reviewer user id');
+      if (!authorUserId) {
+        setBoardStatusMessage('Reviewer user id is required to respond from the board.', 'error');
+        return;
+      }
       setBoardStatusMessage('Saving review response...');
       try {
         await fetchJson('/api/review-requests/' + encodeURIComponent(reviewRequestId) + '/respond', {
@@ -4272,6 +4377,7 @@ export function dashboardHtml(config: AppConfig): string {
           body: JSON.stringify({
             outcome: outcome,
             comment: comment || undefined,
+            authorUserId: authorUserId,
           }),
         });
         await loadWorkItems();
@@ -4284,12 +4390,26 @@ export function dashboardHtml(config: AppConfig): string {
     if (el.boardConfirmApprove) {
       el.boardConfirmApprove.onclick = async function() {
         if (!state.selectedWorkItemId) return;
+        var item = state.selectedWorkItem;
+        var actorUserId = ensureBoardActorUserId(item && item.createdByUserId, 'PM user id');
+        if (!actorUserId) {
+          setBoardStatusMessage('PM user id is required to approve discovery.', 'error');
+          return;
+        }
+        var jiraIssueKey = item && item.jiraIssueKey ? item.jiraIssueKey : '';
+        if (!jiraIssueKey) {
+          jiraIssueKey = String(window.prompt('Jira issue key', '') || '').trim();
+          if (!jiraIssueKey) {
+            setBoardStatusMessage('Jira issue key is required before discovery can be approved.', 'error');
+            return;
+          }
+        }
         setBoardStatusMessage('Applying PM approval...');
         try {
           await fetchJson('/api/work-items/' + encodeURIComponent(state.selectedWorkItemId) + '/confirm-discovery', {
             method: 'POST',
             headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ approved: true }),
+            body: JSON.stringify({ approved: true, actorUserId: actorUserId, jiraIssueKey: jiraIssueKey }),
           });
           await loadWorkItems();
           setBoardStatusMessage('Discovery approved.', 'ok');
@@ -4302,12 +4422,18 @@ export function dashboardHtml(config: AppConfig): string {
     if (el.boardConfirmRework) {
       el.boardConfirmRework.onclick = async function() {
         if (!state.selectedWorkItemId) return;
+        var item = state.selectedWorkItem;
+        var actorUserId = ensureBoardActorUserId(item && item.createdByUserId, 'PM user id');
+        if (!actorUserId) {
+          setBoardStatusMessage('PM user id is required to return discovery to rework.', 'error');
+          return;
+        }
         setBoardStatusMessage('Returning item to in_progress...');
         try {
           await fetchJson('/api/work-items/' + encodeURIComponent(state.selectedWorkItemId) + '/confirm-discovery', {
             method: 'POST',
             headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ approved: false }),
+            body: JSON.stringify({ approved: false, actorUserId: actorUserId }),
           });
           await loadWorkItems();
           setBoardStatusMessage('Discovery returned to in_progress.', 'ok');
@@ -4320,12 +4446,18 @@ export function dashboardHtml(config: AppConfig): string {
     if (el.boardStopProcessing) {
       el.boardStopProcessing.onclick = async function() {
         if (!state.selectedWorkItemId) return;
+        var item = state.selectedWorkItem;
+        var actorUserId = ensureBoardActorUserId(item && item.createdByUserId, 'Actor user id');
+        if (!actorUserId) {
+          setBoardStatusMessage('Actor user id is required to stop processing.', 'error');
+          return;
+        }
         setBoardStatusMessage('Stopping active processing...');
         try {
           var result = await fetchJson('/api/work-items/' + encodeURIComponent(state.selectedWorkItemId) + '/stop-processing', {
             method: 'POST',
             headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({}),
+            body: JSON.stringify({ actorUserId: actorUserId }),
           });
           await loadWorkItems();
           var stopped = Array.isArray(result.stoppedRunIds) ? result.stoppedRunIds.length : 0;
@@ -4344,6 +4476,12 @@ export function dashboardHtml(config: AppConfig): string {
     if (el.boardOverrideSubmit) {
       el.boardOverrideSubmit.onclick = async function() {
         if (!state.selectedWorkItemId) return;
+        var item = state.selectedWorkItem;
+        var actorUserId = ensureBoardActorUserId(item && item.createdByUserId, 'Actor user id');
+        if (!actorUserId) {
+          setBoardStatusMessage('Actor user id is required to override work item state.', 'error');
+          return;
+        }
         var reason = (el.boardOverrideReason.value || '').trim();
         if (!reason) {
           setBoardStatusMessage('Override reason is required.', 'error');
@@ -4358,6 +4496,7 @@ export function dashboardHtml(config: AppConfig): string {
               state: el.boardOverrideState.value,
               substate: (el.boardOverrideSubstate.value || '').trim() || undefined,
               reason: reason,
+              actorUserId: actorUserId,
             }),
           });
           el.boardOverrideReason.value = '';

@@ -32,6 +32,11 @@ export type OnGitHubWebhookPayloadCallback = (
   headers: GitHubWebhookHeaders,
   payload: Record<string, unknown>
 ) => Promise<void> | void;
+export type OnAdapterPayloadCallback = (
+  source: string,
+  headers: Record<string, string>,
+  payload: Record<string, unknown>
+) => Promise<boolean> | boolean;
 
 /**
  * Start the webhook receiver HTTP server.
@@ -43,6 +48,7 @@ export function startWebhookServer(
   onEvent: OnEventCallback,
   hooks?: {
     onGitHubWebhookPayload?: OnGitHubWebhookPayloadCallback;
+    onAdapterPayload?: OnAdapterPayloadCallback;
   }
 ): { server: Server; stop: () => Promise<void> } {
   const server = createServer((req, res) => {
@@ -76,6 +82,7 @@ async function handleRequest(
   onEvent: OnEventCallback,
   hooks?: {
     onGitHubWebhookPayload?: OnGitHubWebhookPayloadCallback;
+    onAdapterPayload?: OnAdapterPayloadCallback;
   }
 ): Promise<void> {
   const url = req.url ?? "/";
@@ -102,7 +109,7 @@ async function handleRequest(
   // Generic adapter webhook: /webhooks/{source}
   const adapterMatch = url.match(/^\/webhooks\/([a-z0-9_-]+)$/);
   if (adapterMatch && method === "POST") {
-    await handleAdapterWebhook(req, res, config, onEvent, adapterMatch[1]!);
+    await handleAdapterWebhook(req, res, config, onEvent, adapterMatch[1]!, hooks?.onAdapterPayload);
     return;
   }
 
@@ -216,7 +223,8 @@ async function handleAdapterWebhook(
   res: ServerResponse,
   config: WebhookServerConfig,
   onEvent: OnEventCallback,
-  source: string
+  source: string,
+  onAdapterPayload?: OnAdapterPayloadCallback,
 ): Promise<void> {
   const { getAdapter } = await import("./sources/adapter-registry.js");
   const adapter = getAdapter(source);
@@ -250,11 +258,14 @@ async function handleAdapterWebhook(
   }
 
   const headers = flattenHeaders(req.headers);
+  const handled = await onAdapterPayload?.(source, headers, payload as Record<string, unknown>) ?? false;
   const event = adapter.parseEvent(headers, payload);
 
   if (event) {
     onEvent(event);
     sendJson(res, 200, { accepted: true, eventId: event.id });
+  } else if (handled) {
+    sendJson(res, 200, { accepted: true, handled: true });
   } else {
     sendJson(res, 200, { accepted: false, reason: "event type not actionable" });
   }

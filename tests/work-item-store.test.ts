@@ -108,9 +108,23 @@ test("work item stores persist work item state, review requests, comments, and e
     body: "Looks good from discovery side.",
   });
 
+  await reviewRequests.addComment({
+    reviewRequestId: reviewRequest.id,
+    authorUserId: ownerUserId,
+    source: "system",
+    body: "Recorded final outcome.",
+  });
+
   const comments = await db.select().from(reviewRequestComments).where(eq(reviewRequestComments.reviewRequestId, reviewRequest.id));
-  assert.equal(comments.length, 1);
+  assert.equal(comments.length, 2);
   assert.equal(comments[0]?.body, "Looks good from discovery side.");
+  assert.deepEqual(
+    (await reviewRequests.listComments(reviewRequest.id)).map((comment) => ({ source: comment.source, body: comment.body })),
+    [
+      { source: "system", body: "Recorded final outcome." },
+      { source: "dashboard", body: "Looks good from discovery side." },
+    ],
+  );
 
   await events.append({
     workItemId: workItem.id,

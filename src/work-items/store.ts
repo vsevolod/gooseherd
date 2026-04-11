@@ -102,6 +102,7 @@ export class WorkItemStore {
         state: input.state,
         substate: input.substate ?? null,
         flags: Array.from(nextFlags),
+        completedAt: input.state === "done" || input.state === "cancelled" ? new Date() : null,
         updatedAt: new Date(),
       })
       .where(eq(workItems.id, id));
@@ -117,6 +118,20 @@ export class WorkItemStore {
       substate: (await this.getWorkItem(id))?.substate,
       flagsToAdd,
     });
+  }
+
+  async setJiraIssueKey(id: string, jiraIssueKey: string): Promise<WorkItemRecord> {
+    await this.db
+      .update(workItems)
+      .set({
+        jiraIssueKey,
+        updatedAt: new Date(),
+      })
+      .where(eq(workItems.id, id));
+
+    const updated = await this.getWorkItem(id);
+    if (!updated) throw new Error(`WorkItem not found after Jira link: ${id}`);
+    return updated;
   }
 
   async linkPullRequest(id: string, input: { githubPrNumber: number; githubPrUrl?: string }): Promise<WorkItemRecord> {

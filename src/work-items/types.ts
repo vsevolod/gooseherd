@@ -121,6 +121,15 @@ export interface CreateReviewRequestCommentInput {
   body: string;
 }
 
+export interface ReviewRequestCommentRecord {
+  id: number;
+  reviewRequestId: string;
+  authorUserId?: string;
+  source: ReviewRequestCommentSource;
+  body: string;
+  createdAt: string;
+}
+
 export interface WorkItemEventRecord {
   id: number;
   workItemId: string;

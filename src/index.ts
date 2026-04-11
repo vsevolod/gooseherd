@@ -45,7 +45,9 @@ import { WorkItemEventsStore } from "./work-items/events-store.js";
 import { WorkItemService } from "./work-items/service.js";
 import { postWorkItemReviewNotifications } from "./work-items/slack-actions.js";
 import { WorkItemIdentityStore } from "./work-items/identity-store.js";
+import { WorkItemContextResolver } from "./work-items/context-resolver.js";
 import { GitHubWorkItemSync, parseGitHubWorkItemWebhookPayload } from "./work-items/github-sync.js";
+import { JiraWorkItemSync, parseJiraWorkItemWebhookPayload } from "./work-items/jira-sync.js";
 import {
   hasSandboxRuntimeHotReloadChange,
   preflightSandboxRuntime
@@ -74,6 +76,7 @@ interface Services {
   dashboardWorkItemsSource: DashboardWorkItemsSource;
   workItemService: WorkItemService;
   workItemGitHubSync: GitHubWorkItemSync;
+  workItemJiraSync: JiraWorkItemSync;
 }
 
 function resolveKubernetesRunnerImage(): string {
@@ -166,22 +169,48 @@ async function createServices(config: AppConfig, db: Database): Promise<Services
   const workItemEventsStore = new WorkItemEventsStore(db);
   const workItemService = new WorkItemService(db);
   const workItemIdentityStore = new WorkItemIdentityStore(db);
+  const workItemContextResolver = new WorkItemContextResolver(db);
+  const createHomeThread = webClient
+    ? async (input: { channelId: string; text: string }) => {
+        const response = await webClient.chat.postMessage({
+          channel: input.channelId,
+          text: input.text,
+          ...(config.slackCommandName ? { username: config.slackCommandName } : {}),
+        });
+        if (!response.ts) {
+          throw new Error(`Slack did not return a thread timestamp for channel ${input.channelId}`);
+        }
+        return response.ts;
+      }
+    : undefined;
   const workItemGitHubSync = new GitHubWorkItemSync(db, {
     adoptionLabels: config.workItemGithubAdoptionLabels,
     resetEngineeringReviewOnNewCommits: config.featureDeliveryResetEngineeringReviewOnNewCommits,
     resetQaReviewOnNewCommits: config.featureDeliveryResetQaReviewOnNewCommits,
     resolveDeliveryContext: async ({ jiraIssueKey }) => {
       const existing = await workItemStore.findByJiraIssueKey(jiraIssueKey);
-      if (!existing) return undefined;
-      return {
-        ownerTeamId: existing.ownerTeamId,
-        homeChannelId: existing.homeChannelId,
-        homeThreadTs: existing.homeThreadTs,
-        createdByUserId: existing.createdByUserId,
-        originChannelId: existing.originChannelId,
-        originThreadTs: existing.originThreadTs,
-      };
+      if (existing) {
+        return {
+          ownerTeamId: existing.ownerTeamId,
+          homeChannelId: existing.homeChannelId,
+          homeThreadTs: existing.homeThreadTs,
+          createdByUserId: existing.createdByUserId,
+          originChannelId: existing.originChannelId,
+          originThreadTs: existing.originThreadTs,
+        };
+      }
+      return undefined;
     },
+  });
+  const workItemJiraSync = new JiraWorkItemSync(db, {
+    resolveDiscoveryContext: (input) => workItemContextResolver.resolveDiscoveryContext({
+      ...input,
+      createHomeThread,
+    }),
+    resolveDeliveryContext: (input) => workItemContextResolver.resolveDeliveryContext({
+      ...input,
+      createHomeThread,
+    }),
   });
   const runtimeFactsReader = config.sandboxRuntime === "kubernetes"
     ? new KubernetesRuntimeFactsReader({
@@ -243,8 +272,42 @@ async function createServices(config: AppConfig, db: Database): Promise<Services
     },
     getWorkItem: (id) => workItemStore.getWorkItem(id),
     listReviewRequestsForWorkItem: (workItemId) => reviewRequestStore.listReviewRequestsForWorkItem(workItemId),
+    listReviewRequestComments: (reviewRequestId) => reviewRequestStore.listComments(reviewRequestId),
     listEventsForWorkItem: (workItemId) => workItemEventsStore.listForWorkItem(workItemId),
-    createDiscoveryWorkItem: (input) => workItemService.createDiscoveryWorkItem(input),
+    createDiscoveryWorkItem: async (input) => {
+      if (!input.ownerTeamId || !input.homeChannelId || !input.homeThreadTs) {
+        const resolved = await workItemContextResolver.resolveDiscoveryContext({
+          createdByUserId: input.createdByUserId,
+          ownerTeamId: input.ownerTeamId,
+          originChannelId: input.originChannelId,
+          originThreadTs: input.originThreadTs,
+          title: input.title,
+          createHomeThread,
+        });
+        return workItemService.createDiscoveryWorkItem({
+          title: input.title,
+          summary: input.summary,
+          ownerTeamId: resolved.ownerTeamId,
+          homeChannelId: resolved.homeChannelId,
+          homeThreadTs: resolved.homeThreadTs,
+          originChannelId: resolved.originChannelId,
+          originThreadTs: resolved.originThreadTs,
+          jiraIssueKey: input.jiraIssueKey,
+          createdByUserId: resolved.createdByUserId,
+        });
+      }
+      return workItemService.createDiscoveryWorkItem({
+        title: input.title,
+        summary: input.summary,
+        ownerTeamId: input.ownerTeamId,
+        homeChannelId: input.homeChannelId,
+        homeThreadTs: input.homeThreadTs,
+        originChannelId: input.originChannelId,
+        originThreadTs: input.originThreadTs,
+        jiraIssueKey: input.jiraIssueKey,
+        createdByUserId: input.createdByUserId,
+      });
+    },
     createReviewRequests: async (input) => {
       const reviewRequests = await workItemService.requestReview(input);
       if (webClient) {
@@ -270,7 +333,7 @@ async function createServices(config: AppConfig, db: Database): Promise<Services
   return {
     config, store, agentProfileStore, githubService, memoryProvider, hooks, containerManager,
     pipelineEngine, pipelineStore, learningStore, evalStore, webClient, runManager, conversationStore,
-    controlPlaneStore, runnerArtifactStore, runtimeReconciler, dashboardWorkItemsSource, workItemService, workItemGitHubSync,
+    controlPlaneStore, runnerArtifactStore, runtimeReconciler, dashboardWorkItemsSource, workItemService, workItemGitHubSync, workItemJiraSync,
   };
 }
 
@@ -402,6 +465,13 @@ async function main(): Promise<void> {
         if (!webhookPayload) return;
         await svc.workItemGitHubSync.handleWebhookPayload(webhookPayload);
       },
+      onAdapterPayload: async (source, _headers, payload) => {
+        if (source !== "jira") return false;
+        const webhookPayload = parseJiraWorkItemWebhookPayload(payload);
+        if (!webhookPayload) return false;
+        await svc.workItemJiraSync.handleWebhookPayload(webhookPayload);
+        return true;
+      },
     });
     await observer.start();
     globalRefs.observer = observer;
@@ -446,7 +516,18 @@ async function main(): Promise<void> {
 
   const slackConfigured = Boolean(config.slackBotToken && config.slackAppToken && config.slackSigningSecret);
   if (slackConfigured) {
-    await startSlackApp(config, svc.runManager, globalRefs.observer, svc.memoryProvider, svc.githubService, svc.conversationStore, svc.workItemService);
+    await startSlackApp(config, svc.runManager, globalRefs.observer, svc.memoryProvider, svc.githubService, svc.conversationStore, {
+      recordReviewOutcome: async (input) => {
+        const actor = input.authorUserId
+          ? await new WorkItemIdentityStore(db).getUserBySlackUserId(input.authorUserId)
+          : undefined;
+        return svc.workItemService.recordReviewOutcome({
+          ...input,
+          authorUserId: actor?.id,
+          source: "slack",
+        });
+      },
+    });
   } else {
     logInfo("Slack tokens not configured — running in dashboard-only mode");
   }

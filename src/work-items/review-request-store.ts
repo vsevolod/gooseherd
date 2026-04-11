@@ -6,6 +6,7 @@ import type {
   CompleteReviewRequestInput,
   CreateReviewRequestCommentInput,
   CreateReviewRequestInput,
+  ReviewRequestCommentRecord,
   ReviewRequestRecord,
 } from "./types.js";
 
@@ -29,6 +30,17 @@ function rowToRecord(row: ReviewRequestRow): ReviewRequestRecord {
     resolvedAt: row.resolvedAt?.toISOString(),
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
+  };
+}
+
+function rowToCommentRecord(row: typeof reviewRequestComments.$inferSelect): ReviewRequestCommentRecord {
+  return {
+    id: row.id,
+    reviewRequestId: row.reviewRequestId,
+    authorUserId: row.authorUserId ?? undefined,
+    source: row.source as ReviewRequestCommentRecord["source"],
+    body: row.body,
+    createdAt: row.createdAt.toISOString(),
   };
 }
 
@@ -117,5 +129,14 @@ export class ReviewRequestStore {
       body: input.body,
       createdAt: new Date(),
     });
+  }
+
+  async listComments(reviewRequestId: string): Promise<ReviewRequestCommentRecord[]> {
+    const rows = await this.db
+      .select()
+      .from(reviewRequestComments)
+      .where(eq(reviewRequestComments.reviewRequestId, reviewRequestId))
+      .orderBy(desc(reviewRequestComments.createdAt), desc(reviewRequestComments.id));
+    return rows.map(rowToCommentRecord);
   }
 }

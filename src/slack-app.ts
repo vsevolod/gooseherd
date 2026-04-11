@@ -525,6 +525,7 @@ export async function startSlackApp(
       await workItems.recordReviewOutcome({
         reviewRequestId: payload.reviewRequestId,
         outcome: "approved",
+        authorUserId: userId,
         comment: `Approved from Slack by <@${userId}>`,
       });
 
@@ -564,6 +565,7 @@ export async function startSlackApp(
       await workItems.recordReviewOutcome({
         reviewRequestId: payload.reviewRequestId,
         outcome: "changes_requested",
+        authorUserId: userId,
         comment: `Changes requested from Slack by <@${userId}>`,
       });
 

@@ -108,12 +108,15 @@ test("dashboard HTML includes work item board controls and data fetch hooks", ()
   assert.match(html, /id="board-detail"/);
   assert.match(html, /id="board-detail-reviews"/);
   assert.match(html, /id="board-detail-events"/);
+  assert.match(html, /review-requests\/' \+ encodeURIComponent\(request\.id\) \+ '\/comments/);
   assert.match(html, /id="board-stop-processing"/);
   assert.match(html, /id="board-override-state"/);
   assert.match(html, /id="board-confirm-approve"/);
   assert.match(html, /id="board-confirm-rework"/);
   assert.match(html, /\/api\/review-requests\//);
   assert.match(html, /confirm-discovery/);
+  assert.match(html, /Jira issue key is required before discovery can be approved/);
+  assert.match(html, /Reviewer user id/);
   assert.match(html, /stop-processing/);
   assert.match(html, /override-state/);
 });

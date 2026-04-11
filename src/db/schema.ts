@@ -417,9 +417,9 @@ export const workItems = pgTable(
     index("work_items_workflow_state_idx").on(t.workflow, t.state),
     index("work_items_owner_team_idx").on(t.ownerTeamId),
     index("work_items_created_at_idx").on(t.createdAt),
-    uniqueIndex("work_items_jira_issue_key_idx")
+    uniqueIndex("work_items_feature_delivery_jira_issue_key_idx")
       .on(t.jiraIssueKey)
-      .where(sql`jira_issue_key IS NOT NULL`),
+      .where(sql`jira_issue_key IS NOT NULL AND workflow = 'feature_delivery'`),
     uniqueIndex("work_items_github_pr_number_idx")
       .on(t.githubPrNumber)
       .where(sql`github_pr_number IS NOT NULL`),

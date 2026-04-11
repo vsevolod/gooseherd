@@ -42,6 +42,18 @@ export class WorkItemIdentityStore {
     };
   }
 
+  async getUserByJiraAccountId(jiraAccountId: string): Promise<IdentityUserRecord | undefined> {
+    const rows = await this.db.select().from(users).where(eq(users.jiraAccountId, jiraAccountId)).limit(1);
+    const row = rows[0];
+    if (!row) return undefined;
+    return {
+      id: row.id,
+      slackUserId: row.slackUserId ?? undefined,
+      displayName: row.displayName,
+      isActive: row.isActive,
+    };
+  }
+
   async getTeam(id: string): Promise<IdentityTeamRecord | undefined> {
     const rows = await this.db.select().from(teams).where(eq(teams.id, id)).limit(1);
     const row = rows[0];
@@ -51,6 +63,54 @@ export class WorkItemIdentityStore {
       name: row.name,
       slackChannelId: row.slackChannelId,
     };
+  }
+
+  async listTeamsForUser(userId: string): Promise<IdentityTeamRecord[]> {
+    const memberships = await this.db.select().from(teamMembers).where(eq(teamMembers.userId, userId));
+    const teamIds = memberships.map((membership) => membership.teamId);
+    if (teamIds.length === 0) return [];
+    const rows = await this.db.select().from(teams).where(inArray(teams.id, teamIds));
+    return rows.map((row) => ({
+      id: row.id,
+      name: row.name,
+      slackChannelId: row.slackChannelId,
+    }));
+  }
+
+  async isUserOnTeam(userId: string, teamId: string): Promise<boolean> {
+    const rows = await this.db
+      .select()
+      .from(teamMembers)
+      .where(and(eq(teamMembers.userId, userId), eq(teamMembers.teamId, teamId)))
+      .limit(1);
+    return rows.length > 0;
+  }
+
+  async userHasTeamRole(userId: string, teamId: string, role: string): Promise<boolean> {
+    const rows = await this.db
+      .select()
+      .from(teamMembers)
+      .where(and(eq(teamMembers.userId, userId), eq(teamMembers.teamId, teamId)))
+      .limit(1);
+    return Array.isArray(rows[0]?.functionalRoles) && rows[0]!.functionalRoles.includes(role);
+  }
+
+  async userHasOrgRole(userId: string, orgRole: string): Promise<boolean> {
+    const rows = await this.db
+      .select()
+      .from(orgRoleAssignments)
+      .where(and(eq(orgRoleAssignments.userId, userId), eq(orgRoleAssignments.orgRole, orgRole)))
+      .limit(1);
+    return rows.length > 0;
+  }
+
+  async userHasAnyOrgRole(userId: string): Promise<boolean> {
+    const rows = await this.db
+      .select()
+      .from(orgRoleAssignments)
+      .where(eq(orgRoleAssignments.userId, userId))
+      .limit(1);
+    return rows.length > 0;
   }
 
   async listUsersForTeamRole(teamId: string, role: string): Promise<IdentityUserRecord[]> {

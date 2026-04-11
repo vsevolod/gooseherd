@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import test from "node:test";
+import { eq } from "drizzle-orm";
 import { createTestDb } from "./helpers/test-db.js";
-import { teams, users } from "../src/db/schema.js";
+import { teams, users, workItemEvents } from "../src/db/schema.js";
 import { WorkItemService } from "../src/work-items/service.js";
 import { GitHubWorkItemSync, parseJiraIssueKey } from "../src/work-items/github-sync.js";
 
@@ -46,7 +47,7 @@ test("parseJiraIssueKey extracts issue key from PR body", () => {
 });
 
 test("github sync adopts labeled PR into delivery work item", async (t) => {
-  const { cleanup, sync } = await createGitHubSyncFixture();
+  const { cleanup, sync, db } = await createGitHubSyncFixture();
   t.after(cleanup);
 
   const adopted = await sync.handleWebhookPayload({
@@ -67,6 +68,10 @@ test("github sync adopts labeled PR into delivery work item", async (t) => {
   assert.equal(adopted?.jiraIssueKey, "HBL-404");
   assert.equal(adopted?.githubPrNumber, 77);
   assert.ok(adopted?.flags.includes("pr_opened"));
+
+  const events = await db.select().from(workItemEvents).where(eq(workItemEvents.workItemId, adopted!.id));
+  assert.ok(events.some((event) => event.eventType === "github.label_observed"));
+  assert.ok(events.some((event) => event.eventType === "github.pr_adopted"));
 });
 
 test("github sync links labeled PR to existing delivery item with same jira key", async (t) => {
@@ -102,7 +107,7 @@ test("github sync links labeled PR to existing delivery item with same jira key"
 });
 
 test("github sync advances auto review item to engineering review after green CI", async (t) => {
-  const { cleanup, service, sync, ownerTeamId, pmUserId } = await createGitHubSyncFixture();
+  const { cleanup, service, sync, ownerTeamId, pmUserId, db } = await createGitHubSyncFixture();
   t.after(cleanup);
 
   const delivery = await service.createDeliveryFromJira({
@@ -132,6 +137,9 @@ test("github sync advances auto review item to engineering review after green CI
   assert.equal(updated?.id, delivery.id);
   assert.equal(updated?.state, "engineering_review");
   assert.ok(updated?.flags.includes("ci_green"));
+
+  const events = await db.select().from(workItemEvents).where(eq(workItemEvents.workItemId, delivery.id));
+  assert.ok(events.some((event) => event.eventType === "github.ci_updated"));
 });
 
 test("github sync routes engineering review outcomes back into delivery flow", async (t) => {

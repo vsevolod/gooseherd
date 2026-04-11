@@ -9,7 +9,7 @@ import type { AppConfig } from "../src/config.js";
 import { startDashboardServer, type DashboardWorkItemsSource } from "../src/dashboard-server.js";
 import { RunStore } from "../src/store.js";
 import { createTestDb } from "./helpers/test-db.js";
-import { teams, users } from "../src/db/schema.js";
+import { teamMembers, teams, users } from "../src/db/schema.js";
 import { WorkItemStore } from "../src/work-items/store.js";
 import { ReviewRequestStore } from "../src/work-items/review-request-store.js";
 import { WorkItemEventsStore } from "../src/work-items/events-store.js";
@@ -219,7 +219,7 @@ describe("Dashboard Work Item API routes", () => {
     return port;
   }
 
-  async function createWorkItemsSource(): Promise<DashboardWorkItemsSource & {
+async function createWorkItemsSource(): Promise<DashboardWorkItemsSource & {
     discoveryId: string;
     pmUserId: string;
     reviewerUserId: string;
@@ -241,6 +241,10 @@ describe("Dashboard Work Item API routes", () => {
       name: "growth",
       slackChannelId: "C_GROWTH",
     });
+    await testDb.db.insert(teamMembers).values([
+      { teamId: ownerTeamId, userId: pmUserId, functionalRoles: ["pm"] },
+      { teamId: ownerTeamId, userId: reviewerUserId, functionalRoles: ["engineer"] },
+    ]);
 
     const service = new WorkItemService(testDb.db);
     const workItemStore = new WorkItemStore(testDb.db);
@@ -292,6 +296,7 @@ describe("Dashboard Work Item API routes", () => {
       },
       getWorkItem: (id: string) => workItemStore.getWorkItem(id),
       listReviewRequestsForWorkItem: (workItemId: string) => reviewRequestStore.listReviewRequestsForWorkItem(workItemId),
+      listReviewRequestComments: (reviewRequestId: string) => reviewRequestStore.listComments(reviewRequestId),
       listEventsForWorkItem: (workItemId: string) => eventsStore.listForWorkItem(workItemId),
       createDiscoveryWorkItem: (input) => service.createDiscoveryWorkItem(input),
       createReviewRequests: (input) => service.requestReview(input),
@@ -344,6 +349,27 @@ describe("Dashboard Work Item API routes", () => {
     const requests = res.data.reviewRequests as Array<{ workItemId: string }>;
     assert.equal(requests.length, 1);
     assert.equal(requests[0]?.workItemId, source.discoveryId);
+  });
+
+  test("GET /api/work-items/:id/review-requests/:reviewRequestId/comments returns review history", async () => {
+    const source = await createWorkItemsSource();
+    const port = await startServer(source);
+
+    const reviewRequestsRes = await request(port, "GET", `/api/work-items/${source.discoveryId}/review-requests`);
+    const reviewRequestId = (reviewRequestsRes.data.reviewRequests as Array<{ id: string }>)[0]?.id;
+    assert.ok(reviewRequestId);
+
+    const respondRes = await request(port, "POST", `/api/review-requests/${reviewRequestId}/respond`, {
+      outcome: "approved",
+      authorUserId: source.reviewerUserId,
+      comment: "Looks ready to me.",
+    });
+    assert.equal(respondRes.status, 200);
+
+    const commentsRes = await request(port, "GET", `/api/work-items/${source.discoveryId}/review-requests/${reviewRequestId}/comments`);
+    assert.equal(commentsRes.status, 200);
+    const comments = commentsRes.data.comments as Array<{ body: string }>;
+    assert.ok(comments.some((comment) => comment.body === "Looks ready to me."));
   });
 
   test("GET /api/work-items/:id/events returns work item events", async () => {
@@ -427,6 +453,7 @@ describe("Dashboard Work Item API routes", () => {
     const res = await request(port, "POST", `/api/work-items/${source.discoveryId}/confirm-discovery`, {
       approved: true,
       actorUserId: source.pmUserId,
+      jiraIssueKey: "HBL-501",
     });
 
     assert.equal(res.status, 200);
