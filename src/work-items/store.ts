@@ -73,6 +73,11 @@ export class WorkItemStore {
     return rows.map(rowToRecord);
   }
 
+  async findByGitHubPrNumber(githubPrNumber: number): Promise<WorkItemRecord | undefined> {
+    const rows = await this.db.select().from(workItems).where(eq(workItems.githubPrNumber, githubPrNumber)).limit(1);
+    return rows[0] ? rowToRecord(rows[0]) : undefined;
+  }
+
   async updateState(id: string, input: UpdateWorkItemStateInput): Promise<WorkItemRecord> {
     const current = await this.getWorkItem(id);
     if (!current) throw new Error(`WorkItem not found: ${id}`);
@@ -102,5 +107,20 @@ export class WorkItemStore {
       substate: (await this.getWorkItem(id))?.substate,
       flagsToAdd,
     });
+  }
+
+  async linkPullRequest(id: string, input: { githubPrNumber: number; githubPrUrl?: string }): Promise<WorkItemRecord> {
+    await this.db
+      .update(workItems)
+      .set({
+        githubPrNumber: input.githubPrNumber,
+        githubPrUrl: input.githubPrUrl ?? null,
+        updatedAt: new Date(),
+      })
+      .where(eq(workItems.id, id));
+
+    const updated = await this.getWorkItem(id);
+    if (!updated) throw new Error(`WorkItem not found after PR link: ${id}`);
+    return updated;
   }
 }

@@ -180,3 +180,31 @@ test("work item review reset flags respect env overrides", () => {
     process.env = originalEnv;
   }
 });
+
+test("work item GitHub adoption labels default to ai_flow", () => {
+  const originalEnv = process.env;
+  try {
+    process.env = {
+      ...originalEnv,
+      WORK_ITEM_GITHUB_ADOPTION_LABELS: undefined,
+    };
+    const config = loadConfig();
+    assert.deepEqual(config.workItemGithubAdoptionLabels, ["ai_flow"]);
+  } finally {
+    process.env = originalEnv;
+  }
+});
+
+test("work item GitHub adoption labels respect comma-separated env", () => {
+  const originalEnv = process.env;
+  try {
+    process.env = {
+      ...originalEnv,
+      WORK_ITEM_GITHUB_ADOPTION_LABELS: "ai_flow, ai-delivery",
+    };
+    const config = loadConfig();
+    assert.deepEqual(config.workItemGithubAdoptionLabels, ["ai_flow", "ai-delivery"]);
+  } finally {
+    process.env = originalEnv;
+  }
+});
