@@ -69,6 +69,38 @@ test("github sync adopts labeled PR into delivery work item", async (t) => {
   assert.ok(adopted?.flags.includes("pr_opened"));
 });
 
+test("github sync links labeled PR to existing delivery item with same jira key", async (t) => {
+  const { cleanup, service, sync, ownerTeamId, pmUserId } = await createGitHubSyncFixture();
+  t.after(cleanup);
+
+  const existing = await service.createDeliveryFromJira({
+    title: "Existing delivery",
+    summary: "Created from Jira before PR adoption",
+    ownerTeamId,
+    homeChannelId: "C_GROWTH",
+    homeThreadTs: "1740000000.550",
+    jiraIssueKey: "HBL-499",
+    createdByUserId: pmUserId,
+  });
+
+  const adopted = await sync.handleWebhookPayload({
+    eventType: "pull_request",
+    action: "labeled",
+    repo: "hubstaff/gooseherd",
+    prNumber: 78,
+    prTitle: "Manual PR for existing delivery",
+    prBody: "Continues work\n\nRefs HBL-499",
+    prUrl: "https://github.com/hubstaff/gooseherd/pull/78",
+    labels: ["ai_flow"],
+    baseBranch: "main",
+  });
+
+  assert.equal(adopted?.id, existing.id);
+  assert.equal(adopted?.state, "auto_review");
+  assert.equal(adopted?.githubPrNumber, 78);
+  assert.ok(adopted?.flags.includes("pr_opened"));
+});
+
 test("github sync advances auto review item to engineering review after green CI", async (t) => {
   const { cleanup, service, sync, ownerTeamId, pmUserId } = await createGitHubSyncFixture();
   t.after(cleanup);
@@ -157,4 +189,137 @@ test("github sync routes engineering review outcomes back into delivery flow", a
 
   assert.equal(approved?.id, approvedItem.id);
   assert.equal(approved?.state, "qa_preparation");
+});
+
+test("github sync advances qa preparation to qa review after green CI when product review is not required", async (t) => {
+  const { cleanup, service, sync, ownerTeamId, pmUserId } = await createGitHubSyncFixture();
+  t.after(cleanup);
+
+  const delivery = await service.createDeliveryFromJira({
+    title: "QA prep completes",
+    summary: "Ready for QA review",
+    ownerTeamId,
+    homeChannelId: "C_GROWTH",
+    homeThreadTs: "1740000000.702",
+    jiraIssueKey: "HBL-408",
+    createdByUserId: pmUserId,
+    githubPrNumber: 101,
+    githubPrUrl: "https://github.com/hubstaff/gooseherd/pull/101",
+    initialState: "qa_preparation",
+    initialSubstate: "running_e2e",
+    flags: ["pr_opened", "engineering_review_done"],
+  });
+
+  const updated = await sync.handleWebhookPayload({
+    eventType: "check_suite",
+    action: "completed",
+    repo: "hubstaff/gooseherd",
+    conclusion: "success",
+    status: "completed",
+    pullRequestNumbers: [101],
+  });
+
+  assert.equal(updated?.id, delivery.id);
+  assert.equal(updated?.state, "qa_review");
+  assert.equal(updated?.substate, "waiting_qa_review");
+  assert.ok(updated?.flags.includes("ci_green"));
+});
+
+test("github sync advances qa preparation to product review when required", async (t) => {
+  const { cleanup, service, sync, ownerTeamId, pmUserId } = await createGitHubSyncFixture();
+  t.after(cleanup);
+
+  const delivery = await service.createDeliveryFromJira({
+    title: "QA prep with product review",
+    summary: "Needs product sign-off",
+    ownerTeamId,
+    homeChannelId: "C_GROWTH",
+    homeThreadTs: "1740000000.703",
+    jiraIssueKey: "HBL-409",
+    createdByUserId: pmUserId,
+    githubPrNumber: 102,
+    githubPrUrl: "https://github.com/hubstaff/gooseherd/pull/102",
+    initialState: "qa_preparation",
+    initialSubstate: "running_e2e",
+    flags: ["pr_opened", "engineering_review_done", "product_review_required"],
+  });
+
+  const updated = await sync.handleWebhookPayload({
+    eventType: "check_suite",
+    action: "completed",
+    repo: "hubstaff/gooseherd",
+    conclusion: "success",
+    status: "completed",
+    pullRequestNumbers: [102],
+  });
+
+  assert.equal(updated?.id, delivery.id);
+  assert.equal(updated?.state, "product_review");
+  assert.equal(updated?.substate, "waiting_product_review");
+});
+
+test("github sync marks delivery done when linked pull request is merged", async (t) => {
+  const { cleanup, service, sync, ownerTeamId, pmUserId } = await createGitHubSyncFixture();
+  t.after(cleanup);
+
+  const delivery = await service.createDeliveryFromJira({
+    title: "Merged PR",
+    summary: "Ready to close",
+    ownerTeamId,
+    homeChannelId: "C_GROWTH",
+    homeThreadTs: "1740000000.704",
+    jiraIssueKey: "HBL-410",
+    createdByUserId: pmUserId,
+    githubPrNumber: 103,
+    githubPrUrl: "https://github.com/hubstaff/gooseherd/pull/103",
+    initialState: "ready_for_merge",
+    initialSubstate: "waiting_merge",
+    flags: ["pr_opened", "engineering_review_done", "qa_review_done"],
+  });
+
+  const updated = await sync.handleWebhookPayload({
+    eventType: "pull_request",
+    action: "closed",
+    repo: "hubstaff/gooseherd",
+    prNumber: 103,
+    prUrl: "https://github.com/hubstaff/gooseherd/pull/103",
+    merged: true,
+  });
+
+  assert.equal(updated?.id, delivery.id);
+  assert.equal(updated?.state, "done");
+  assert.equal(updated?.substate, "merged");
+  assert.ok(updated?.flags.includes("merged"));
+});
+
+test("github sync resets ready_for_merge to auto review on synchronize", async (t) => {
+  const { cleanup, service, sync, ownerTeamId, pmUserId } = await createGitHubSyncFixture();
+  t.after(cleanup);
+
+  const delivery = await service.createDeliveryFromJira({
+    title: "Branch updated before merge",
+    summary: "Fresh commits landed",
+    ownerTeamId,
+    homeChannelId: "C_GROWTH",
+    homeThreadTs: "1740000000.705",
+    jiraIssueKey: "HBL-411",
+    createdByUserId: pmUserId,
+    githubPrNumber: 104,
+    githubPrUrl: "https://github.com/hubstaff/gooseherd/pull/104",
+    initialState: "ready_for_merge",
+    initialSubstate: "waiting_merge",
+    flags: ["pr_opened", "ci_green", "engineering_review_done", "qa_review_done"],
+  });
+
+  const updated = await sync.handleWebhookPayload({
+    eventType: "pull_request",
+    action: "synchronize",
+    repo: "hubstaff/gooseherd",
+    prNumber: 104,
+  });
+
+  assert.equal(updated?.id, delivery.id);
+  assert.equal(updated?.state, "auto_review");
+  assert.equal(updated?.substate, "waiting_ci");
+  assert.ok(!updated?.flags.includes("ci_green"));
 });

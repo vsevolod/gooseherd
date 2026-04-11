@@ -202,3 +202,73 @@ test("service can attach an existing run to a work item", async (t) => {
   const storedRun = await runStore.getRun(run.id);
   assert.equal(storedRun?.workItemId, workItem.id);
 });
+
+test("service stops active processing before guarded override", async (t) => {
+  const { db, service, cleanup, pmUserId, ownerTeamId } = await createServiceFixture();
+  t.after(cleanup);
+
+  const workItem = await service.createDeliveryFromJira({
+    title: "Stop delivery processing",
+    summary: "Need to interrupt active run",
+    ownerTeamId,
+    homeChannelId: "C_GROWTH",
+    homeThreadTs: "1740000000.401",
+    jiraIssueKey: "HBL-304",
+    createdByUserId: pmUserId,
+  });
+
+  const runStore = new RunStore(db);
+  const run = await runStore.createRun(
+    {
+      runtime: "local",
+      repoSlug: "hubstaff/gooseherd",
+      task: "Active work",
+      baseBranch: "main",
+      requestedBy: "U_PM",
+      channelId: "C_GROWTH",
+      threadTs: "1740000000.401",
+    },
+    "gooseherd"
+  );
+  await runStore.linkToWorkItem(run.id, workItem.id);
+  await runStore.updateRun(run.id, {
+    status: "running",
+    phase: "agent",
+    startedAt: new Date().toISOString(),
+  });
+
+  assert.equal(await service.hasActiveProcessing(workItem.id), true);
+
+  await assert.rejects(() => service.guardedOverrideState({
+    workItemId: workItem.id,
+    state: "cancelled",
+    actorUserId: pmUserId,
+    reason: "stuck worker",
+    hasActiveProcessing: async () => service.hasActiveProcessing(workItem.id),
+  }), /processing is active/);
+
+  const stopResult = await service.stopProcessing({
+    workItemId: workItem.id,
+    actorUserId: pmUserId,
+    cancelRun: async (runId) => {
+      await runStore.updateRun(runId, {
+        status: "cancel_requested",
+        phase: "cancel_requested",
+      });
+      return true;
+    },
+  });
+
+  assert.deepEqual(stopResult.stoppedRunIds, [run.id]);
+  assert.equal(await service.hasActiveProcessing(workItem.id), false);
+
+  const overridden = await service.guardedOverrideState({
+    workItemId: workItem.id,
+    state: "cancelled",
+    actorUserId: pmUserId,
+    reason: "stopped the worker first",
+    hasActiveProcessing: async () => service.hasActiveProcessing(workItem.id),
+  });
+
+  assert.equal(overridden.state, "cancelled");
+});

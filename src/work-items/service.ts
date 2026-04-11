@@ -303,6 +303,47 @@ export class WorkItemService {
     return updated;
   }
 
+  async hasActiveProcessing(workItemId: string): Promise<boolean> {
+    const runs = await this.runs.listRunsForWorkItem(workItemId);
+    return runs.some((run) => isActivelyProcessingStatus(run.status));
+  }
+
+  async stopProcessing(input: {
+    workItemId: string;
+    actorUserId?: string;
+    cancelRun: (runId: string) => Promise<boolean>;
+  }): Promise<{ workItem: WorkItemRecord; stoppedRunIds: string[]; alreadyIdleRunIds: string[]; failedRunIds: string[] }> {
+    const workItem = await this.requireWorkItem(input.workItemId);
+    const runs = await this.runs.listRunsForWorkItem(workItem.id);
+
+    const stoppedRunIds: string[] = [];
+    const alreadyIdleRunIds: string[] = [];
+    const failedRunIds: string[] = [];
+
+    for (const run of runs) {
+      if (!isActivelyProcessingStatus(run.status)) {
+        alreadyIdleRunIds.push(run.id);
+        continue;
+      }
+
+      const cancelled = await input.cancelRun(run.id);
+      if (cancelled) {
+        stoppedRunIds.push(run.id);
+      } else {
+        failedRunIds.push(run.id);
+      }
+    }
+
+    await this.events.append({
+      workItemId: workItem.id,
+      eventType: "processing.stop_requested",
+      actorUserId: input.actorUserId,
+      payload: { stoppedRunIds, alreadyIdleRunIds, failedRunIds },
+    });
+
+    return { workItem, stoppedRunIds, alreadyIdleRunIds, failedRunIds };
+  }
+
   async attachRunToWorkItem(input: {
     workItemId: string;
     runId: string;
@@ -324,4 +365,8 @@ export class WorkItemService {
     if (!workItem) throw new Error(`WorkItem not found: ${id}`);
     return workItem;
   }
+}
+
+function isActivelyProcessingStatus(status: string): boolean {
+  return ["queued", "running", "validating", "pushing", "awaiting_ci", "ci_fixing"].includes(status);
 }

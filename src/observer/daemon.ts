@@ -18,7 +18,7 @@ import type { Database } from "../db/index.js";
 import { loadTriggerRules, matchTriggerRule } from "./trigger-rules.js";
 import { buildDedupKey, getDedupTtl, runSafetyChecks } from "./safety.js";
 import { composeRunInput } from "./run-composer.js";
-import { startWebhookServer, type OnEventCallback } from "./webhook-server.js";
+import { startWebhookServer, type OnEventCallback, type OnGitHubWebhookPayloadCallback } from "./webhook-server.js";
 import { registerAdapter } from "./sources/adapter-registry.js";
 import { githubAdapter } from "./sources/github-adapter-wrapper.js";
 import { createSentryAdapter } from "./sources/sentry-adapter-wrapper.js";
@@ -36,6 +36,7 @@ const MAX_EVENT_HISTORY = 200;
 export class ObserverDaemon {
   private readonly stateStore: ObserverStateStore;
   private readonly learningStore: LearningStore;
+  private readonly onGitHubWebhookPayload?: OnGitHubWebhookPayloadCallback;
   private rules: TriggerRule[] = [];
   private sentryPoller: NodeJS.Timeout | undefined;
   private githubPoller: NodeJS.Timeout | undefined;
@@ -52,12 +53,16 @@ export class ObserverDaemon {
     private readonly webClient: WebClient | undefined,
     private readonly tokenGetter?: () => Promise<string>,
     learningStore?: LearningStore,
-    db?: Database
+    db?: Database,
+    hooks?: {
+      onGitHubWebhookPayload?: OnGitHubWebhookPayloadCallback;
+    }
   ) {
     const database = db ?? (learningStore as unknown as { db: Database })?.db;
     if (!database) throw new Error("ObserverDaemon requires a Database instance");
     this.stateStore = new ObserverStateStore(database);
     this.learningStore = learningStore ?? new LearningStore(database);
+    this.onGitHubWebhookPayload = hooks?.onGitHubWebhookPayload;
   }
 
   async start(): Promise<void> {
@@ -162,7 +167,9 @@ export class ObserverDaemon {
         sentryWebhookSecret: this.config.observerSentryWebhookSecret,
         sentryAlertChannelId: this.config.observerAlertChannelId,
         adapterSecrets: this.config.observerWebhookSecrets
-      }, onEvent);
+      }, onEvent, {
+        onGitHubWebhookPayload: this.onGitHubWebhookPayload,
+      });
 
       this.webhookStop = handle.stop;
 

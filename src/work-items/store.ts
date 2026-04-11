@@ -78,6 +78,16 @@ export class WorkItemStore {
     return rows[0] ? rowToRecord(rows[0]) : undefined;
   }
 
+  async findByJiraIssueKey(jiraIssueKey: string): Promise<WorkItemRecord | undefined> {
+    const rows = await this.db
+      .select()
+      .from(workItems)
+      .where(eq(workItems.jiraIssueKey, jiraIssueKey))
+      .orderBy(desc(workItems.createdAt))
+      .limit(1);
+    return rows[0] ? rowToRecord(rows[0]) : undefined;
+  }
+
   async updateState(id: string, input: UpdateWorkItemStateInput): Promise<WorkItemRecord> {
     const current = await this.getWorkItem(id);
     if (!current) throw new Error(`WorkItem not found: ${id}`);

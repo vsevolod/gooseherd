@@ -88,6 +88,10 @@ export interface DashboardWorkItemsSource {
     approved: boolean;
     actorUserId?: string;
   }): Promise<WorkItemRecord>;
+  stopProcessing(input: {
+    workItemId: string;
+    actorUserId?: string;
+  }): Promise<{ workItem: WorkItemRecord; stoppedRunIds: string[]; alreadyIdleRunIds: string[]; failedRunIds: string[] }>;
   guardedOverrideState(input: {
     workItemId: string;
     state: WorkItemRecord["state"];
@@ -1506,6 +1510,29 @@ export function startDashboardServer(
             sendJson(res, 200, { workItem });
           } catch (error) {
             sendJson(res, 400, { error: error instanceof Error ? error.message : "Failed to confirm discovery" });
+          }
+          return;
+        }
+
+        if (parts.length === 4 && parts[3] === "stop-processing" && req.method === "POST") {
+          const raw = await readBody(req);
+          if (raw === null) { sendJson(res, 413, { error: "Request body too large" }); return; }
+          let parsed: { actorUserId?: string } = {};
+          try {
+            parsed = raw ? (JSON.parse(raw) as typeof parsed) : {};
+          } catch {
+            sendJson(res, 400, { error: "Invalid JSON body" });
+            return;
+          }
+
+          try {
+            const result = await workItemsSource.stopProcessing({
+              workItemId,
+              actorUserId: parsed.actorUserId,
+            });
+            sendJson(res, 200, result);
+          } catch (error) {
+            sendJson(res, 400, { error: error instanceof Error ? error.message : "Failed to stop processing" });
           }
           return;
         }

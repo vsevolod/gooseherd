@@ -45,6 +45,7 @@ import { WorkItemEventsStore } from "./work-items/events-store.js";
 import { WorkItemService } from "./work-items/service.js";
 import { postWorkItemReviewNotifications } from "./work-items/slack-actions.js";
 import { WorkItemIdentityStore } from "./work-items/identity-store.js";
+import { GitHubWorkItemSync, parseGitHubWorkItemWebhookPayload } from "./work-items/github-sync.js";
 import {
   hasSandboxRuntimeHotReloadChange,
   preflightSandboxRuntime
@@ -72,6 +73,7 @@ interface Services {
   runtimeReconciler: RuntimeReconciler;
   dashboardWorkItemsSource: DashboardWorkItemsSource;
   workItemService: WorkItemService;
+  workItemGitHubSync: GitHubWorkItemSync;
 }
 
 function resolveKubernetesRunnerImage(): string {
@@ -164,6 +166,23 @@ async function createServices(config: AppConfig, db: Database): Promise<Services
   const workItemEventsStore = new WorkItemEventsStore(db);
   const workItemService = new WorkItemService(db);
   const workItemIdentityStore = new WorkItemIdentityStore(db);
+  const workItemGitHubSync = new GitHubWorkItemSync(db, {
+    adoptionLabels: config.workItemGithubAdoptionLabels,
+    resetEngineeringReviewOnNewCommits: config.featureDeliveryResetEngineeringReviewOnNewCommits,
+    resetQaReviewOnNewCommits: config.featureDeliveryResetQaReviewOnNewCommits,
+    resolveDeliveryContext: async ({ jiraIssueKey }) => {
+      const existing = await workItemStore.findByJiraIssueKey(jiraIssueKey);
+      if (!existing) return undefined;
+      return {
+        ownerTeamId: existing.ownerTeamId,
+        homeChannelId: existing.homeChannelId,
+        homeThreadTs: existing.homeThreadTs,
+        createdByUserId: existing.createdByUserId,
+        originChannelId: existing.originChannelId,
+        originThreadTs: existing.originThreadTs,
+      };
+    },
+  });
   const runtimeFactsReader = config.sandboxRuntime === "kubernetes"
     ? new KubernetesRuntimeFactsReader({
       namespace: resolveKubernetesNamespace(),
@@ -238,16 +257,20 @@ async function createServices(config: AppConfig, db: Database): Promise<Services
     },
     respondToReviewRequest: (input) => workItemService.recordReviewOutcome(input),
     confirmDiscovery: (input) => workItemService.confirmDiscovery(input),
+    stopProcessing: (input) => workItemService.stopProcessing({
+      ...input,
+      cancelRun: (runId) => runManager.cancelRun(runId),
+    }),
     guardedOverrideState: (input) => workItemService.guardedOverrideState({
       ...input,
-      hasActiveProcessing: async () => true,
+      hasActiveProcessing: async (workItem) => workItemService.hasActiveProcessing(workItem.id),
     }),
   };
 
   return {
     config, store, agentProfileStore, githubService, memoryProvider, hooks, containerManager,
     pipelineEngine, pipelineStore, learningStore, evalStore, webClient, runManager, conversationStore,
-    controlPlaneStore, runnerArtifactStore, runtimeReconciler, dashboardWorkItemsSource, workItemService,
+    controlPlaneStore, runnerArtifactStore, runtimeReconciler, dashboardWorkItemsSource, workItemService, workItemGitHubSync,
   };
 }
 
@@ -373,7 +396,13 @@ async function main(): Promise<void> {
 
   if (config.observerEnabled) {
     const tokenGetter = svc.githubService ? () => svc.githubService!.getToken() : undefined;
-    const observer = new ObserverDaemon(config, svc.runManager, svc.webClient, tokenGetter, svc.learningStore, db);
+    const observer = new ObserverDaemon(config, svc.runManager, svc.webClient, tokenGetter, svc.learningStore, db, {
+      onGitHubWebhookPayload: async (headers, payload) => {
+        const webhookPayload = parseGitHubWorkItemWebhookPayload(headers, payload);
+        if (!webhookPayload) return;
+        await svc.workItemGitHubSync.handleWebhookPayload(webhookPayload);
+      },
+    });
     await observer.start();
     globalRefs.observer = observer;
     logInfo("Observer system enabled");

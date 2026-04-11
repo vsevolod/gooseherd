@@ -1961,6 +1961,10 @@ export function dashboardHtml(config: AppConfig): string {
               <div class="board-detail-section">
                 <div class="board-detail-section-title">Workflow Actions</div>
                 <div class="board-detail-actions">
+                  <button class="top-btn" id="board-stop-processing" disabled>
+                    <span class="material-symbols-rounded">pause_circle</span>
+                    <span>Stop Processing</span>
+                  </button>
                   <button class="top-btn" id="board-confirm-approve" disabled>
                     <span class="material-symbols-rounded">task_alt</span>
                     <span>PM Approve</span>
@@ -2169,6 +2173,7 @@ export function dashboardHtml(config: AppConfig): string {
       boardDetailSummary: document.getElementById('board-detail-summary'),
       boardDetailReviews: document.getElementById('board-detail-reviews'),
       boardDetailEvents: document.getElementById('board-detail-events'),
+      boardStopProcessing: document.getElementById('board-stop-processing'),
       boardConfirmApprove: document.getElementById('board-confirm-approve'),
       boardConfirmRework: document.getElementById('board-confirm-rework'),
       boardOverrideState: document.getElementById('board-override-state'),
@@ -3640,6 +3645,7 @@ export function dashboardHtml(config: AppConfig): string {
         el.boardDetailReviews.textContent = 'No review requests loaded.';
         el.boardDetailEvents.className = 'board-detail-empty';
         el.boardDetailEvents.textContent = 'No events loaded.';
+        el.boardStopProcessing.disabled = true;
         el.boardConfirmApprove.disabled = true;
         el.boardConfirmRework.disabled = true;
         el.boardOverrideSubmit.disabled = true;
@@ -3682,6 +3688,7 @@ export function dashboardHtml(config: AppConfig): string {
       if (el.boardOverrideSubstate) {
         el.boardOverrideSubstate.value = item.substate || '';
       }
+      el.boardStopProcessing.disabled = item.state === 'done' || item.state === 'cancelled';
       el.boardOverrideSubmit.disabled = false;
 
       var canConfirmDiscovery = item.workflow === 'product_discovery' && item.state === 'waiting_for_pm_confirmation';
@@ -3743,8 +3750,15 @@ export function dashboardHtml(config: AppConfig): string {
 
         var meta = document.createElement('div');
         meta.className = 'board-card-meta';
-        meta.textContent = 'Round ' + request.reviewRound + ' · ' + titleCaseWorkItemState(request.targetType) + ' · Requested ' + timeAgo(request.requestedAt);
+        meta.textContent = 'Round ' + request.reviewRound + ' · ' + titleCaseWorkItemState(request.type) + ' · ' + describeReviewRequestTarget(request, item) + ' · Requested ' + timeAgo(request.requestedAt);
         wrapper.appendChild(meta);
+
+        if (request.outcome && request.resolvedAt) {
+          var resolution = document.createElement('div');
+          resolution.className = 'board-card-meta';
+          resolution.textContent = 'Resolved ' + timeAgo(request.resolvedAt);
+          wrapper.appendChild(resolution);
+        }
 
         if (request.status === 'pending') {
           var actions = document.createElement('div');
@@ -3820,6 +3834,26 @@ export function dashboardHtml(config: AppConfig): string {
       el.boardDetailEvents.className = '';
       el.boardDetailEvents.innerHTML = '';
       el.boardDetailEvents.appendChild(container);
+    }
+
+    function describeReviewRequestTarget(request, workItem) {
+      if (!request || !request.targetType) return 'Unknown target';
+      var ref = request.targetRef || {};
+      if (request.targetType === 'user') {
+        return 'User ' + (ref.userId || 'unknown');
+      }
+      if (request.targetType === 'team') {
+        return 'Team ' + (ref.teamId || workItem.ownerTeamId || 'unknown');
+      }
+      if (request.targetType === 'team_role') {
+        var teamRole = ref.role || ref.teamRole || 'unknown';
+        var teamId = ref.teamId || workItem.ownerTeamId || 'owner team';
+        return 'Team role ' + teamRole + ' on ' + teamId;
+      }
+      if (request.targetType === 'org_role') {
+        return 'Org role ' + (ref.role || ref.orgRole || 'unknown');
+      }
+      return titleCaseWorkItemState(request.targetType);
     }
 
     async function refreshSelected() {
@@ -4283,6 +4317,30 @@ export function dashboardHtml(config: AppConfig): string {
       };
     }
 
+    if (el.boardStopProcessing) {
+      el.boardStopProcessing.onclick = async function() {
+        if (!state.selectedWorkItemId) return;
+        setBoardStatusMessage('Stopping active processing...');
+        try {
+          var result = await fetchJson('/api/work-items/' + encodeURIComponent(state.selectedWorkItemId) + '/stop-processing', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({}),
+          });
+          await loadWorkItems();
+          var stopped = Array.isArray(result.stoppedRunIds) ? result.stoppedRunIds.length : 0;
+          var failed = Array.isArray(result.failedRunIds) ? result.failedRunIds.length : 0;
+          if (failed > 0) {
+            setBoardStatusMessage('Stop requested for ' + stopped + ' run(s), but ' + failed + ' could not be interrupted.', 'error');
+            return;
+          }
+          setBoardStatusMessage('Stop requested for ' + stopped + ' run(s).', 'ok');
+        } catch (error) {
+          setBoardStatusMessage(error.message || 'Failed to stop processing', 'error');
+        }
+      };
+    }
+
     if (el.boardOverrideSubmit) {
       el.boardOverrideSubmit.onclick = async function() {
         if (!state.selectedWorkItemId) return;
@@ -4306,7 +4364,11 @@ export function dashboardHtml(config: AppConfig): string {
           await loadWorkItems();
           setBoardStatusMessage('Override applied.', 'ok');
         } catch (error) {
-          setBoardStatusMessage(error.message || 'Failed to apply override', 'error');
+          var message = error.message || 'Failed to apply override';
+          if (/processing is active/i.test(message)) {
+            message += ' Stop processing first, then retry the override.';
+          }
+          setBoardStatusMessage(message, 'error');
         }
       };
     }

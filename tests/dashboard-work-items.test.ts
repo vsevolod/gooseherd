@@ -297,6 +297,12 @@ describe("Dashboard Work Item API routes", () => {
       createReviewRequests: (input) => service.requestReview(input),
       respondToReviewRequest: (input) => service.recordReviewOutcome(input),
       confirmDiscovery: (input) => service.confirmDiscovery(input),
+      stopProcessing: async ({ workItemId }) => ({
+        workItem: (await workItemStore.getWorkItem(workItemId))!,
+        stoppedRunIds: ["run-1"],
+        alreadyIdleRunIds: [],
+        failedRunIds: [],
+      }),
       guardedOverrideState: async () => {
         throw new Error("Cannot override state while work item processing is active");
       },
@@ -439,5 +445,17 @@ describe("Dashboard Work Item API routes", () => {
 
     assert.equal(res.status, 409);
     assert.match(String(res.data.error), /processing is active/);
+  });
+
+  test("POST /api/work-items/:id/stop-processing returns stop results", async () => {
+    const source = await createWorkItemsSource();
+    const port = await startServer(source);
+
+    const res = await request(port, "POST", `/api/work-items/${source.discoveryId}/stop-processing`, {
+      actorUserId: source.pmUserId,
+    });
+
+    assert.equal(res.status, 200);
+    assert.deepEqual(res.data.stoppedRunIds, ["run-1"]);
   });
 });

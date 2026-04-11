@@ -151,6 +151,15 @@ export class RunStore {
     return rows.map(rowToRecord);
   }
 
+  async listRunsForWorkItem(workItemId: string): Promise<RunRecord[]> {
+    const rows = await this.db
+      .select()
+      .from(runs)
+      .where(eq(runs.workItemId, workItemId))
+      .orderBy(desc(runs.createdAt));
+    return rows.map(rowToRecord);
+  }
+
   async getRecentRuns(repoSlug?: string, limit = 10): Promise<RunRecord[]> {
     const conditions = repoSlug ? eq(runs.repoSlug, repoSlug) : undefined;
     const rows = await this.db
