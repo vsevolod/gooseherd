@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { readFile, access as fsAccess } from "node:fs/promises";
-import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import path from "node:path";
 import type { AppConfig } from "./config.js";
 import { resolveGitHubAuthMode } from "./config.js";
@@ -36,6 +36,7 @@ import type { ControlPlaneStore } from "./runtime/control-plane-store.js";
 import { routeControlPlaneRequest } from "./runtime/control-plane-router.js";
 import type { ArtifactStore } from "./runtime/artifact-store.js";
 import { formatSandboxRuntimeLabel } from "./runtime/runtime-mode.js";
+import type { ReviewRequestRecord, WorkItemEventRecord, WorkItemRecord } from "./work-items/types.js";
 
 /** Lean interface — dashboard only reads observer state, never mutates it. */
 export interface DashboardObserver {
@@ -47,6 +48,13 @@ export interface DashboardObserver {
 /** Optional source for in-memory orchestrator thread messages. */
 export interface DashboardConversationSource {
   get(threadKey: string): Promise<ChatMessage[] | undefined>;
+}
+
+export interface DashboardWorkItemsSource {
+  listWorkItems(workflow?: string): Promise<WorkItemRecord[]>;
+  getWorkItem(id: string): Promise<WorkItemRecord | undefined>;
+  listReviewRequestsForWorkItem(workItemId: string): Promise<ReviewRequestRecord[]>;
+  listEventsForWorkItem(workItemId: string): Promise<WorkItemEventRecord[]>;
 }
 
 function sendJson(res: ServerResponse, status: number, payload: unknown): void {
@@ -406,7 +414,8 @@ export function startDashboardServer(
   agentProfileStore?: AgentProfileStore,
   controlPlaneStore?: ControlPlaneStore,
   runnerArtifactStore?: ArtifactStore,
-): void {
+  workItemsSource?: DashboardWorkItemsSource,
+): Server {
   const githubService = GitHubService.create(config);
   let githubRepositoriesCache: CachedGitHubRepositories | undefined;
 
@@ -904,6 +913,18 @@ export function startDashboardServer(
         return;
       }
 
+      if (req.method === "GET" && pathname === "/api/work-items") {
+        if (!workItemsSource) {
+          sendJson(res, 501, { error: "Work item APIs are unavailable" });
+          return;
+        }
+
+        const workflow = requestUrl.searchParams.get("workflow") ?? undefined;
+        const workItems = await workItemsSource.listWorkItems(workflow || undefined);
+        sendJson(res, 200, { workItems });
+        return;
+      }
+
       const parts = pathname.split("/").filter(Boolean);
       if (parts[0] === "api" && parts[1] === "agent-profiles" && parts[2]) {
         if (!agentProfileStore) {
@@ -1305,6 +1326,37 @@ export function startDashboardServer(
         }
       }
 
+      if (parts[0] === "api" && parts[1] === "work-items" && parts[2]) {
+        if (!workItemsSource) {
+          sendJson(res, 501, { error: "Work item APIs are unavailable" });
+          return;
+        }
+
+        const workItemId = decodeURIComponent(parts[2]);
+
+        if (parts.length === 3 && req.method === "GET") {
+          const workItem = await workItemsSource.getWorkItem(workItemId);
+          if (!workItem) {
+            sendJson(res, 404, { error: `Work item not found: ${workItemId}` });
+            return;
+          }
+          sendJson(res, 200, { workItem });
+          return;
+        }
+
+        if (parts.length === 4 && parts[3] === "review-requests" && req.method === "GET") {
+          const reviewRequests = await workItemsSource.listReviewRequestsForWorkItem(workItemId);
+          sendJson(res, 200, { reviewRequests });
+          return;
+        }
+
+        if (parts.length === 4 && parts[3] === "events" && req.method === "GET") {
+          const events = await workItemsSource.listEventsForWorkItem(workItemId);
+          sendJson(res, 200, { events });
+          return;
+        }
+      }
+
       // ── Observer API routes ──
 
       if (req.method === "GET" && pathname === "/api/observer/state") {
@@ -1503,6 +1555,8 @@ export function startDashboardServer(
       url: `http://${config.dashboardHost}:${String(config.dashboardPort)}`
     });
   });
+
+  return server;
 }
 
 function parseOverrideFlag(value: string | undefined): boolean {

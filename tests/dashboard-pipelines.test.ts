@@ -256,7 +256,8 @@ describe("Dashboard Pipeline API routes", () => {
     const config = { ...makeConfig(port, dataDir), ...configOverrides } as AppConfig;
     const store = new RunStore(createMockRunDatabase() as never);
     await store.init();
-    startDashboardServer(config, store, undefined, undefined, undefined, pipelineStore);
+    const server = startDashboardServer(config, store, undefined, undefined, undefined, pipelineStore);
+    servers.push(server);
     await waitForServer(port);
     return port;
   }
