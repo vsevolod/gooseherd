@@ -44,6 +44,7 @@ import { ReviewRequestStore } from "./work-items/review-request-store.js";
 import { WorkItemEventsStore } from "./work-items/events-store.js";
 import { WorkItemService } from "./work-items/service.js";
 import { postWorkItemReviewNotifications } from "./work-items/slack-actions.js";
+import { WorkItemIdentityStore } from "./work-items/identity-store.js";
 import {
   hasSandboxRuntimeHotReloadChange,
   preflightSandboxRuntime
@@ -162,6 +163,7 @@ async function createServices(config: AppConfig, db: Database): Promise<Services
   const reviewRequestStore = new ReviewRequestStore(db);
   const workItemEventsStore = new WorkItemEventsStore(db);
   const workItemService = new WorkItemService(db);
+  const workItemIdentityStore = new WorkItemIdentityStore(db);
   const runtimeFactsReader = config.sandboxRuntime === "kubernetes"
     ? new KubernetesRuntimeFactsReader({
       namespace: resolveKubernetesNamespace(),
@@ -229,7 +231,7 @@ async function createServices(config: AppConfig, db: Database): Promise<Services
       if (webClient) {
         const workItem = await workItemService.getWorkItem(input.workItemId);
         if (workItem) {
-          await postWorkItemReviewNotifications(webClient, config, workItem, reviewRequests);
+          await postWorkItemReviewNotifications(webClient, config, workItemIdentityStore, workItem, reviewRequests);
         }
       }
       return reviewRequests;
