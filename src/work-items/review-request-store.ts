@@ -95,6 +95,20 @@ export class ReviewRequestStore {
     return updated;
   }
 
+  async setStatus(id: string, status: ReviewRequestRecord["status"]): Promise<ReviewRequestRecord> {
+    await this.db
+      .update(reviewRequests)
+      .set({
+        status,
+        updatedAt: new Date(),
+      })
+      .where(eq(reviewRequests.id, id));
+
+    const updated = await this.getReviewRequest(id);
+    if (!updated) throw new Error(`ReviewRequest not found: ${id}`);
+    return updated;
+  }
+
   async addComment(input: CreateReviewRequestCommentInput): Promise<void> {
     await this.db.insert(reviewRequestComments).values({
       reviewRequestId: input.reviewRequestId,

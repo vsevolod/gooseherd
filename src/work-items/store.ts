@@ -95,4 +95,12 @@ export class WorkItemStore {
     if (!updated) throw new Error(`WorkItem not found after update: ${id}`);
     return updated;
   }
+
+  async addFlags(id: string, flagsToAdd: string[]): Promise<WorkItemRecord> {
+    return this.updateState(id, {
+      state: (await this.getWorkItem(id))?.state ?? (() => { throw new Error(`WorkItem not found: ${id}`); })(),
+      substate: (await this.getWorkItem(id))?.substate,
+      flagsToAdd,
+    });
+  }
 }
