@@ -237,6 +237,11 @@ describe("Dashboard Pipeline API routes", () => {
 
   afterEach(async () => {
     GitHubService.create = originalCreateGitHubService;
+    for (const server of servers) {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+    servers.length = 0;
+
     for (const dir of tmpDirs) {
       await rm(dir, { recursive: true, force: true }).catch(() => {});
     }
