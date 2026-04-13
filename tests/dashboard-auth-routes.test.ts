@@ -5,8 +5,11 @@ import os from "node:os";
 import path from "node:path";
 import { mkdtemp, rm } from "node:fs/promises";
 import type { AppConfig } from "../src/config.js";
-import { startDashboardServer } from "../src/dashboard-server.js";
+import { DashboardAuthSessionStore } from "../src/dashboard/auth-session-store.js";
+import { startDashboardServer, type DashboardWorkItemsSource } from "../src/dashboard-server.js";
 import { createTestDb } from "./helpers/test-db.js";
+import { users } from "../src/db/schema.js";
+import type { WorkItemEventRecord, WorkItemRecord } from "../src/work-items/types.js";
 
 let nextPort = 32500 + Math.floor(Math.random() * 1000);
 function getPort(): number {
@@ -111,7 +114,11 @@ function makeConfig(port: number, dataDir: string): AppConfig {
   } as AppConfig;
 }
 
-function startAuthTestServer(config: AppConfig, db: Awaited<ReturnType<typeof createTestDb>>["db"]) {
+function startAuthTestServer(
+  config: AppConfig,
+  db: Awaited<ReturnType<typeof createTestDb>>["db"],
+  workItemsSource?: DashboardWorkItemsSource,
+) {
   return startDashboardServer(
     config,
     {} as any,
@@ -126,7 +133,7 @@ function startAuthTestServer(config: AppConfig, db: Awaited<ReturnType<typeof cr
     undefined,
     undefined,
     undefined,
-    undefined,
+    workItemsSource,
     db,
   );
 }
@@ -166,6 +173,109 @@ async function request(
     if (body) req.write(body);
     req.end();
   });
+}
+
+async function requestJson(
+  port: number,
+  method: string,
+  pathname: string,
+  body?: Record<string, unknown>,
+  headers?: Record<string, string>,
+): Promise<{ status: number; headers: http.IncomingHttpHeaders; text: string }> {
+  return new Promise((resolve, reject) => {
+    const bodyText = body ? JSON.stringify(body) : undefined;
+    const req = http.request({
+      hostname: "127.0.0.1",
+      port,
+      method,
+      path: pathname,
+      headers: {
+        ...(bodyText ? {
+          "content-type": "application/json",
+          "content-length": Buffer.byteLength(bodyText).toString(),
+        } : {}),
+        ...(headers ?? {}),
+      },
+    }, (res) => {
+      const chunks: Buffer[] = [];
+      res.on("data", (chunk: Buffer) => chunks.push(chunk));
+      res.on("end", () => {
+        resolve({
+          status: res.statusCode ?? 0,
+          headers: res.headers,
+          text: Buffer.concat(chunks).toString("utf8"),
+        });
+      });
+    });
+    req.on("error", reject);
+    if (bodyText) req.write(bodyText);
+    req.end();
+  });
+}
+
+function makeWorkItem(overrides: Partial<WorkItemRecord> = {}): WorkItemRecord {
+  return {
+    id: overrides.id ?? "work-item-1",
+    workflow: overrides.workflow ?? "product_discovery",
+    state: overrides.state ?? "backlog",
+    substate: overrides.substate,
+    flags: overrides.flags ?? [],
+    title: overrides.title ?? "Discovery item",
+    summary: overrides.summary ?? "Summary",
+    ownerTeamId: overrides.ownerTeamId ?? "team-1",
+    homeChannelId: overrides.homeChannelId ?? "C_TEAM",
+    homeThreadTs: overrides.homeThreadTs ?? "1740000000.000001",
+    originChannelId: overrides.originChannelId,
+    originThreadTs: overrides.originThreadTs,
+    jiraIssueKey: overrides.jiraIssueKey,
+    githubPrNumber: overrides.githubPrNumber,
+    githubPrUrl: overrides.githubPrUrl,
+    sourceWorkItemId: overrides.sourceWorkItemId,
+    createdByUserId: overrides.createdByUserId ?? "user-123",
+    createdAt: overrides.createdAt ?? new Date().toISOString(),
+    updatedAt: overrides.updatedAt ?? new Date().toISOString(),
+    completedAt: overrides.completedAt,
+  };
+}
+
+function makeDashboardWorkItemsSource(overrides: Partial<DashboardWorkItemsSource> = {}): DashboardWorkItemsSource {
+  return {
+    listWorkItems: async () => [],
+    getWorkItem: async () => undefined,
+    listReviewRequestsForWorkItem: async () => [],
+    listReviewRequestComments: async () => [],
+    listEventsForWorkItem: async (): Promise<WorkItemEventRecord[]> => [],
+    createDiscoveryWorkItem: async () => makeWorkItem(),
+    createReviewRequests: async () => [],
+    respondToReviewRequest: async () => makeWorkItem({ state: "waiting_for_pm_confirmation" }),
+    confirmDiscovery: async () => makeWorkItem({ state: "done" }),
+    stopProcessing: async () => ({
+      workItem: makeWorkItem(),
+      stoppedRunIds: [],
+      alreadyIdleRunIds: [],
+      failedRunIds: [],
+    }),
+    guardedOverrideState: async () => makeWorkItem({ state: "cancelled" }),
+    ...overrides,
+  };
+}
+
+async function createUserSessionCookie(
+  db: Awaited<ReturnType<typeof createTestDb>>["db"],
+  userId: string,
+): Promise<string> {
+  await db.insert(users).values({
+    id: userId,
+    slackUserId: `U_${userId.replace(/[^A-Za-z0-9]/g, "").slice(0, 16) || "TEST"}`,
+    displayName: `User ${userId}`,
+  });
+  const session = await new DashboardAuthSessionStore(db).createSession({
+    principalType: "user",
+    authMethod: "slack",
+    userId,
+    ttlMs: 60_000,
+  });
+  return `gooseherd-session=${session.token}`;
 }
 
 async function waitForServer(port: number): Promise<void> {
@@ -345,5 +455,153 @@ describe("dashboard auth routes", () => {
     const callbackRes = await request(port, "GET", `/auth/slack/callback?code=test-code&state=${state}`);
     assert.equal(callbackRes.status, 302);
     assert.match(callbackRes.headers.location ?? "", /not%20registered/);
+  });
+
+  test("admin password session may override state using the session-derived admin principal", async (t) => {
+    const testDb = await createTestDb();
+    const dataDir = await mkdtemp(path.join(os.tmpdir(), "dashboard-auth-"));
+    const port = getPort();
+    let seenActor: { principalType: string; authMethod: string; sessionId?: string } | undefined;
+    const workItemsSource = makeDashboardWorkItemsSource({
+      guardedOverrideState: async ({ actor }) => {
+        seenActor = actor;
+        return makeWorkItem({ state: "cancelled" });
+      },
+    });
+    const server = startAuthTestServer(makeConfig(port, dataDir), testDb.db, workItemsSource);
+    t.after(async () => {
+      server.close();
+      await rm(dataDir, { recursive: true, force: true });
+      await testDb.cleanup();
+    });
+    await waitForServer(port);
+
+    const loginRes = await request(port, "POST", "/login", "token=admin-secret");
+    const cookie = (loginRes.headers["set-cookie"]?.[0] ?? "").split(";")[0] ?? "";
+    const res = await requestJson(port, "POST", "/api/work-items/work-item-1/override-state", {
+      state: "cancelled",
+      reason: "manual override",
+    }, { cookie });
+
+    assert.equal(res.status, 200);
+    assert.deepEqual(seenActor && {
+      principalType: seenActor.principalType,
+      authMethod: seenActor.authMethod,
+      hasSessionId: typeof seenActor.sessionId === "string" && seenActor.sessionId.length > 0,
+    }, {
+      principalType: "admin_session",
+      authMethod: "admin_password",
+      hasSessionId: true,
+    });
+  });
+
+  test("admin password session cannot create discovery items", async (t) => {
+    const testDb = await createTestDb();
+    const dataDir = await mkdtemp(path.join(os.tmpdir(), "dashboard-auth-"));
+    const port = getPort();
+    const createDiscoveryWorkItem = mock.fn(async () => makeWorkItem());
+    const workItemsSource = makeDashboardWorkItemsSource({ createDiscoveryWorkItem });
+    const server = startAuthTestServer(makeConfig(port, dataDir), testDb.db, workItemsSource);
+    t.after(async () => {
+      server.close();
+      await rm(dataDir, { recursive: true, force: true });
+      await testDb.cleanup();
+    });
+    await waitForServer(port);
+
+    const loginRes = await request(port, "POST", "/login", "token=admin-secret");
+    const cookie = (loginRes.headers["set-cookie"]?.[0] ?? "").split(";")[0] ?? "";
+    const res = await requestJson(port, "POST", "/api/work-items/discovery", {
+      title: "Discovery item",
+      createdByUserId: "forged-user",
+    }, { cookie });
+
+    assert.equal(res.status, 403);
+    assert.equal(createDiscoveryWorkItem.mock.callCount(), 0);
+  });
+
+  test("admin password session cannot respond to review requests as a workflow participant", async (t) => {
+    const testDb = await createTestDb();
+    const dataDir = await mkdtemp(path.join(os.tmpdir(), "dashboard-auth-"));
+    const port = getPort();
+    const respondToReviewRequest = mock.fn(async () => makeWorkItem());
+    const workItemsSource = makeDashboardWorkItemsSource({ respondToReviewRequest });
+    const server = startAuthTestServer(makeConfig(port, dataDir), testDb.db, workItemsSource);
+    t.after(async () => {
+      server.close();
+      await rm(dataDir, { recursive: true, force: true });
+      await testDb.cleanup();
+    });
+    await waitForServer(port);
+
+    const loginRes = await request(port, "POST", "/login", "token=admin-secret");
+    const cookie = (loginRes.headers["set-cookie"]?.[0] ?? "").split(";")[0] ?? "";
+    const res = await requestJson(port, "POST", "/api/review-requests/review-1/respond", {
+      outcome: "approved",
+      authorUserId: "forged-user",
+    }, { cookie });
+
+    assert.equal(res.status, 403);
+    assert.equal(respondToReviewRequest.mock.callCount(), 0);
+  });
+
+  test("user session may create discovery items through the session-derived identity", async (t) => {
+    const testDb = await createTestDb();
+    const dataDir = await mkdtemp(path.join(os.tmpdir(), "dashboard-auth-"));
+    const port = getPort();
+    const userId = "11111111-1111-4111-8111-111111111111";
+    let seenActorUserId: string | undefined;
+    const workItemsSource = makeDashboardWorkItemsSource({
+      createDiscoveryWorkItem: async ({ actor }) => {
+        seenActorUserId = actor.userId;
+        return makeWorkItem({ createdByUserId: actor.userId });
+      },
+    });
+    const server = startAuthTestServer(makeConfig(port, dataDir), testDb.db, workItemsSource);
+    t.after(async () => {
+      server.close();
+      await rm(dataDir, { recursive: true, force: true });
+      await testDb.cleanup();
+    });
+    await waitForServer(port);
+
+    const cookie = await createUserSessionCookie(testDb.db, userId);
+    const res = await requestJson(port, "POST", "/api/work-items/discovery", {
+      title: "Discovery item",
+      createdByUserId: "forged-user",
+    }, { cookie });
+
+    assert.equal(res.status, 201);
+    assert.equal(seenActorUserId, userId);
+  });
+
+  test("user session may respond to review requests through the session-derived identity", async (t) => {
+    const testDb = await createTestDb();
+    const dataDir = await mkdtemp(path.join(os.tmpdir(), "dashboard-auth-"));
+    const port = getPort();
+    const userId = "22222222-2222-4222-8222-222222222222";
+    let seenActorUserId: string | undefined;
+    const workItemsSource = makeDashboardWorkItemsSource({
+      respondToReviewRequest: async ({ actor }) => {
+        seenActorUserId = actor.userId;
+        return makeWorkItem({ state: "waiting_for_pm_confirmation" });
+      },
+    });
+    const server = startAuthTestServer(makeConfig(port, dataDir), testDb.db, workItemsSource);
+    t.after(async () => {
+      server.close();
+      await rm(dataDir, { recursive: true, force: true });
+      await testDb.cleanup();
+    });
+    await waitForServer(port);
+
+    const cookie = await createUserSessionCookie(testDb.db, userId);
+    const res = await requestJson(port, "POST", "/api/review-requests/review-1/respond", {
+      outcome: "approved",
+      authorUserId: "forged-user",
+    }, { cookie });
+
+    assert.equal(res.status, 200);
+    assert.equal(seenActorUserId, userId);
   });
 });

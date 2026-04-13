@@ -2175,7 +2175,6 @@ export function dashboardHtml(config: AppConfig): string {
       themePreference: 'system',
       viewMode: 'runs',
       boardWorkflow: 'product_discovery',
-      boardActorUserId: '',
     };
 
     var logStreamState = { runId: null, offset: 0 };
@@ -3946,23 +3945,6 @@ export function dashboardHtml(config: AppConfig): string {
       return parts.length > 0 ? parts.join(' · ') : 'System';
     }
 
-    function ensureBoardActorUserId(defaultUserId, promptLabel) {
-      if (state.boardActorUserId) {
-        return state.boardActorUserId;
-      }
-      var suggested = defaultUserId || '';
-      var value = window.prompt(promptLabel || 'Actor user id', suggested);
-      if (value === null) {
-        return null;
-      }
-      value = String(value || '').trim();
-      if (!value) {
-        return null;
-      }
-      state.boardActorUserId = value;
-      return value;
-    }
-
     async function refreshSelected() {
       if (!state.selectedId) {
         el.retryRun.disabled = true;
@@ -4371,15 +4353,6 @@ export function dashboardHtml(config: AppConfig): string {
 
     async function respondToReviewRequest(reviewRequestId, outcome, comment) {
       if (!reviewRequestId) return;
-      var request = (state.selectedWorkItemReviewRequests || []).find(function(entry) { return entry.id === reviewRequestId; }) || null;
-      var defaultActorUserId = request && request.targetType === 'user' && request.targetRef
-        ? request.targetRef.userId
-        : (state.selectedWorkItem && state.selectedWorkItem.createdByUserId) || '';
-      var authorUserId = ensureBoardActorUserId(defaultActorUserId, 'Reviewer user id');
-      if (!authorUserId) {
-        setBoardStatusMessage('Reviewer user id is required to respond from the board.', 'error');
-        return;
-      }
       setBoardStatusMessage('Saving review response...');
       try {
         await fetchJson('/api/review-requests/' + encodeURIComponent(reviewRequestId) + '/respond', {
@@ -4388,7 +4361,6 @@ export function dashboardHtml(config: AppConfig): string {
           body: JSON.stringify({
             outcome: outcome,
             comment: comment || undefined,
-            authorUserId: authorUserId,
           }),
         });
         await loadWorkItems();
@@ -4402,11 +4374,6 @@ export function dashboardHtml(config: AppConfig): string {
       el.boardConfirmApprove.onclick = async function() {
         if (!state.selectedWorkItemId) return;
         var item = state.selectedWorkItem;
-        var actorUserId = ensureBoardActorUserId(item && item.createdByUserId, 'PM user id');
-        if (!actorUserId) {
-          setBoardStatusMessage('PM user id is required to approve discovery.', 'error');
-          return;
-        }
         var jiraIssueKey = item && item.jiraIssueKey ? item.jiraIssueKey : '';
         if (!jiraIssueKey) {
           jiraIssueKey = String(window.prompt('Jira issue key', '') || '').trim();
@@ -4420,7 +4387,7 @@ export function dashboardHtml(config: AppConfig): string {
           await fetchJson('/api/work-items/' + encodeURIComponent(state.selectedWorkItemId) + '/confirm-discovery', {
             method: 'POST',
             headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ approved: true, actorUserId: actorUserId, jiraIssueKey: jiraIssueKey }),
+            body: JSON.stringify({ approved: true, jiraIssueKey: jiraIssueKey }),
           });
           await loadWorkItems();
           setBoardStatusMessage('Discovery approved.', 'ok');
@@ -4433,18 +4400,12 @@ export function dashboardHtml(config: AppConfig): string {
     if (el.boardConfirmRework) {
       el.boardConfirmRework.onclick = async function() {
         if (!state.selectedWorkItemId) return;
-        var item = state.selectedWorkItem;
-        var actorUserId = ensureBoardActorUserId(item && item.createdByUserId, 'PM user id');
-        if (!actorUserId) {
-          setBoardStatusMessage('PM user id is required to return discovery to rework.', 'error');
-          return;
-        }
         setBoardStatusMessage('Returning item to in_progress...');
         try {
           await fetchJson('/api/work-items/' + encodeURIComponent(state.selectedWorkItemId) + '/confirm-discovery', {
             method: 'POST',
             headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ approved: false, actorUserId: actorUserId }),
+            body: JSON.stringify({ approved: false }),
           });
           await loadWorkItems();
           setBoardStatusMessage('Discovery returned to in_progress.', 'ok');
@@ -4457,18 +4418,12 @@ export function dashboardHtml(config: AppConfig): string {
     if (el.boardStopProcessing) {
       el.boardStopProcessing.onclick = async function() {
         if (!state.selectedWorkItemId) return;
-        var item = state.selectedWorkItem;
-        var actorUserId = ensureBoardActorUserId(item && item.createdByUserId, 'Actor user id');
-        if (!actorUserId) {
-          setBoardStatusMessage('Actor user id is required to stop processing.', 'error');
-          return;
-        }
         setBoardStatusMessage('Stopping active processing...');
         try {
           var result = await fetchJson('/api/work-items/' + encodeURIComponent(state.selectedWorkItemId) + '/stop-processing', {
             method: 'POST',
             headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ actorUserId: actorUserId }),
+            body: JSON.stringify({}),
           });
           await loadWorkItems();
           var stopped = Array.isArray(result.stoppedRunIds) ? result.stoppedRunIds.length : 0;
@@ -4487,12 +4442,6 @@ export function dashboardHtml(config: AppConfig): string {
     if (el.boardOverrideSubmit) {
       el.boardOverrideSubmit.onclick = async function() {
         if (!state.selectedWorkItemId) return;
-        var item = state.selectedWorkItem;
-        var actorUserId = ensureBoardActorUserId(item && item.createdByUserId, 'Actor user id');
-        if (!actorUserId) {
-          setBoardStatusMessage('Actor user id is required to override work item state.', 'error');
-          return;
-        }
         var reason = (el.boardOverrideReason.value || '').trim();
         if (!reason) {
           setBoardStatusMessage('Override reason is required.', 'error');
@@ -4507,7 +4456,6 @@ export function dashboardHtml(config: AppConfig): string {
               state: el.boardOverrideState.value,
               substate: (el.boardOverrideSubstate.value || '').trim() || undefined,
               reason: reason,
-              actorUserId: actorUserId,
             }),
           });
           el.boardOverrideReason.value = '';
