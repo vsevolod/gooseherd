@@ -329,11 +329,6 @@ test("service only allows owner-team PM to request review and confirm discovery 
   });
 
   assert.equal(updated.state, "in_progress");
-
-  await assert.rejects(() => service.confirmDiscovery({
-    workItemId: discovery.id,
-    approved: false,
-  }), /actorUserId is required/i);
 });
 
 test("service stop processing requires manual transition authority, while override requires explicit admin override", async (t) => {
@@ -403,17 +398,6 @@ test("service stop processing requires manual transition authority, while overri
     reason: "Admin override",
   });
   assert.equal(overridden.state, "cancelled");
-
-  await assert.rejects(() => service.stopProcessing({
-    workItemId: workItem.id,
-    cancelRun: async () => true,
-  }), /actorUserId is required/i);
-
-  await assert.rejects(() => service.guardedOverrideState({
-    workItemId: workItem.id,
-    state: "done",
-    reason: "Missing actor",
-  }), /actorUserId is required/i);
 });
 
 test("service can attach an existing run to a work item", async (t) => {

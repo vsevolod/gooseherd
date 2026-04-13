@@ -95,10 +95,6 @@ export class WorkItemIdentityStore {
     return Array.isArray(rows[0]?.functionalRoles) && rows[0]!.functionalRoles.includes(role);
   }
 
-  async userHasTeamRole(userId: string, teamId: string, role: string): Promise<boolean> {
-    return this.userHasTeamFunctionalRole(userId, teamId, role);
-  }
-
   async userIsPmForTeam(userId: string, teamId: string): Promise<boolean> {
     return this.userHasTeamFunctionalRole(userId, teamId, "pm");
   }
@@ -112,15 +108,6 @@ export class WorkItemIdentityStore {
       .select()
       .from(orgRoleAssignments)
       .where(and(eq(orgRoleAssignments.userId, userId), eq(orgRoleAssignments.orgRole, orgRole)))
-      .limit(1);
-    return rows.length > 0;
-  }
-
-  async userHasAnyOrgRole(userId: string): Promise<boolean> {
-    const rows = await this.db
-      .select()
-      .from(orgRoleAssignments)
-      .where(eq(orgRoleAssignments.userId, userId))
       .limit(1);
     return rows.length > 0;
   }

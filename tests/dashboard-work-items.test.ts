@@ -302,13 +302,17 @@ async function createWorkItemsSource(): Promise<DashboardWorkItemsSource & {
       createReviewRequests: (input) => service.requestReview(input),
       respondToReviewRequest: (input) => service.recordReviewOutcome(input),
       confirmDiscovery: (input) => service.confirmDiscovery(input),
-      stopProcessing: async ({ workItemId }) => ({
+      stopProcessing: async ({ workItemId, actorUserId }) => {
+        void actorUserId;
+        return {
         workItem: (await workItemStore.getWorkItem(workItemId))!,
         stoppedRunIds: ["run-1"],
         alreadyIdleRunIds: [],
         failedRunIds: [],
-      }),
-      guardedOverrideState: async () => {
+        };
+      },
+      guardedOverrideState: async ({ actorUserId }) => {
+        void actorUserId;
         throw new Error("Cannot override state while work item processing is active");
       },
     };
@@ -460,6 +464,19 @@ async function createWorkItemsSource(): Promise<DashboardWorkItemsSource & {
     assert.equal((res.data.workItem as { state: string }).state, "done");
   });
 
+  test("POST /api/work-items/:id/confirm-discovery requires actorUserId", async () => {
+    const source = await createWorkItemsSource();
+    const port = await startServer(source);
+
+    const res = await request(port, "POST", `/api/work-items/${source.discoveryId}/confirm-discovery`, {
+      approved: true,
+      jiraIssueKey: "HBL-501",
+    });
+
+    assert.equal(res.status, 400);
+    assert.match(String(res.data.error), /actorUserId is required/);
+  });
+
   test("POST /api/work-items/:id/override-state rejects when guarded override is blocked", async () => {
     const source = await createWorkItemsSource();
     const port = await startServer(source);
@@ -474,6 +491,19 @@ async function createWorkItemsSource(): Promise<DashboardWorkItemsSource & {
     assert.match(String(res.data.error), /processing is active/);
   });
 
+  test("POST /api/work-items/:id/override-state requires actorUserId", async () => {
+    const source = await createWorkItemsSource();
+    const port = await startServer(source);
+
+    const res = await request(port, "POST", `/api/work-items/${source.discoveryId}/override-state`, {
+      state: "cancelled",
+      reason: "stuck worker",
+    });
+
+    assert.equal(res.status, 400);
+    assert.match(String(res.data.error), /actorUserId is required/);
+  });
+
   test("POST /api/work-items/:id/stop-processing returns stop results", async () => {
     const source = await createWorkItemsSource();
     const port = await startServer(source);
@@ -484,5 +514,15 @@ async function createWorkItemsSource(): Promise<DashboardWorkItemsSource & {
 
     assert.equal(res.status, 200);
     assert.deepEqual(res.data.stoppedRunIds, ["run-1"]);
+  });
+
+  test("POST /api/work-items/:id/stop-processing requires actorUserId", async () => {
+    const source = await createWorkItemsSource();
+    const port = await startServer(source);
+
+    const res = await request(port, "POST", `/api/work-items/${source.discoveryId}/stop-processing`, {});
+
+    assert.equal(res.status, 400);
+    assert.match(String(res.data.error), /actorUserId is required/);
   });
 });

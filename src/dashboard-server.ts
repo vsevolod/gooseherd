@@ -111,18 +111,18 @@ export interface DashboardWorkItemsSource {
   confirmDiscovery(input: {
     workItemId: string;
     approved: boolean;
-    actorUserId?: string;
+    actorUserId: string;
     jiraIssueKey?: string;
   }): Promise<WorkItemRecord>;
   stopProcessing(input: {
     workItemId: string;
-    actorUserId?: string;
+    actorUserId: string;
   }): Promise<{ workItem: WorkItemRecord; stoppedRunIds: string[]; alreadyIdleRunIds: string[]; failedRunIds: string[] }>;
   guardedOverrideState(input: {
     workItemId: string;
     state: WorkItemRecord["state"];
     substate?: string;
-    actorUserId?: string;
+    actorUserId: string;
     reason: string;
   }): Promise<WorkItemRecord>;
 }
@@ -1687,6 +1687,10 @@ export function startDashboardServer(
             sendJson(res, 400, { error: "approved must be a boolean" });
             return;
           }
+          if (typeof parsed.actorUserId !== "string" || parsed.actorUserId.trim() === "") {
+            sendJson(res, 400, { error: "actorUserId is required" });
+            return;
+          }
 
           try {
             const workItem = await workItemsSource.confirmDiscovery({
@@ -1710,6 +1714,10 @@ export function startDashboardServer(
             parsed = raw ? (JSON.parse(raw) as typeof parsed) : {};
           } catch {
             sendJson(res, 400, { error: "Invalid JSON body" });
+            return;
+          }
+          if (typeof parsed.actorUserId !== "string" || parsed.actorUserId.trim() === "") {
+            sendJson(res, 400, { error: "actorUserId is required" });
             return;
           }
 
@@ -1737,6 +1745,10 @@ export function startDashboardServer(
           }
           if (!parsed.state || !parsed.reason) {
             sendJson(res, 400, { error: "state and reason are required" });
+            return;
+          }
+          if (typeof parsed.actorUserId !== "string" || parsed.actorUserId.trim() === "") {
+            sendJson(res, 400, { error: "actorUserId is required" });
             return;
           }
 
