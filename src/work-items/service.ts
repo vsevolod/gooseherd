@@ -79,7 +79,7 @@ export class WorkItemService {
     }>;
   }): Promise<ReviewRequestRecord[]> {
     const workItem = await this.requireWorkItem(input.workItemId);
-    await this.authorization.assertCanManageWorkItem(input.requestedByUserId, workItem);
+    await this.authorization.assertCanRequestReview(input.requestedByUserId, workItem);
     const currentRequests = await this.reviewRequests.listReviewRequestsForWorkItem(workItem.id);
     const nextReviewRound = Math.max(0, ...currentRequests.map((request) => request.reviewRound)) + 1;
 
@@ -197,7 +197,9 @@ export class WorkItemService {
     jiraIssueKey?: string;
   }): Promise<WorkItemRecord> {
     const workItem = await this.requireWorkItem(input.workItemId);
-    await this.authorization.assertCanManageWorkItem(input.actorUserId, workItem);
+    if (input.actorUserId) {
+      await this.authorization.assertCanApplyManualTransition(input.actorUserId, workItem, input.approved ? "approve_discovery" : "reject_discovery");
+    }
 
     if (input.approved) {
       const jiraIssueKey = input.jiraIssueKey?.trim() || workItem.jiraIssueKey;
@@ -372,7 +374,9 @@ export class WorkItemService {
     hasActiveProcessing?: (workItem: WorkItemRecord) => Promise<boolean>;
   }): Promise<WorkItemRecord> {
     const workItem = await this.requireWorkItem(input.workItemId);
-    await this.authorization.assertCanManageWorkItem(input.actorUserId, workItem);
+    if (input.actorUserId) {
+      await this.authorization.assertCanOverrideWorkItem(input.actorUserId);
+    }
     if (input.hasActiveProcessing && await input.hasActiveProcessing(workItem)) {
       throw new Error("Cannot override state while work item processing is active");
     }
@@ -418,7 +422,9 @@ export class WorkItemService {
     cancelRun: (runId: string) => Promise<boolean>;
   }): Promise<{ workItem: WorkItemRecord; stoppedRunIds: string[]; alreadyIdleRunIds: string[]; failedRunIds: string[] }> {
     const workItem = await this.requireWorkItem(input.workItemId);
-    await this.authorization.assertCanManageWorkItem(input.actorUserId, workItem);
+    if (input.actorUserId) {
+      await this.authorization.assertCanApplyManualTransition(input.actorUserId, workItem, "stop_processing");
+    }
     const runs = await this.runs.listRunsForWorkItem(workItem.id);
 
     const stoppedRunIds: string[] = [];

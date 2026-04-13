@@ -12,6 +12,7 @@ async function createServiceFixture() {
   const pmUserId = randomUUID();
   const reviewerUserId = randomUUID();
   const outsiderUserId = randomUUID();
+  const adminUserId = randomUUID();
   const ctoUserId = randomUUID();
   const ownerTeamId = randomUUID();
 
@@ -19,6 +20,7 @@ async function createServiceFixture() {
     { id: pmUserId, slackUserId: "U_PM", jiraAccountId: "JIRA_PM", displayName: "PM" },
     { id: reviewerUserId, slackUserId: "U_ENG", displayName: "Engineer" },
     { id: outsiderUserId, slackUserId: "U_OUT", displayName: "Outsider" },
+    { id: adminUserId, slackUserId: "U_ADMIN", displayName: "Admin" },
     { id: ctoUserId, slackUserId: "U_CTO", displayName: "CTO" },
   ]);
   await testDb.db.insert(teams).values({
@@ -30,10 +32,10 @@ async function createServiceFixture() {
     { teamId: ownerTeamId, userId: pmUserId, functionalRoles: ["pm"] },
     { teamId: ownerTeamId, userId: reviewerUserId, functionalRoles: ["engineer"] },
   ]);
-  await testDb.db.insert(orgRoleAssignments).values({
-    userId: ctoUserId,
-    orgRole: "cto",
-  });
+  await testDb.db.insert(orgRoleAssignments).values([
+    { userId: adminUserId, orgRole: "admin" },
+    { userId: ctoUserId, orgRole: "cto" },
+  ]);
 
   return {
     db: testDb.db,
@@ -42,6 +44,7 @@ async function createServiceFixture() {
     pmUserId,
     reviewerUserId,
     outsiderUserId,
+    adminUserId,
     ctoUserId,
     ownerTeamId,
   };
@@ -231,7 +234,7 @@ test("service enforces target-aware authorization for review responses", async (
 });
 
 test("service rejects unauthorized override actors but allows org-role admins", async (t) => {
-  const { cleanup, service, pmUserId, outsiderUserId, ctoUserId, ownerTeamId } = await createServiceFixture();
+  const { cleanup, service, pmUserId, outsiderUserId, adminUserId, ctoUserId, ownerTeamId } = await createServiceFixture();
   t.after(cleanup);
 
   const delivery = await service.createDeliveryFromJira({
@@ -251,11 +254,148 @@ test("service rejects unauthorized override actors but allows org-role admins", 
     reason: "I should not be allowed",
   }), /not authorized/i);
 
-  const overridden = await service.guardedOverrideState({
+  await assert.rejects(() => service.guardedOverrideState({
     workItemId: delivery.id,
     state: "cancelled",
     actorUserId: ctoUserId,
+    reason: "Non-admin org role should not override",
+  }), /not authorized/i);
+
+  const overridden = await service.guardedOverrideState({
+    workItemId: delivery.id,
+    state: "cancelled",
+    actorUserId: adminUserId,
     reason: "Org admin override",
+  });
+  assert.equal(overridden.state, "cancelled");
+});
+
+test("service only allows owner-team PM to request review and confirm discovery through manual path", async (t) => {
+  const { cleanup, service, pmUserId, reviewerUserId, ownerTeamId } = await createServiceFixture();
+  t.after(cleanup);
+
+  const discovery = await service.createDiscoveryWorkItem({
+    title: "PM-gated management",
+    summary: "Only PM can manage manual flow",
+    ownerTeamId,
+    homeChannelId: "C_GROWTH",
+    homeThreadTs: "1740000000.370",
+    createdByUserId: pmUserId,
+  });
+  await service.startDiscovery(discovery.id);
+
+  await assert.rejects(() => service.requestReview({
+    workItemId: discovery.id,
+    requestedByUserId: reviewerUserId,
+    requests: [
+      {
+        type: "review",
+        targetType: "team",
+        targetRef: { teamId: ownerTeamId },
+        title: "Engineer cannot request",
+      },
+    ],
+  }), /not authorized/i);
+
+  const [review] = await service.requestReview({
+    workItemId: discovery.id,
+    requestedByUserId: pmUserId,
+    requests: [
+      {
+        type: "review",
+        targetType: "user",
+        targetRef: { userId: reviewerUserId },
+        title: "PM can request",
+      },
+    ],
+  });
+
+  await service.recordReviewOutcome({
+    reviewRequestId: review.id,
+    outcome: "approved",
+    authorUserId: reviewerUserId,
+  });
+
+  await assert.rejects(() => service.confirmDiscovery({
+    workItemId: discovery.id,
+    approved: false,
+    actorUserId: reviewerUserId,
+  }), /not authorized/i);
+
+  const updated = await service.confirmDiscovery({
+    workItemId: discovery.id,
+    approved: false,
+    actorUserId: pmUserId,
+  });
+
+  assert.equal(updated.state, "in_progress");
+});
+
+test("service stop processing requires manual transition authority, while override requires explicit admin override", async (t) => {
+  const { db, cleanup, service, pmUserId, reviewerUserId, adminUserId, ownerTeamId } = await createServiceFixture();
+  t.after(cleanup);
+
+  const workItem = await service.createDeliveryFromJira({
+    title: "Split manual and override auth",
+    summary: "PM can stop processing but not override state",
+    ownerTeamId,
+    homeChannelId: "C_GROWTH",
+    homeThreadTs: "1740000000.402",
+    jiraIssueKey: "HBL-305",
+    createdByUserId: pmUserId,
+  });
+
+  const runStore = new RunStore(db);
+  const run = await runStore.createRun(
+    {
+      runtime: "local",
+      repoSlug: "hubstaff/gooseherd",
+      task: "Active work",
+      baseBranch: "main",
+      requestedBy: "U_PM",
+      channelId: "C_GROWTH",
+      threadTs: "1740000000.402",
+    },
+    "gooseherd"
+  );
+  await runStore.linkToWorkItem(run.id, workItem.id);
+  await runStore.updateRun(run.id, {
+    status: "running",
+    phase: "agent",
+    startedAt: new Date().toISOString(),
+  });
+
+  await assert.rejects(() => service.stopProcessing({
+    workItemId: workItem.id,
+    actorUserId: reviewerUserId,
+    cancelRun: async () => true,
+  }), /not authorized/i);
+
+  const stopResult = await service.stopProcessing({
+    workItemId: workItem.id,
+    actorUserId: pmUserId,
+    cancelRun: async (runId) => {
+      await runStore.updateRun(runId, {
+        status: "cancel_requested",
+        phase: "cancel_requested",
+      });
+      return true;
+    },
+  });
+  assert.deepEqual(stopResult.stoppedRunIds, [run.id]);
+
+  await assert.rejects(() => service.guardedOverrideState({
+    workItemId: workItem.id,
+    state: "cancelled",
+    actorUserId: pmUserId,
+    reason: "PM cannot globally override",
+  }), /not authorized/i);
+
+  const overridden = await service.guardedOverrideState({
+    workItemId: workItem.id,
+    state: "cancelled",
+    actorUserId: adminUserId,
+    reason: "Admin override",
   });
   assert.equal(overridden.state, "cancelled");
 });
@@ -299,7 +439,7 @@ test("service can attach an existing run to a work item", async (t) => {
 });
 
 test("service stops active processing before guarded override", async (t) => {
-  const { db, service, cleanup, pmUserId, ownerTeamId } = await createServiceFixture();
+  const { db, service, cleanup, pmUserId, adminUserId, ownerTeamId } = await createServiceFixture();
   t.after(cleanup);
 
   const workItem = await service.createDeliveryFromJira({
@@ -337,7 +477,7 @@ test("service stops active processing before guarded override", async (t) => {
   await assert.rejects(() => service.guardedOverrideState({
     workItemId: workItem.id,
     state: "cancelled",
-    actorUserId: pmUserId,
+    actorUserId: adminUserId,
     reason: "stuck worker",
     hasActiveProcessing: async () => service.hasActiveProcessing(workItem.id),
   }), /processing is active/);
@@ -360,7 +500,7 @@ test("service stops active processing before guarded override", async (t) => {
   const overridden = await service.guardedOverrideState({
     workItemId: workItem.id,
     state: "cancelled",
-    actorUserId: pmUserId,
+    actorUserId: adminUserId,
     reason: "stopped the worker first",
     hasActiveProcessing: async () => service.hasActiveProcessing(workItem.id),
   });
