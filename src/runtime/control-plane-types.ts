@@ -1,0 +1,69 @@
+import type { TokenUsage } from "../types.js";
+
+export type RunStatus =
+  | "queued"
+  | "starting"
+  | "running"
+  | "cancel_requested"
+  | "completed"
+  | "failed"
+  | "cancelled";
+
+export type ArtifactState = "complete" | "partial" | "failed";
+
+export interface CreateRunEnvelopeInput {
+  runId: string;
+  payloadRef: string;
+  payloadJson: Record<string, unknown>;
+  runtime: "local" | "docker" | "kubernetes";
+}
+
+export interface RunEnvelope {
+  runId: string;
+  payloadRef: string;
+  payloadJson: Record<string, unknown>;
+  runtime: CreateRunEnvelopeInput["runtime"];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface IssuedRunToken {
+  token: string;
+}
+
+export interface RunnerCompletionPayload {
+  idempotencyKey: string;
+  status: "success" | "failed";
+  reason?: string;
+  artifactState: ArtifactState;
+  commitSha?: string;
+  changedFiles?: string[];
+  prUrl?: string;
+  tokenUsage?: TokenUsage;
+  title?: string;
+}
+
+export interface RunCompletionRecord {
+  id: number;
+  runId: string;
+  idempotencyKey: string;
+  payload: RunnerCompletionPayload;
+  createdAt: string;
+}
+
+export type RunnerEventType =
+  | "run.started"
+  | "run.progress"
+  | "run.phase_changed"
+  | "run.warning"
+  | "run.artifact_status"
+  | "run.cancellation_observed"
+  | "run.completion_attempted";
+
+export interface RunnerEventPayload {
+  eventId: string;
+  eventType: RunnerEventType;
+  timestamp: string;
+  sequence: number;
+  payload?: Record<string, unknown>;
+}

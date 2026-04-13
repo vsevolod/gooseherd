@@ -1,0 +1,8 @@
+version: 1
+name: "kubernetes-smoke"
+description: "Minimal pipeline for Kubernetes runner smoke validation"
+
+nodes:
+  - id: notify
+    type: deterministic
+    action: notify

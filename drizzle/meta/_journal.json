@@ -36,6 +36,20 @@
       "when": 1778600000000,
       "tag": "0004_agent_profiles",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1778603600000,
+      "tag": "0005_sandbox_runtime_modes",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1778607200000,
+      "tag": "0006_runner_control_plane",
+      "breakpoints": true
     }
   ]
 }

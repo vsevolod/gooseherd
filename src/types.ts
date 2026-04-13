@@ -1,3 +1,5 @@
+import type { SandboxRuntime } from "./runtime/runtime-mode.js";
+
 export type RunStatus =
   | "queued"
   | "running"
@@ -5,8 +7,10 @@ export type RunStatus =
   | "pushing"
   | "awaiting_ci"
   | "ci_fixing"
+  | "cancel_requested"
   | "completed"
-  | "failed";
+  | "failed"
+  | "cancelled";
 
 export type RunPhase =
   | "queued"
@@ -16,8 +20,10 @@ export type RunPhase =
   | "pushing"
   | "awaiting_ci"
   | "ci_fixing"
+  | "cancel_requested"
   | "completed"
-  | "failed";
+  | "failed"
+  | "cancelled";
 
 export interface TokenUsage {
   qualityGateInputTokens: number;
@@ -37,6 +43,7 @@ export interface RunFeedback {
 
 export interface RunRecord {
   id: string;
+  runtime: SandboxRuntime;
   status: RunStatus;
   phase?: RunPhase;
   repoSlug: string;
@@ -93,6 +100,7 @@ export interface NewRunInput {
   requestedBy: string;
   channelId: string;
   threadTs: string;
+  runtime: SandboxRuntime;
   /** Link to the parent run for follow-ups */
   parentRunId?: string;
   /** The engineer's follow-up instruction */

@@ -1,0 +1,10 @@
+version: 1
+name: "kubernetes-fail-smoke"
+description: "Deterministic pipeline for local Kubernetes failure validation"
+
+nodes:
+  - id: fail
+    type: deterministic
+    action: run
+    config:
+      command: "sh -lc 'echo intentional failure >&2; exit 1'"

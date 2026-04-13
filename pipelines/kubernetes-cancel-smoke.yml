@@ -1,0 +1,65 @@
+version: 1
+name: "kubernetes-cancel-smoke"
+description: "Deterministic pipeline for local Kubernetes cancellation validation"
+
+nodes:
+  - id: wait_01
+    type: deterministic
+    action: run
+    config:
+      command: "sleep 1"
+  - id: wait_02
+    type: deterministic
+    action: run
+    config:
+      command: "sleep 1"
+  - id: wait_03
+    type: deterministic
+    action: run
+    config:
+      command: "sleep 1"
+  - id: wait_04
+    type: deterministic
+    action: run
+    config:
+      command: "sleep 1"
+  - id: wait_05
+    type: deterministic
+    action: run
+    config:
+      command: "sleep 1"
+  - id: wait_06
+    type: deterministic
+    action: run
+    config:
+      command: "sleep 1"
+  - id: wait_07
+    type: deterministic
+    action: run
+    config:
+      command: "sleep 1"
+  - id: wait_08
+    type: deterministic
+    action: run
+    config:
+      command: "sleep 1"
+  - id: wait_09
+    type: deterministic
+    action: run
+    config:
+      command: "sleep 1"
+  - id: wait_10
+    type: deterministic
+    action: run
+    config:
+      command: "sleep 1"
+  - id: wait_11
+    type: deterministic
+    action: run
+    config:
+      command: "sleep 1"
+  - id: wait_12
+    type: deterministic
+    action: run
+    config:
+      command: "sleep 1"

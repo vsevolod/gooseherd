@@ -6,12 +6,12 @@ import type { Block, KnownBlock } from "@slack/types";
 import { writeFile, mkdir } from "node:fs/promises";
 import type { AppConfig } from "./config.js";
 import { logError, logInfo } from "./logger.js";
-import type { PipelineEngine } from "./pipeline/pipeline-engine.js";
 import type { RunLifecycleHooks } from "./hooks/run-lifecycle.js";
 import { RunStore, mapPhaseToRunStatus } from "./store.js";
 import type { ExecutionResult, NewRunInput, RunRecord } from "./types.js";
 import type { PipelineStore } from "./pipeline/pipeline-store.js";
 import type { LearningStore } from "./observer/learning-store.js";
+import { getRuntimeBackend, type RuntimeRegistry } from "./runtime/backend.js";
 
 const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
@@ -77,6 +77,12 @@ function formatPhase(phase: string): string {
   if (phase === "pushing") {
     return "push/pr";
   }
+  if (phase === "cancel_requested") {
+    return "cancellation requested";
+  }
+  if (phase === "cancelled") {
+    return "cancelled";
+  }
   return phase;
 }
 
@@ -89,6 +95,9 @@ function statusEmoji(status: RunRecord["status"]): string {
   }
   if (status === "failed") {
     return "❌";
+  }
+  if (status === "cancel_requested" || status === "cancelled") {
+    return "🛑";
   }
   if (status === "validating") {
     return "🧪";
@@ -140,7 +149,8 @@ function isRetryableStatus(status: RunRecord["status"]): boolean {
   return status === "failed" || status === "completed";
 }
 
-export type RunTerminalCallback = (runId: string, status: string) => void;
+export type RunTerminalCallback = (runId: string, status: string, runtime: RunRecord["runtime"]) => void;
+type EnqueueRunInput = Omit<NewRunInput, "runtime"> & { runtime?: NewRunInput["runtime"] };
 
 export class RunManager {
   private readonly queue: PQueue;
@@ -151,7 +161,7 @@ export class RunManager {
   constructor(
     private readonly config: AppConfig,
     private readonly store: RunStore,
-    private readonly pipelineEngine: PipelineEngine,
+    private readonly runtimeRegistry: RuntimeRegistry,
     private readonly slackClient: WebClient | undefined,
     private readonly hooks?: RunLifecycleHooks,
     private readonly pipelineStore?: PipelineStore,
@@ -167,6 +177,10 @@ export class RunManager {
         });
       });
     }
+  }
+
+  private getBackend(runtime: RunRecord["runtime"]) {
+    return getRuntimeBackend(this.runtimeRegistry, runtime);
   }
 
   private async recordLearningOutcome(runId: string, status: string): Promise<void> {
@@ -242,9 +256,30 @@ export class RunManager {
    * Cancel an in-progress run. Sends abort signal to the pipeline execution.
    * Returns true if the run was found and cancellation was requested.
    */
-  cancelRun(runId: string): boolean {
+  async cancelRun(runId: string): Promise<boolean> {
+    const run = await this.store.getRun(runId);
+    if (!run) return false;
     const controller = this.runAbortControllers.get(runId);
-    if (!controller) return false;
+    if (!controller) {
+      if (run.runtime === "kubernetes" && run.status === "queued") {
+        const cancelled = await this.store.updateRun(runId, {
+          status: "cancelled",
+          phase: "cancelled",
+          finishedAt: new Date().toISOString(),
+          error: "Run cancelled before execution started",
+        });
+        this.fireTerminalCallbacks(cancelled.id, "cancelled", cancelled.runtime);
+        return true;
+      }
+      return false;
+    }
+    if (run.runtime === "kubernetes") {
+      await this.store.updateRun(runId, {
+        status: "cancel_requested",
+        phase: "cancel_requested",
+      });
+      return true;
+    }
     controller.abort();
     return true;
   }
@@ -254,18 +289,20 @@ export class RunManager {
     this.terminalCallbacks.push(cb);
   }
 
-  private fireTerminalCallbacks(runId: string, status: string): void {
+  private fireTerminalCallbacks(runId: string, status: string, runtime: RunRecord["runtime"]): void {
     for (const cb of this.terminalCallbacks) {
       try {
-        cb(runId, status);
+        cb(runId, status, runtime);
       } catch {
         // Swallow errors from callbacks to avoid disrupting the run manager
       }
     }
   }
 
-  async enqueueRun(input: NewRunInput): Promise<RunRecord> {
-    const record = await this.store.createRun(input, this.config.branchPrefix);
+  async enqueueRun(input: EnqueueRunInput): Promise<RunRecord> {
+    const runtime = input.runtime ?? this.config.sandboxRuntime;
+    this.getBackend(runtime);
+    const record = await this.store.createRun({ ...input, runtime }, this.config.branchPrefix);
 
     this.queue.add(async () => {
       await this.processRun(record.id);
@@ -302,6 +339,7 @@ export class RunManager {
       requestedBy,
       channelId: original.channelId,
       threadTs: original.threadTs,
+      runtime: this.config.sandboxRuntime,
       skipNodes: original.skipNodes,
       enableNodes: original.enableNodes
     });
@@ -317,6 +355,8 @@ export class RunManager {
       return undefined;
     }
 
+    const runtime = this.config.sandboxRuntime;
+    this.getBackend(runtime);
     const input: NewRunInput = {
       repoSlug: parent.repoSlug,
       task: feedbackNote,
@@ -324,6 +364,7 @@ export class RunManager {
       requestedBy,
       channelId: parent.channelId,
       threadTs: parent.threadTs,
+      runtime,
       parentRunId: parent.id,
       feedbackNote
     };
@@ -458,6 +499,9 @@ export class RunManager {
     }
     let run = existingRun;
     const stableRunId = run.id;
+    if (run.status === "cancelled" || run.status === "completed" || run.status === "failed") {
+      return;
+    }
     let statusMessageTs: string | undefined = run.statusMessageTs;
     let heartbeatTick = 0;
     let currentPhase = "cloning";
@@ -528,7 +572,13 @@ export class RunManager {
       const pipelineFile = await this.resolvePipeline(run.pipelineHint, run.id);
       const abortController = new AbortController();
       this.runAbortControllers.set(stableRunId, abortController);
-      const result = await this.pipelineEngine.execute(run, phaseCallback, pipelineFile, onDetail, run.skipNodes, run.enableNodes, abortController.signal);
+      const backend = this.getBackend(run.runtime);
+      const result = await backend.execute(run, {
+        onPhase: phaseCallback,
+        onDetail,
+        abortSignal: abortController.signal,
+        pipelineFile
+      });
       stopHeartbeat();
       this.runAbortControllers.delete(stableRunId);
 
@@ -563,31 +613,42 @@ export class RunManager {
       this.hooks?.onRunComplete(run, result);
 
       // Notify terminal listeners (observer learning loop)
-      this.fireTerminalCallbacks(run.id, "completed");
+      this.fireTerminalCallbacks(run.id, "completed", run.runtime);
     } catch (error) {
       stopHeartbeat();
       this.runAbortControllers.delete(stableRunId);
       const message = error instanceof Error ? error.message : "Unknown error";
-      const failed = await this.store.updateRun(stableRunId, {
-        status: "failed",
-        phase: "failed",
+      const latest = await this.store.getRun(stableRunId) ?? run;
+      const cancelled = latest.runtime === "kubernetes" && latest.status === "cancel_requested";
+      const terminalRun = await this.store.updateRun(stableRunId, {
+        status: cancelled ? "cancelled" : "failed",
+        phase: cancelled ? "cancelled" : "failed",
         finishedAt: new Date().toISOString(),
         error: message
       });
-      run = failed;
-      currentPhase = "failed";
+      run = terminalRun;
+      currentPhase = cancelled ? "cancelled" : "failed";
 
-      await upsertRunCard(
-        `Run failed: ${message}\nUse \`${this.botCommand("status")}\` to inspect latest thread run, or \`${this.botCommand("tail")}\` for logs.`
-      );
+      if (cancelled) {
+        await upsertRunCard(
+          `Run cancelled.\nUse \`${this.botCommand("status")}\` to inspect latest thread run, or \`${this.botCommand("tail")}\` for logs.`
+        );
+      } else {
+        await upsertRunCard(
+          `Run failed: ${message}\nUse \`${this.botCommand("status")}\` to inspect latest thread run, or \`${this.botCommand("tail")}\` for logs.`
+        );
+      }
 
-      // Post a failure summary in the thread
-      await this.postRunSummary(failed);
+      await this.postRunSummary(terminalRun);
 
-      logError("Run failed", { runId: failed.id, error: message });
+      if (cancelled) {
+        logInfo("Run cancelled", { runId: terminalRun.id });
+      } else {
+        logError("Run failed", { runId: terminalRun.id, error: message });
+      }
 
       // Notify terminal listeners (observer learning loop)
-      this.fireTerminalCallbacks(failed.id, "failed");
+      this.fireTerminalCallbacks(terminalRun.id, terminalRun.status, terminalRun.runtime);
     }
   }
 
@@ -659,6 +720,22 @@ export class RunManager {
         lines.push("");
         lines.push("---");
         lines.push(`Ready for instructions. Reply with \`retry\` to try again, or describe what to change.`);
+      } else if (run.status === "cancelled") {
+        lines.push(`*Run cancelled* for *${run.repoSlug}*`);
+        if (run.error) {
+          const errorPreview = (run.error.length > 200 ? run.error.slice(0, 200) + "..." : run.error)
+            .split("\n").map((l) => `> ${l}`).join("\n");
+          lines.push(errorPreview);
+        }
+        if (run.startedAt && run.finishedAt) {
+          const duration = formatDuration(run.startedAt, run.finishedAt);
+          if (duration) {
+            lines.push(`*Duration:* ${duration}`);
+          }
+        }
+        lines.push("");
+        lines.push("---");
+        lines.push(`Ready for instructions. Reply with a new request when you want to run it again.`);
       } else {
         return;
       }

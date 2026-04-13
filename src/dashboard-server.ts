@@ -32,6 +32,10 @@ import {
   type AgentProvider,
   type AgentProfileInput,
 } from "./agent-profile.js";
+import type { ControlPlaneStore } from "./runtime/control-plane-store.js";
+import { routeControlPlaneRequest } from "./runtime/control-plane-router.js";
+import type { ArtifactStore } from "./runtime/artifact-store.js";
+import { formatSandboxRuntimeLabel } from "./runtime/runtime-mode.js";
 
 /** Lean interface — dashboard only reads observer state, never mutates it. */
 export interface DashboardObserver {
@@ -400,6 +404,8 @@ export function startDashboardServer(
   onSetupComplete?: () => Promise<void>,
   evalStore?: EvalStore,
   agentProfileStore?: AgentProfileStore,
+  controlPlaneStore?: ControlPlaneStore,
+  runnerArtifactStore?: ArtifactStore,
 ): void {
   const githubService = GitHubService.create(config);
   let githubRepositoriesCache: CachedGitHubRepositories | undefined;
@@ -414,6 +420,11 @@ export function startDashboardServer(
 
       const requestUrl = new URL(req.url ?? "/", `http://${config.dashboardHost}:${String(config.dashboardPort)}`);
       const pathname = requestUrl.pathname;
+
+      if (controlPlaneStore && runnerArtifactStore) {
+        const handled = await routeControlPlaneRequest(req, res, pathname, controlPlaneStore, runnerArtifactStore);
+        if (handled) return;
+      }
 
       // Build auth options (async — reads wizard password hash from DB)
       const setupComplete = setupStore ? await setupStore.isComplete() : true;
@@ -664,6 +675,11 @@ export function startDashboardServer(
           config: {
             appName: config.appName,
             pipelineFile: config.pipelineFile,
+            sandboxRuntime: config.sandboxRuntime,
+            sandboxRuntimeLabel: formatSandboxRuntimeLabel(config.sandboxRuntime),
+            sandboxStatus: {
+              enabled: config.sandboxEnabled,
+            },
             slackConnected: Boolean(config.slackBotToken),
             githubAuthMode,
             configOverrides: {
@@ -673,7 +689,6 @@ export function startDashboardServer(
             },
             features: {
               observer: config.observerEnabled,
-              sandbox: config.sandboxEnabled,
               browserVerify: config.browserVerifyEnabled,
               scopeJudge: config.scopeJudgeEnabled,
               ciWait: config.ciWaitEnabled,
@@ -859,6 +874,7 @@ export function startDashboardServer(
           requestedBy: "dashboard",
           channelId: "dashboard",
           threadTs: `dash-${Date.now()}`,
+          runtime: config.sandboxRuntime,
           pipelineHint: parsed.pipeline?.trim() || undefined,
         });
         sendJson(res, 201, { ok: true, run: newRun });
@@ -1228,7 +1244,7 @@ export function startDashboardServer(
             sendJson(res, 400, { error: "Can only cancel in-progress runs" });
             return;
           }
-          const cancelled = runManager.cancelRun(run.id);
+          const cancelled = await runManager.cancelRun(run.id);
           sendJson(res, 200, { ok: true, cancelled });
           return;
         }

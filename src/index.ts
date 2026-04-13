@@ -29,6 +29,20 @@ import { LearningStore } from "./observer/learning-store.js";
 import { EvalStore } from "./eval/eval-store.js";
 import { SetupStore } from "./db/setup-store.js";
 import { AgentProfileStore } from "./db/agent-profile-store.js";
+import { DockerExecutionBackend } from "./runtime/docker-backend.js";
+import { LocalExecutionBackend } from "./runtime/local-backend.js";
+import type { RuntimeRegistry } from "./runtime/backend.js";
+import { KubernetesExecutionBackend } from "./runtime/kubernetes-backend.js";
+import { ControlPlaneStore } from "./runtime/control-plane-store.js";
+import { FileArtifactStore } from "./runtime/file-artifact-store.js";
+import type { ArtifactStore } from "./runtime/artifact-store.js";
+import { RuntimeReconciler } from "./runtime/reconciler.js";
+import { KubernetesRuntimeFactsReader } from "./runtime/kubernetes/runtime-facts.js";
+import { recoverRunsAfterRestart } from "./runtime/startup-recovery.js";
+import {
+  hasSandboxRuntimeHotReloadChange,
+  preflightSandboxRuntime
+} from "./runtime/runtime-mode.js";
 
 // ── Service container ──
 
@@ -47,6 +61,38 @@ interface Services {
   webClient: import("@slack/web-api").WebClient | undefined;
   runManager: RunManager;
   conversationStore: ConversationStore;
+  controlPlaneStore: ControlPlaneStore;
+  runnerArtifactStore: ArtifactStore;
+  runtimeReconciler: RuntimeReconciler;
+}
+
+function resolveKubernetesRunnerImage(): string {
+  return process.env.KUBERNETES_RUNNER_IMAGE?.trim() || "gooseherd/k8s-runner:dev";
+}
+
+function resolveKubernetesNamespace(): string {
+  return process.env.KUBERNETES_NAMESPACE?.trim() || "default";
+}
+
+function resolveKubernetesRunnerEnvSecretName(): string | undefined {
+  return process.env.KUBERNETES_RUNNER_ENV_SECRET?.trim() || "gooseherd-env";
+}
+
+function resolveKubernetesRunnerEnvConfigMapName(): string | undefined {
+  return process.env.KUBERNETES_RUNNER_ENV_CONFIGMAP?.trim() || "gooseherd-config";
+}
+
+function resolveKubernetesInternalBaseUrl(config: AppConfig): string {
+  const explicit = process.env.KUBERNETES_INTERNAL_BASE_URL?.trim();
+  if (explicit) {
+    return explicit;
+  }
+
+  if (config.dashboardPublicUrl && !/localhost|127\.0\.0\.1/.test(config.dashboardPublicUrl)) {
+    return config.dashboardPublicUrl;
+  }
+
+  return `http://host.minikube.internal:${String(config.dashboardPort)}`;
 }
 
 async function createServices(config: AppConfig, db: Database): Promise<Services> {
@@ -66,26 +112,28 @@ async function createServices(config: AppConfig, db: Database): Promise<Services
 
   // Sandbox container manager (Docker-out-of-Docker)
   let containerManager: ContainerManager | undefined;
-  if (config.sandboxEnabled) {
-    if (!config.sandboxHostWorkPath) {
-      logWarn("SANDBOX_HOST_WORK_PATH is required when SANDBOX_ENABLED=true — sandbox disabled");
-      config.sandboxEnabled = false;
-    } else {
-      containerManager = new ContainerManager();
-      const dockerOk = await containerManager.ping();
-      if (!dockerOk) {
-        logWarn("Docker daemon not reachable — sandbox disabled. Mount the Docker socket or set SANDBOX_ENABLED=false");
-        containerManager = undefined;
-        config.sandboxEnabled = false;
-      } else {
-        const orphans = await containerManager.cleanupOrphans();
-        if (orphans > 0) {
-          logInfo("Cleaned up orphaned sandbox containers", { count: orphans });
-        }
-        setSandboxManager(containerManager, config.workRoot);
-        logInfo("Sandbox mode enabled", { image: config.sandboxImage, hostWorkPath: config.sandboxHostWorkPath });
-      }
+  const sandboxPreflight = await preflightSandboxRuntime(config, {
+    pingDocker: async () => {
+      containerManager ??= new ContainerManager();
+      return containerManager.ping();
     }
+  });
+  if (!sandboxPreflight.sandboxEnabled) {
+    if (sandboxPreflight.fallbackReason === "missing_host_work_path") {
+      logWarn("SANDBOX_HOST_WORK_PATH is required when SANDBOX_RUNTIME=docker — sandbox disabled");
+    }
+    if (sandboxPreflight.fallbackReason === "docker_unreachable") {
+      logWarn("Docker daemon not reachable — sandbox disabled. Mount the Docker socket or set SANDBOX_RUNTIME=local");
+    }
+    containerManager = undefined;
+    config.sandboxEnabled = false;
+  } else if (containerManager) {
+    const orphans = await containerManager.cleanupOrphans();
+    if (orphans > 0) {
+      logInfo("Cleaned up orphaned sandbox containers", { count: orphans });
+    }
+    setSandboxManager(containerManager, config.workRoot);
+    logInfo("Sandbox mode enabled", { image: config.sandboxImage, hostWorkPath: config.sandboxHostWorkPath });
   }
 
   const pipelineStore = new PipelineStore(db);
@@ -94,7 +142,6 @@ async function createServices(config: AppConfig, db: Database): Promise<Services
 
   const pipelineEngine = new PipelineEngine(config, githubService, hooks, containerManager);
   logInfo("Pipeline engine ready", { pipelineFile: config.pipelineFile });
-
   const learningStore = new LearningStore(db);
   await learningStore.load();
 
@@ -103,7 +150,55 @@ async function createServices(config: AppConfig, db: Database): Promise<Services
   const { WebClient } = await import("@slack/web-api");
   const webClient = config.slackBotToken ? new WebClient(config.slackBotToken) : undefined;
 
-  const runManager = new RunManager(config, store, pipelineEngine, webClient, hooks, pipelineStore, learningStore);
+  const controlPlaneStore = new ControlPlaneStore(db);
+  const runtimeFactsReader = config.sandboxRuntime === "kubernetes"
+    ? new KubernetesRuntimeFactsReader({
+      namespace: resolveKubernetesNamespace(),
+    })
+    : {
+      getTerminalFact: async () => "running" as const,
+    };
+  const runtimeReconciler = new RuntimeReconciler(
+    controlPlaneStore,
+    runtimeFactsReader,
+    store
+  );
+  const publicBaseUrl = config.dashboardPublicUrl ?? `http://${config.dashboardHost}:${String(config.dashboardPort)}`;
+  const runnerArtifactStore: ArtifactStore = new FileArtifactStore(
+    config.workRoot,
+    publicBaseUrl,
+    controlPlaneStore,
+  );
+  const kubernetesBackend = config.sandboxRuntime === "kubernetes"
+    ? new KubernetesExecutionBackend({
+      controlPlaneStore,
+      artifactStore: runnerArtifactStore,
+      runStore: store,
+      workRoot: config.workRoot,
+      runnerImage: resolveKubernetesRunnerImage(),
+      internalBaseUrl: resolveKubernetesInternalBaseUrl(config),
+      dryRun: config.dryRun,
+      runnerEnvSecretName: resolveKubernetesRunnerEnvSecretName(),
+      runnerEnvConfigMapName: resolveKubernetesRunnerEnvConfigMapName(),
+      namespace: resolveKubernetesNamespace(),
+    })
+    : undefined;
+  const runtimeRegistry: RuntimeRegistry = {
+    local: new LocalExecutionBackend(pipelineEngine),
+    docker: new DockerExecutionBackend(pipelineEngine),
+    kubernetes: kubernetesBackend,
+  };
+  const runManager = new RunManager(config, store, runtimeRegistry, webClient, hooks, pipelineStore, learningStore);
+  runManager.onRunTerminal((runId, _status, runtime) => {
+    if (runtime !== "kubernetes") {
+      return;
+    }
+
+    runtimeReconciler.reconcileRun(runId).catch((error) => {
+      const message = error instanceof Error ? error.message : "unknown";
+      logError("Failed to reconcile terminal kubernetes run", { runId, error: message });
+    });
+  });
 
   const conversationStore = new ConversationStore({ db });
   await conversationStore.load();
@@ -112,6 +207,7 @@ async function createServices(config: AppConfig, db: Database): Promise<Services
   return {
     config, store, agentProfileStore, githubService, memoryProvider, hooks, containerManager,
     pipelineEngine, pipelineStore, learningStore, evalStore, webClient, runManager, conversationStore,
+    controlPlaneStore, runnerArtifactStore, runtimeReconciler,
   };
 }
 
@@ -175,24 +271,26 @@ async function main(): Promise<void> {
     };
   }
   checkAgentDefault(config);
+  globalRefs.config = config;
 
   // 5. Recover stale in-progress runs from before restart
-  const recoveredRuns = await svc.store.recoverInProgressRuns(
+  const recovery = await recoverRunsAfterRestart(
+    svc.store,
+    svc.runManager,
+    svc.runtimeReconciler,
     "Recovered after process restart. Auto-requeued."
   );
-  if (recoveredRuns.length > 0) {
-    logInfo("Recovered stale in-progress runs", { count: recoveredRuns.length });
-    const runsToRequeue = recoveredRuns.filter((run) => run.channelId !== "local");
-    for (const run of runsToRequeue) {
-      svc.runManager.requeueExistingRun(run.id);
-    }
-    if (runsToRequeue.length > 0) {
-      logInfo("Auto-requeued recovered runs", { count: runsToRequeue.length });
-    }
-    const skippedLocal = recoveredRuns.length - runsToRequeue.length;
-    if (skippedLocal > 0) {
-      logInfo("Skipped auto-requeue for local-trigger runs", { count: skippedLocal });
-    }
+  if (recovery.recoveredRuns.length > 0) {
+    logInfo("Recovered stale in-progress runs", { count: recovery.recoveredRuns.length });
+  }
+  if (recovery.requeuedCount > 0) {
+    logInfo("Auto-requeued recovered runs", { count: recovery.requeuedCount });
+  }
+  if (recovery.skippedLocalCount > 0) {
+    logInfo("Skipped auto-requeue for local-trigger runs", { count: recovery.skippedLocalCount });
+  }
+  if (recovery.kubernetesRuns.length > 0) {
+    logInfo("Reconciled in-progress kubernetes runs after restart", { count: recovery.kubernetesRuns.length });
   }
 
   // 6. Session manager (multi-run goal-oriented loops)
@@ -271,6 +369,8 @@ async function main(): Promise<void> {
       },
       svc.evalStore,
       svc.agentProfileStore,
+      svc.controlPlaneStore,
+      svc.runnerArtifactStore,
     );
   }
 
@@ -306,7 +406,12 @@ async function shutdown(signal: string): Promise<void> {
   process.exit(0);
 }
 
-const globalRefs: { observer?: ObserverDaemon; supervisor?: RunSupervisor; rulesWatcher?: FSWatcher } = {};
+const globalRefs: {
+  observer?: ObserverDaemon;
+  supervisor?: RunSupervisor;
+  rulesWatcher?: FSWatcher;
+  config?: AppConfig;
+} = {};
 
 process.on("SIGINT", () => { shutdown("SIGINT"); });
 process.on("SIGTERM", () => { shutdown("SIGTERM"); });
@@ -317,12 +422,20 @@ process.on("SIGHUP", () => {
   try {
     dotenv.config({ override: true });
     const newConfig = loadConfig();
+    if (globalRefs.config && hasSandboxRuntimeHotReloadChange(globalRefs.config, newConfig)) {
+      logWarn("Sandbox runtime config changes require restart; ignoring hot reload", {
+        currentRuntime: globalRefs.config.sandboxRuntime,
+        nextRuntime: newConfig.sandboxRuntime
+      });
+      return;
+    }
     if (globalRefs.observer) {
       globalRefs.observer.reload(newConfig).catch((err) => {
         const msg = err instanceof Error ? err.message : "unknown";
         logError("Config hot-reload failed for observer", { error: msg });
       });
     }
+    globalRefs.config = newConfig;
     logInfo("Configuration reloaded successfully");
   } catch (err) {
     const msg = err instanceof Error ? err.message : "unknown";

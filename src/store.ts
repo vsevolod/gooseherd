@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { eq, desc, and, sql, inArray } from "drizzle-orm";
+import { eq, desc, and, sql, inArray, ne } from "drizzle-orm";
 import type { NewRunInput, RunFeedback, RunRecord, RunStatus } from "./types.js";
 import type { Database } from "./db/index.js";
 import { runs } from "./db/schema.js";
@@ -9,6 +9,7 @@ type RunRow = typeof runs.$inferSelect;
 function rowToRecord(row: RunRow): RunRecord {
   return {
     id: row.id,
+    runtime: row.runtime as RunRecord["runtime"],
     status: row.status as RunStatus,
     phase: row.phase as RunRecord["phase"],
     repoSlug: row.repoSlug,
@@ -81,6 +82,7 @@ export class RunStore {
 
     await this.db.insert(runs).values({
       id,
+      runtime: input.runtime,
       status: "queued",
       phase: "queued",
       repoSlug: input.repoSlug,
@@ -265,12 +267,24 @@ export class RunStore {
     return affected.length;
   }
 
+  async getInProgressRuns(): Promise<RunRecord[]> {
+    const inProgressStatuses = ["queued", "running", "validating", "pushing", "cancel_requested"];
+    const rows = await this.db
+      .select()
+      .from(runs)
+      .where(inArray(runs.status, inProgressStatuses));
+    return rows.map(rowToRecord);
+  }
+
   async recoverInProgressRuns(reason: string): Promise<RunRecord[]> {
     const inProgressStatuses = ["queued", "running", "validating", "pushing"];
     const affected = await this.db
       .select()
       .from(runs)
-      .where(inArray(runs.status, inProgressStatuses));
+      .where(and(
+        inArray(runs.status, inProgressStatuses),
+        ne(runs.runtime, "kubernetes"),
+      ));
 
     if (affected.length === 0) return [];
 
@@ -283,7 +297,10 @@ export class RunStore {
         finishedAt: null,
         error: reason,
       })
-      .where(inArray(runs.status, inProgressStatuses));
+      .where(and(
+        inArray(runs.status, inProgressStatuses),
+        ne(runs.runtime, "kubernetes"),
+      ));
 
     // Re-fetch after update
     const ids = affected.map((r) => r.id);

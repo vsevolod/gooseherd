@@ -21,7 +21,8 @@ test("createRun stores queued phase and metadata updates persist", async (t) => 
       baseBranch: "main",
       requestedBy: "U123",
       channelId: "C123",
-      threadTs: "123.456"
+      threadTs: "123.456",
+      runtime: "local"
     },
     "gooseherd"
   );
@@ -58,7 +59,8 @@ test("listRuns returns newest first and feedback is saved", async (t) => {
       baseBranch: "main",
       requestedBy: "U1",
       channelId: "C1",
-      threadTs: "1"
+      threadTs: "1",
+      runtime: "local"
     },
     "gooseherd"
   );
@@ -70,7 +72,8 @@ test("listRuns returns newest first and feedback is saved", async (t) => {
       baseBranch: "main",
       requestedBy: "U1",
       channelId: "C1",
-      threadTs: "1"
+      threadTs: "1",
+      runtime: "local"
     },
     "gooseherd"
   );
@@ -110,7 +113,8 @@ test("recoverInProgressRuns requeues interrupted runs", async (t) => {
       baseBranch: "main",
       requestedBy: "U1",
       channelId: "C1",
-      threadTs: "1"
+      threadTs: "1",
+      runtime: "local"
     },
     "gooseherd"
   );
@@ -127,4 +131,35 @@ test("recoverInProgressRuns requeues interrupted runs", async (t) => {
   assert.equal(recovered[0]?.status, "queued");
   assert.equal(recovered[0]?.phase, "queued");
   assert.equal(recovered[0]?.error, "Recovered after process restart. Auto-requeued.");
+});
+
+test("recoverInProgressRuns leaves kubernetes runs untouched for reconciliation", async (t) => {
+  const { store, cleanup } = await createStore();
+  t.after(cleanup);
+
+  const run = await store.createRun(
+    {
+      repoSlug: "owner/repo",
+      task: "reconcile me via kubernetes facts",
+      baseBranch: "main",
+      requestedBy: "U1",
+      channelId: "C1",
+      threadTs: "1",
+      runtime: "kubernetes"
+    },
+    "gooseherd"
+  );
+
+  await store.updateRun(run.id, {
+    status: "running",
+    phase: "agent",
+    startedAt: new Date().toISOString()
+  });
+
+  const recovered = await store.recoverInProgressRuns("Recovered after process restart. Auto-requeued.");
+  const unchanged = await store.getRun(run.id);
+
+  assert.equal(recovered.length, 0);
+  assert.equal(unchanged?.status, "running");
+  assert.equal(unchanged?.phase, "agent");
 });
