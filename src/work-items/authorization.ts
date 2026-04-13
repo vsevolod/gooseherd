@@ -9,31 +9,53 @@ export class WorkItemAuthorization {
     this.identity = new WorkItemIdentityStore(db);
   }
 
-  async assertCanCreateForTeam(actorUserId: string, ownerTeamId: string): Promise<void> {
-    const actor = await this.requireActiveUser(actorUserId);
-    if (actor.id === actorUserId && await this.identity.isUserOnTeam(actorUserId, ownerTeamId)) {
+  async assertCanCreateWorkItem(actorUserId: string, ownerTeamId: string): Promise<void> {
+    await this.requireActiveUser(actorUserId);
+
+    if (await this.identity.isUserOnTeam(actorUserId, ownerTeamId)) {
       return;
     }
-    if (await this.identity.userHasAnyOrgRole(actorUserId)) {
+    if (await this.identity.userIsAdmin(actorUserId)) {
       return;
     }
     throw new Error("Actor is not authorized to create work items for this team");
   }
 
-  async assertCanManageWorkItem(actorUserId: string | undefined, workItem: WorkItemRecord): Promise<void> {
-    if (!actorUserId) return;
+  async assertCanRequestReview(actorUserId: string, workItem: WorkItemRecord): Promise<void> {
+    await this.requireActiveUser(actorUserId);
 
-    const actor = await this.requireActiveUser(actorUserId);
-    if (actor.id === workItem.createdByUserId) {
+    if (await this.identity.userIsPmForTeam(actorUserId, workItem.ownerTeamId)) {
       return;
     }
-    if (await this.identity.isUserOnTeam(actorUserId, workItem.ownerTeamId)) {
+    if (await this.identity.userIsAdmin(actorUserId)) {
       return;
     }
-    if (await this.identity.userHasAnyOrgRole(actorUserId)) {
+    throw new Error("Actor is not authorized to request review for this work item");
+  }
+
+  async assertCanApplyManualTransition(
+    actorUserId: string,
+    workItem: WorkItemRecord,
+    transition: string,
+  ): Promise<void> {
+    await this.requireActiveUser(actorUserId);
+
+    if (await this.identity.userIsPmForTeam(actorUserId, workItem.ownerTeamId)) {
       return;
     }
-    throw new Error("Actor is not authorized for this work item");
+    if (await this.identity.userIsAdmin(actorUserId)) {
+      return;
+    }
+    throw new Error(`Actor is not authorized to apply manual transition: ${transition}`);
+  }
+
+  async assertCanOverrideWorkItem(actorUserId: string): Promise<void> {
+    await this.requireActiveUser(actorUserId);
+
+    if (await this.identity.userIsAdmin(actorUserId)) {
+      return;
+    }
+    throw new Error("Actor is not authorized to override work items");
   }
 
   async assertCanRespondToReviewRequest(
@@ -44,7 +66,7 @@ export class WorkItemAuthorization {
     if (!actorUserId) return;
     await this.requireActiveUser(actorUserId);
 
-    if (await this.identity.userHasAnyOrgRole(actorUserId)) {
+    if (await this.identity.userIsAdmin(actorUserId)) {
       return;
     }
 
@@ -67,7 +89,7 @@ export class WorkItemAuthorization {
     if (reviewRequest.targetType === "team_role") {
       const teamId = typeof ref.teamId === "string" ? ref.teamId : workItem.ownerTeamId;
       const role = typeof ref.role === "string" ? ref.role : typeof ref.teamRole === "string" ? ref.teamRole : undefined;
-      if (role && await this.identity.userHasTeamRole(actorUserId, teamId, role)) {
+      if (role && await this.identity.userHasTeamFunctionalRole(actorUserId, teamId, role)) {
         return;
       }
       throw new Error("Actor is not authorized to respond to this review request");
@@ -80,6 +102,15 @@ export class WorkItemAuthorization {
       }
       throw new Error("Actor is not authorized to respond to this review request");
     }
+  }
+
+  async assertCanCreateForTeam(actorUserId: string, ownerTeamId: string): Promise<void> {
+    await this.assertCanCreateWorkItem(actorUserId, ownerTeamId);
+  }
+
+  async assertCanManageWorkItem(actorUserId: string | undefined, workItem: WorkItemRecord): Promise<void> {
+    if (!actorUserId) return;
+    await this.assertCanRequestReview(actorUserId, workItem);
   }
 
   private async requireActiveUser(userId: string) {

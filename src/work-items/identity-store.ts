@@ -86,13 +86,25 @@ export class WorkItemIdentityStore {
     return rows.length > 0;
   }
 
-  async userHasTeamRole(userId: string, teamId: string, role: string): Promise<boolean> {
+  async userHasTeamFunctionalRole(userId: string, teamId: string, role: string): Promise<boolean> {
     const rows = await this.db
       .select()
       .from(teamMembers)
       .where(and(eq(teamMembers.userId, userId), eq(teamMembers.teamId, teamId)))
       .limit(1);
     return Array.isArray(rows[0]?.functionalRoles) && rows[0]!.functionalRoles.includes(role);
+  }
+
+  async userHasTeamRole(userId: string, teamId: string, role: string): Promise<boolean> {
+    return this.userHasTeamFunctionalRole(userId, teamId, role);
+  }
+
+  async userIsPmForTeam(userId: string, teamId: string): Promise<boolean> {
+    return this.userHasTeamFunctionalRole(userId, teamId, "pm");
+  }
+
+  async userIsAdmin(userId: string): Promise<boolean> {
+    return this.userHasOrgRole(userId, "admin");
   }
 
   async userHasOrgRole(userId: string, orgRole: string): Promise<boolean> {
