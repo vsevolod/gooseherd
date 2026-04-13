@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import type { AppConfig } from "../src/config.js";
+import { DashboardAuthSessionStore } from "../src/dashboard/auth-session-store.js";
 import { startDashboardServer, type DashboardWorkItemsSource } from "../src/dashboard-server.js";
 import { RunStore } from "../src/store.js";
 import { createTestDb } from "./helpers/test-db.js";
@@ -144,7 +145,8 @@ async function request(
   port: number,
   method: string,
   pathname: string,
-  body?: unknown
+  body?: unknown,
+  headers?: Record<string, string>,
 ): Promise<{ status: number; data: Record<string, unknown> }> {
   return new Promise((resolve, reject) => {
     const bodyStr = body ? JSON.stringify(body) : undefined;
@@ -158,8 +160,9 @@ async function request(
           ? {
             "content-type": "application/json",
             "content-length": Buffer.byteLength(bodyStr),
+            ...(headers ?? {}),
           }
-          : undefined,
+          : headers,
       },
       (res) => {
         const chunks: Buffer[] = [];
@@ -214,24 +217,46 @@ describe("Dashboard Work Item API routes", () => {
     tmpDirs.length = 0;
   });
 
-  async function startServer(workItemsSource?: DashboardWorkItemsSource): Promise<number> {
+  async function startServer(
+    workItemsSource?: DashboardWorkItemsSource,
+    db?: Awaited<ReturnType<typeof createTestDb>>["db"],
+  ): Promise<number> {
     const port = getPort();
     const tmpDir = await mkdtemp(path.join(os.tmpdir(), "gooseherd-dash-work-items-"));
     tmpDirs.push(tmpDir);
     const config = makeConfig(port, tmpDir);
     const runStore = new RunStore(createMockRunDatabase() as never);
     await runStore.init();
-    const server = startDashboardServer(config, runStore, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, workItemsSource);
+    const server = startDashboardServer(
+      config,
+      runStore,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      workItemsSource,
+      db,
+    );
     servers.push(server);
     await waitForServer(port);
     return port;
   }
 
 async function createWorkItemsSource(): Promise<DashboardWorkItemsSource & {
+    db: Awaited<ReturnType<typeof createTestDb>>["db"];
     discoveryId: string;
     pmUserId: string;
     reviewerUserId: string;
     ownerTeamId: string;
+    createAdminSessionCookie(): Promise<string>;
+    createUserSessionCookie(userId: string): Promise<string>;
   }> {
     const testDb = await createTestDb();
     cleanups.push(testDb.cleanup);
@@ -293,11 +318,31 @@ async function createWorkItemsSource(): Promise<DashboardWorkItemsSource & {
       createdByUserId: pmUserId,
     });
 
+    const sessionStore = new DashboardAuthSessionStore(testDb.db);
+
     return {
+      db: testDb.db,
       discoveryId: discovery.id,
       pmUserId,
       reviewerUserId,
       ownerTeamId,
+      createAdminSessionCookie: async () => {
+        const session = await sessionStore.createSession({
+          principalType: "admin",
+          authMethod: "admin_password",
+          ttlMs: 60_000,
+        });
+        return `gooseherd-session=${session.token}`;
+      },
+      createUserSessionCookie: async (userId: string) => {
+        const session = await sessionStore.createSession({
+          principalType: "user",
+          authMethod: "slack",
+          userId,
+          ttlMs: 60_000,
+        });
+        return `gooseherd-session=${session.token}`;
+      },
       listWorkItems: async (workflow?: string) => {
         const items = await workItemStore.listWorkItems();
         return workflow ? items.filter((item) => item.workflow === workflow) : items;
@@ -306,31 +351,29 @@ async function createWorkItemsSource(): Promise<DashboardWorkItemsSource & {
       listReviewRequestsForWorkItem: (workItemId: string) => reviewRequestStore.listReviewRequestsForWorkItem(workItemId),
       listReviewRequestComments: (reviewRequestId: string) => reviewRequestStore.listComments(reviewRequestId),
       listEventsForWorkItem: (workItemId: string) => eventsStore.listForWorkItem(workItemId),
-      createDiscoveryWorkItem: (input) => service.createDiscoveryWorkItem(input),
+      createDiscoveryWorkItem: (input) => service.createDiscoveryWorkItem({
+        ...input,
+        createdByUserId: input.actor.userId,
+      }),
       createReviewRequests: (input) => service.requestReview({
         workItemId: input.workItemId,
-        actor: systemActor(input.requestedByUserId),
+        actor: systemActor(input.actor.userId),
         requests: input.requests,
       }),
-      respondToReviewRequest: (input) => {
-        if (!input.authorUserId) {
-          throw new Error("Dashboard review responses require an actor user id");
-        }
-        return service.recordReviewOutcome({
-          reviewRequestId: input.reviewRequestId,
-          actor: systemActor(input.authorUserId),
-          outcome: input.outcome,
-          comment: input.comment,
-        });
-      },
+      respondToReviewRequest: (input) => service.recordReviewOutcome({
+        reviewRequestId: input.reviewRequestId,
+        actor: systemActor(input.actor.userId),
+        outcome: input.outcome,
+        comment: input.comment,
+      }),
       confirmDiscovery: (input) => service.confirmDiscovery({
         workItemId: input.workItemId,
         approved: input.approved,
-        actor: systemActor(input.actorUserId),
+        actor: systemActor(input.actor.userId),
         jiraIssueKey: input.jiraIssueKey,
       }),
-      stopProcessing: async ({ workItemId, actorUserId }) => {
-        void actorUserId;
+      stopProcessing: async ({ workItemId, actor }) => {
+        void actor;
         return {
         workItem: (await workItemStore.getWorkItem(workItemId))!,
         stoppedRunIds: ["run-1"],
@@ -338,8 +381,8 @@ async function createWorkItemsSource(): Promise<DashboardWorkItemsSource & {
         failedRunIds: [],
         };
       },
-      guardedOverrideState: async ({ actorUserId }) => {
-        void actorUserId;
+      guardedOverrideState: async ({ actor }) => {
+        void actor;
         throw new Error("Cannot override state while work item processing is active");
       },
     };
@@ -384,7 +427,8 @@ async function createWorkItemsSource(): Promise<DashboardWorkItemsSource & {
 
   test("GET /api/work-items/:id/review-requests/:reviewRequestId/comments returns review history", async () => {
     const source = await createWorkItemsSource();
-    const port = await startServer(source);
+    const port = await startServer(source, source.db);
+    const cookie = await source.createUserSessionCookie(source.reviewerUserId);
 
     const reviewRequestsRes = await request(port, "GET", `/api/work-items/${source.discoveryId}/review-requests`);
     const reviewRequestId = (reviewRequestsRes.data.reviewRequests as Array<{ id: string }>)[0]?.id;
@@ -392,9 +436,8 @@ async function createWorkItemsSource(): Promise<DashboardWorkItemsSource & {
 
     const respondRes = await request(port, "POST", `/api/review-requests/${reviewRequestId}/respond`, {
       outcome: "approved",
-      authorUserId: source.reviewerUserId,
       comment: "Looks ready to me.",
-    });
+    }, { cookie });
     assert.equal(respondRes.status, 200);
 
     const commentsRes = await request(port, "GET", `/api/work-items/${source.discoveryId}/review-requests/${reviewRequestId}/comments`);
@@ -416,7 +459,8 @@ async function createWorkItemsSource(): Promise<DashboardWorkItemsSource & {
 
   test("POST /api/work-items/discovery creates a discovery item", async () => {
     const source = await createWorkItemsSource();
-    const port = await startServer(source);
+    const port = await startServer(source, source.db);
+    const cookie = await source.createUserSessionCookie(source.pmUserId);
 
     const res = await request(port, "POST", "/api/work-items/discovery", {
       title: "New discovery item",
@@ -424,19 +468,36 @@ async function createWorkItemsSource(): Promise<DashboardWorkItemsSource & {
       ownerTeamId: source.ownerTeamId,
       homeChannelId: "C_DISCOVERY",
       homeThreadTs: "1740000001.100",
-      createdByUserId: source.pmUserId,
-    });
+    }, { cookie });
 
     assert.equal(res.status, 201);
     assert.equal((res.data.workItem as { workflow: string }).workflow, "product_discovery");
   });
 
+  test("POST /api/work-items/discovery derives the creator from the dashboard session", async () => {
+    const source = await createWorkItemsSource();
+    const port = await startServer(source, source.db);
+    const cookie = await source.createUserSessionCookie(source.pmUserId);
+
+    const res = await request(port, "POST", "/api/work-items/discovery", {
+      title: "New discovery item",
+      summary: "Draft spec",
+      ownerTeamId: source.ownerTeamId,
+      homeChannelId: "C_DISCOVERY",
+      homeThreadTs: "1740000001.100",
+      createdByUserId: source.reviewerUserId,
+    }, { cookie });
+
+    assert.equal(res.status, 201);
+    assert.equal((res.data.workItem as { createdByUserId: string }).createdByUserId, source.pmUserId);
+  });
+
   test("POST /api/work-items/:id/review-requests creates review requests", async () => {
     const source = await createWorkItemsSource();
-    const port = await startServer(source);
+    const port = await startServer(source, source.db);
+    const cookie = await source.createUserSessionCookie(source.pmUserId);
 
     const res = await request(port, "POST", `/api/work-items/${source.discoveryId}/review-requests`, {
-      requestedByUserId: source.pmUserId,
       requests: [
         {
           type: "review",
@@ -447,7 +508,7 @@ async function createWorkItemsSource(): Promise<DashboardWorkItemsSource & {
           focusPoints: ["naming"],
         },
       ],
-    });
+    }, { cookie });
 
     assert.equal(res.status, 201);
     const reviewRequests = res.data.reviewRequests as Array<{ workItemId: string }>;
@@ -455,101 +516,162 @@ async function createWorkItemsSource(): Promise<DashboardWorkItemsSource & {
     assert.equal(reviewRequests[0]?.workItemId, source.discoveryId);
   });
 
+  test("POST /api/work-items/:id/review-requests ignores forged requester ids in the body", async () => {
+    const source = await createWorkItemsSource();
+    const port = await startServer(source, source.db);
+    const cookie = await source.createUserSessionCookie(source.pmUserId);
+
+    const res = await request(port, "POST", `/api/work-items/${source.discoveryId}/review-requests`, {
+      requestedByUserId: source.reviewerUserId,
+      requests: [
+        {
+          type: "review",
+          targetType: "team",
+          targetRef: { teamId: source.ownerTeamId },
+          title: "Second review round",
+        },
+      ],
+    }, { cookie });
+
+    assert.equal(res.status, 201);
+    const reviewRequests = res.data.reviewRequests as Array<{ requestedByUserId: string }>;
+    assert.equal(reviewRequests[0]?.requestedByUserId, source.pmUserId);
+  });
+
   test("POST /api/review-requests/:id/respond records review outcome", async () => {
     const source = await createWorkItemsSource();
-    const port = await startServer(source);
+    const port = await startServer(source, source.db);
+    const cookie = await source.createUserSessionCookie(source.reviewerUserId);
     const existingRequests = await source.listReviewRequestsForWorkItem(source.discoveryId);
 
     const res = await request(port, "POST", `/api/review-requests/${existingRequests[0]!.id}/respond`, {
       outcome: "approved",
-      authorUserId: source.reviewerUserId,
       comment: "Looks fine",
-    });
+    }, { cookie });
 
     assert.equal(res.status, 200);
     assert.equal((res.data.workItem as { state: string }).state, "waiting_for_pm_confirmation");
   });
 
+  test("POST /api/review-requests/:id/respond derives the reviewer from the dashboard session", async () => {
+    const source = await createWorkItemsSource();
+    const port = await startServer(source, source.db);
+    const cookie = await source.createUserSessionCookie(source.reviewerUserId);
+    const existingRequests = await source.listReviewRequestsForWorkItem(source.discoveryId);
+
+    const res = await request(port, "POST", `/api/review-requests/${existingRequests[0]!.id}/respond`, {
+      outcome: "approved",
+      authorUserId: source.pmUserId,
+      comment: "Looks fine",
+    }, { cookie });
+
+    assert.equal(res.status, 200);
+    const comments = await source.listReviewRequestComments(existingRequests[0]!.id);
+    assert.equal(comments.at(-1)?.authorUserId, source.reviewerUserId);
+  });
+
   test("POST /api/work-items/:id/confirm-discovery finalizes PM decision", async () => {
     const source = await createWorkItemsSource();
-    const port = await startServer(source);
+    const port = await startServer(source, source.db);
+    const reviewerCookie = await source.createUserSessionCookie(source.reviewerUserId);
+    const pmCookie = await source.createUserSessionCookie(source.pmUserId);
     const existingRequests = await source.listReviewRequestsForWorkItem(source.discoveryId);
-    await source.respondToReviewRequest({
-      reviewRequestId: existingRequests[0]!.id,
+    const respondRes = await request(port, "POST", `/api/review-requests/${existingRequests[0]!.id}/respond`, {
       outcome: "approved",
-      authorUserId: source.reviewerUserId,
       comment: "Ready for PM",
-    });
+    }, { cookie: reviewerCookie });
+    assert.equal(respondRes.status, 200);
 
     const res = await request(port, "POST", `/api/work-items/${source.discoveryId}/confirm-discovery`, {
       approved: true,
-      actorUserId: source.pmUserId,
       jiraIssueKey: "HBL-501",
-    });
+    }, { cookie: pmCookie });
 
     assert.equal(res.status, 200);
     assert.equal((res.data.workItem as { state: string }).state, "done");
   });
 
-  test("POST /api/work-items/:id/confirm-discovery requires actorUserId", async () => {
+  test("POST /api/work-items/:id/confirm-discovery ignores forged actor ids in the body", async () => {
     const source = await createWorkItemsSource();
-    const port = await startServer(source);
+    const port = await startServer(source, source.db);
+    const reviewerCookie = await source.createUserSessionCookie(source.reviewerUserId);
+    const pmCookie = await source.createUserSessionCookie(source.pmUserId);
+    const existingRequests = await source.listReviewRequestsForWorkItem(source.discoveryId);
+
+    const respondRes = await request(port, "POST", `/api/review-requests/${existingRequests[0]!.id}/respond`, {
+      outcome: "approved",
+      comment: "Ready for PM",
+    }, { cookie: reviewerCookie });
+    assert.equal(respondRes.status, 200);
+
+    const res = await request(port, "POST", `/api/work-items/${source.discoveryId}/confirm-discovery`, {
+      approved: true,
+      actorUserId: source.reviewerUserId,
+      jiraIssueKey: "HBL-501",
+    }, { cookie: pmCookie });
+
+    assert.equal(res.status, 200);
+    assert.equal((res.data.workItem as { state: string }).state, "done");
+  });
+
+  test("POST /api/work-items/:id/confirm-discovery requires a session-backed actor", async () => {
+    const source = await createWorkItemsSource();
+    const port = await startServer(source, source.db);
 
     const res = await request(port, "POST", `/api/work-items/${source.discoveryId}/confirm-discovery`, {
       approved: true,
       jiraIssueKey: "HBL-501",
     });
 
-    assert.equal(res.status, 400);
-    assert.match(String(res.data.error), /actorUserId is required/);
+    assert.equal(res.status, 403);
+    assert.match(String(res.data.error), /dashboard.*actor/i);
   });
 
   test("POST /api/work-items/:id/override-state rejects when guarded override is blocked", async () => {
     const source = await createWorkItemsSource();
-    const port = await startServer(source);
+    const port = await startServer(source, source.db);
+    const cookie = await source.createAdminSessionCookie();
 
     const res = await request(port, "POST", `/api/work-items/${source.discoveryId}/override-state`, {
       state: "cancelled",
       reason: "stuck worker",
-      actorUserId: source.pmUserId,
-    });
+    }, { cookie });
 
     assert.equal(res.status, 409);
     assert.match(String(res.data.error), /processing is active/);
   });
 
-  test("POST /api/work-items/:id/override-state requires actorUserId", async () => {
+  test("POST /api/work-items/:id/override-state requires a session-backed actor", async () => {
     const source = await createWorkItemsSource();
-    const port = await startServer(source);
+    const port = await startServer(source, source.db);
 
     const res = await request(port, "POST", `/api/work-items/${source.discoveryId}/override-state`, {
       state: "cancelled",
       reason: "stuck worker",
     });
 
-    assert.equal(res.status, 400);
-    assert.match(String(res.data.error), /actorUserId is required/);
+    assert.equal(res.status, 403);
+    assert.match(String(res.data.error), /dashboard.*actor/i);
   });
 
   test("POST /api/work-items/:id/stop-processing returns stop results", async () => {
     const source = await createWorkItemsSource();
-    const port = await startServer(source);
+    const port = await startServer(source, source.db);
+    const cookie = await source.createUserSessionCookie(source.pmUserId);
 
-    const res = await request(port, "POST", `/api/work-items/${source.discoveryId}/stop-processing`, {
-      actorUserId: source.pmUserId,
-    });
+    const res = await request(port, "POST", `/api/work-items/${source.discoveryId}/stop-processing`, {}, { cookie });
 
     assert.equal(res.status, 200);
     assert.deepEqual(res.data.stoppedRunIds, ["run-1"]);
   });
 
-  test("POST /api/work-items/:id/stop-processing requires actorUserId", async () => {
+  test("POST /api/work-items/:id/stop-processing requires a session-backed actor", async () => {
     const source = await createWorkItemsSource();
-    const port = await startServer(source);
+    const port = await startServer(source, source.db);
 
     const res = await request(port, "POST", `/api/work-items/${source.discoveryId}/stop-processing`, {});
 
-    assert.equal(res.status, 400);
-    assert.match(String(res.data.error), /actorUserId is required/);
+    assert.equal(res.status, 403);
+    assert.match(String(res.data.error), /dashboard.*actor/i);
   });
 });

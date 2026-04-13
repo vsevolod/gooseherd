@@ -25,7 +25,12 @@ import {
   type AuthOptions,
 } from "./dashboard/auth.js";
 import { DashboardAuthSessionStore } from "./dashboard/auth-session-store.js";
-import { resolveDashboardActorPrincipal } from "./dashboard/actor-principal.js";
+import {
+  requireDashboardUserActor,
+  resolveDashboardActorPrincipal,
+  type DashboardActorPrincipal,
+  type DashboardUserActorPrincipal,
+} from "./dashboard/actor-principal.js";
 import { SlackAuthFlow, isSlackAuthConfigured } from "./dashboard/slack-auth.js";
 import { resolveMappedSlackTeams, syncSlackUserGroupMemberships } from "./dashboard/team-membership-sync.js";
 import type { PipelineStore } from "./pipeline/pipeline-store.js";
@@ -88,11 +93,11 @@ export interface DashboardWorkItemsSource {
     originChannelId?: string;
     originThreadTs?: string;
     jiraIssueKey?: string;
-    createdByUserId: string;
+    actor: DashboardUserActorPrincipal;
   }): Promise<WorkItemRecord>;
   createReviewRequests(input: {
     workItemId: string;
-    requestedByUserId: string;
+    actor: DashboardUserActorPrincipal;
     requests: Array<{
       type: ReviewRequestRecord["type"];
       targetType: ReviewRequestRecord["targetType"];
@@ -105,26 +110,33 @@ export interface DashboardWorkItemsSource {
   respondToReviewRequest(input: {
     reviewRequestId: string;
     outcome: NonNullable<ReviewRequestRecord["outcome"]>;
-    authorUserId?: string;
+    actor: DashboardUserActorPrincipal;
     comment?: string;
   }): Promise<WorkItemRecord>;
   confirmDiscovery(input: {
     workItemId: string;
     approved: boolean;
-    actorUserId: string;
+    actor: DashboardUserActorPrincipal;
     jiraIssueKey?: string;
   }): Promise<WorkItemRecord>;
   stopProcessing(input: {
     workItemId: string;
-    actorUserId: string;
+    actor: DashboardUserActorPrincipal;
   }): Promise<{ workItem: WorkItemRecord; stoppedRunIds: string[]; alreadyIdleRunIds: string[]; failedRunIds: string[] }>;
   guardedOverrideState(input: {
     workItemId: string;
     state: WorkItemRecord["state"];
     substate?: string;
-    actorUserId: string;
+    actor: DashboardActorPrincipal;
     reason: string;
   }): Promise<WorkItemRecord>;
+}
+
+function requireDashboardActor(principal: DashboardActorPrincipal | undefined): DashboardActorPrincipal {
+  if (!principal) {
+    throw new Error("Dashboard session actor is required");
+  }
+  return principal;
 }
 
 function sendJson(res: ServerResponse, status: number, payload: unknown): void {
@@ -1164,7 +1176,6 @@ export function startDashboardServer(
           originChannelId?: string;
           originThreadTs?: string;
           jiraIssueKey?: string;
-          createdByUserId?: string;
         } = {};
         try {
           parsed = JSON.parse(raw) as typeof parsed;
@@ -1173,8 +1184,16 @@ export function startDashboardServer(
           return;
         }
 
-        if (!parsed.title || !parsed.createdByUserId) {
-          sendJson(res, 400, { error: "title and createdByUserId are required" });
+        if (!parsed.title) {
+          sendJson(res, 400, { error: "title is required" });
+          return;
+        }
+
+        let actor: DashboardUserActorPrincipal;
+        try {
+          actor = requireDashboardUserActor(actorPrincipal);
+        } catch (error) {
+          sendJson(res, 403, { error: error instanceof Error ? error.message : "Forbidden" });
           return;
         }
 
@@ -1188,7 +1207,7 @@ export function startDashboardServer(
             originChannelId: parsed.originChannelId,
             originThreadTs: parsed.originThreadTs,
             jiraIssueKey: parsed.jiraIssueKey,
-            createdByUserId: parsed.createdByUserId,
+            actor,
           });
           sendJson(res, 201, { workItem });
         } catch (error) {
@@ -1639,7 +1658,6 @@ export function startDashboardServer(
           const raw = await readBody(req);
           if (raw === null) { sendJson(res, 413, { error: "Request body too large" }); return; }
           let parsed: {
-            requestedByUserId?: string;
             requests?: Array<{
               type: ReviewRequestRecord["type"];
               targetType: ReviewRequestRecord["targetType"];
@@ -1655,15 +1673,23 @@ export function startDashboardServer(
             sendJson(res, 400, { error: "Invalid JSON body" });
             return;
           }
-          if (!parsed.requestedByUserId || !parsed.requests || parsed.requests.length === 0) {
-            sendJson(res, 400, { error: "requestedByUserId and at least one request are required" });
+          if (!parsed.requests || parsed.requests.length === 0) {
+            sendJson(res, 400, { error: "at least one request is required" });
+            return;
+          }
+
+          let actor: DashboardUserActorPrincipal;
+          try {
+            actor = requireDashboardUserActor(actorPrincipal);
+          } catch (error) {
+            sendJson(res, 403, { error: error instanceof Error ? error.message : "Forbidden" });
             return;
           }
 
           try {
             const reviewRequests = await workItemsSource.createReviewRequests({
               workItemId,
-              requestedByUserId: parsed.requestedByUserId,
+              actor,
               requests: parsed.requests,
             });
             sendJson(res, 201, { reviewRequests });
@@ -1676,7 +1702,7 @@ export function startDashboardServer(
         if (parts.length === 4 && parts[3] === "confirm-discovery" && req.method === "POST") {
           const raw = await readBody(req);
           if (raw === null) { sendJson(res, 413, { error: "Request body too large" }); return; }
-          let parsed: { approved?: boolean; actorUserId?: string; jiraIssueKey?: string } = {};
+          let parsed: { approved?: boolean; jiraIssueKey?: string } = {};
           try {
             parsed = JSON.parse(raw) as typeof parsed;
           } catch {
@@ -1687,8 +1713,12 @@ export function startDashboardServer(
             sendJson(res, 400, { error: "approved must be a boolean" });
             return;
           }
-          if (typeof parsed.actorUserId !== "string" || parsed.actorUserId.trim() === "") {
-            sendJson(res, 400, { error: "actorUserId is required" });
+
+          let actor: DashboardUserActorPrincipal;
+          try {
+            actor = requireDashboardUserActor(actorPrincipal);
+          } catch (error) {
+            sendJson(res, 403, { error: error instanceof Error ? error.message : "Forbidden" });
             return;
           }
 
@@ -1696,7 +1726,7 @@ export function startDashboardServer(
             const workItem = await workItemsSource.confirmDiscovery({
               workItemId,
               approved: parsed.approved,
-              actorUserId: parsed.actorUserId,
+              actor,
               jiraIssueKey: parsed.jiraIssueKey,
             });
             sendJson(res, 200, { workItem });
@@ -1709,22 +1739,26 @@ export function startDashboardServer(
         if (parts.length === 4 && parts[3] === "stop-processing" && req.method === "POST") {
           const raw = await readBody(req);
           if (raw === null) { sendJson(res, 413, { error: "Request body too large" }); return; }
-          let parsed: { actorUserId?: string } = {};
+          let parsed: Record<string, never> = {};
           try {
             parsed = raw ? (JSON.parse(raw) as typeof parsed) : {};
           } catch {
             sendJson(res, 400, { error: "Invalid JSON body" });
             return;
           }
-          if (typeof parsed.actorUserId !== "string" || parsed.actorUserId.trim() === "") {
-            sendJson(res, 400, { error: "actorUserId is required" });
+
+          let actor: DashboardUserActorPrincipal;
+          try {
+            actor = requireDashboardUserActor(actorPrincipal);
+          } catch (error) {
+            sendJson(res, 403, { error: error instanceof Error ? error.message : "Forbidden" });
             return;
           }
 
           try {
             const result = await workItemsSource.stopProcessing({
               workItemId,
-              actorUserId: parsed.actorUserId,
+              actor,
             });
             sendJson(res, 200, result);
           } catch (error) {
@@ -1736,7 +1770,7 @@ export function startDashboardServer(
         if (parts.length === 4 && parts[3] === "override-state" && req.method === "POST") {
           const raw = await readBody(req);
           if (raw === null) { sendJson(res, 413, { error: "Request body too large" }); return; }
-          let parsed: { state?: WorkItemRecord["state"]; substate?: string; actorUserId?: string; reason?: string } = {};
+          let parsed: { state?: WorkItemRecord["state"]; substate?: string; reason?: string } = {};
           try {
             parsed = JSON.parse(raw) as typeof parsed;
           } catch {
@@ -1747,8 +1781,12 @@ export function startDashboardServer(
             sendJson(res, 400, { error: "state and reason are required" });
             return;
           }
-          if (typeof parsed.actorUserId !== "string" || parsed.actorUserId.trim() === "") {
-            sendJson(res, 400, { error: "actorUserId is required" });
+
+          let actor: DashboardActorPrincipal;
+          try {
+            actor = requireDashboardActor(actorPrincipal);
+          } catch (error) {
+            sendJson(res, 403, { error: error instanceof Error ? error.message : "Forbidden" });
             return;
           }
 
@@ -1757,7 +1795,7 @@ export function startDashboardServer(
               workItemId,
               state: parsed.state,
               substate: parsed.substate,
-              actorUserId: parsed.actorUserId,
+              actor,
               reason: parsed.reason,
             });
             sendJson(res, 200, { workItem });
@@ -1778,7 +1816,6 @@ export function startDashboardServer(
         if (raw === null) { sendJson(res, 413, { error: "Request body too large" }); return; }
         let parsed: {
           outcome?: NonNullable<ReviewRequestRecord["outcome"]>;
-          authorUserId?: string;
           comment?: string;
         } = {};
         try {
@@ -1792,11 +1829,19 @@ export function startDashboardServer(
           return;
         }
 
+        let actor: DashboardUserActorPrincipal;
+        try {
+          actor = requireDashboardUserActor(actorPrincipal);
+        } catch (error) {
+          sendJson(res, 403, { error: error instanceof Error ? error.message : "Forbidden" });
+          return;
+        }
+
         try {
           const workItem = await workItemsSource.respondToReviewRequest({
             reviewRequestId: decodeURIComponent(parts[2]),
             outcome: parsed.outcome,
-            authorUserId: parsed.authorUserId,
+            actor,
             comment: parsed.comment,
           });
           sendJson(res, 200, { workItem });

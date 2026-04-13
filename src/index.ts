@@ -11,6 +11,10 @@ import { RunLifecycleHooks } from "./hooks/run-lifecycle.js";
 import { RunManager } from "./run-manager.js";
 import { startSlackApp } from "./slack-app.js";
 import { startDashboardServer, type DashboardWorkItemsSource } from "./dashboard-server.js";
+import type {
+  DashboardActorPrincipal,
+  DashboardUserActorPrincipal,
+} from "./dashboard/actor-principal.js";
 import { WorkspaceCleaner } from "./workspace-cleaner.js";
 import { ObserverDaemon } from "./observer/index.js";
 import { execSync } from "node:child_process";
@@ -114,6 +118,27 @@ function systemActor(userId: string): WorkItemActor {
     principalType: "user",
     userId,
     authMethod: "system",
+  };
+}
+
+function dashboardActor(actor: DashboardActorPrincipal): WorkItemActor {
+  if (actor.principalType === "admin_session") {
+    return {
+      principalType: "admin_session",
+      authMethod: "admin_password",
+      sessionId: actor.sessionId,
+    };
+  }
+
+  return dashboardUserActor(actor);
+}
+
+function dashboardUserActor(actor: DashboardUserActorPrincipal): WorkItemActor {
+  return {
+    principalType: "user",
+    userId: actor.userId,
+    authMethod: actor.authMethod,
+    sessionId: actor.sessionId,
   };
 }
 
@@ -294,7 +319,7 @@ async function createServices(config: AppConfig, db: Database): Promise<Services
     createDiscoveryWorkItem: async (input) => {
       if (!input.ownerTeamId || !input.homeChannelId || !input.homeThreadTs) {
         const resolved = await workItemContextResolver.resolveDiscoveryContext({
-          createdByUserId: input.createdByUserId,
+          createdByUserId: input.actor.userId,
           ownerTeamId: input.ownerTeamId,
           originChannelId: input.originChannelId,
           originThreadTs: input.originThreadTs,
@@ -322,13 +347,13 @@ async function createServices(config: AppConfig, db: Database): Promise<Services
         originChannelId: input.originChannelId,
         originThreadTs: input.originThreadTs,
         jiraIssueKey: input.jiraIssueKey,
-        createdByUserId: input.createdByUserId,
+        createdByUserId: input.actor.userId,
       });
     },
     createReviewRequests: async (input) => {
       const reviewRequests = await workItemService.requestReview({
         workItemId: input.workItemId,
-        actor: systemActor(input.requestedByUserId),
+        actor: dashboardUserActor(input.actor),
         requests: input.requests,
       });
       if (webClient) {
@@ -340,12 +365,9 @@ async function createServices(config: AppConfig, db: Database): Promise<Services
       return reviewRequests;
     },
     respondToReviewRequest: (input) => {
-      if (!input.authorUserId) {
-        throw new Error("Dashboard review responses require an actor user id");
-      }
       return workItemService.recordReviewOutcome({
         reviewRequestId: input.reviewRequestId,
-        actor: systemActor(input.authorUserId),
+        actor: dashboardUserActor(input.actor),
         outcome: input.outcome,
         comment: input.comment,
       });
@@ -353,19 +375,19 @@ async function createServices(config: AppConfig, db: Database): Promise<Services
     confirmDiscovery: (input) => workItemService.confirmDiscovery({
       workItemId: input.workItemId,
       approved: input.approved,
-      actor: systemActor(input.actorUserId),
+      actor: dashboardUserActor(input.actor),
       jiraIssueKey: input.jiraIssueKey,
     }),
     stopProcessing: (input) => workItemService.stopProcessing({
       workItemId: input.workItemId,
-      actor: systemActor(input.actorUserId),
+      actor: dashboardUserActor(input.actor),
       cancelRun: (runId) => runManager.cancelRun(runId),
     }),
     guardedOverrideState: (input) => workItemService.guardedOverrideState({
       workItemId: input.workItemId,
       state: input.state,
       substate: input.substate,
-      actor: systemActor(input.actorUserId),
+      actor: dashboardActor(input.actor),
       reason: input.reason,
       hasActiveProcessing: async (workItem) => workItemService.hasActiveProcessing(workItem.id),
     }),
