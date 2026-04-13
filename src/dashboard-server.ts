@@ -25,6 +25,7 @@ import {
   type AuthOptions,
 } from "./dashboard/auth.js";
 import { DashboardAuthSessionStore } from "./dashboard/auth-session-store.js";
+import { resolveDashboardActorPrincipal } from "./dashboard/actor-principal.js";
 import { SlackAuthFlow, isSlackAuthConfigured } from "./dashboard/slack-auth.js";
 import { resolveMappedSlackTeams, syncSlackUserGroupMemberships } from "./dashboard/team-membership-sync.js";
 import type { PipelineStore } from "./pipeline/pipeline-store.js";
@@ -520,6 +521,9 @@ export function startDashboardServer(
 
       // Auth check — must come before route dispatch
       if (!await checkAuth(req, res, authOpts, pathname)) return;
+
+      const actorPrincipal = await resolveDashboardActorPrincipal(req, authSessionStore);
+      void actorPrincipal;
 
       if (req.method === "GET" && pathname === "/healthz") {
         sendJson(res, 200, { ok: true });
