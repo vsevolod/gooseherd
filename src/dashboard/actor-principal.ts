@@ -1,15 +1,16 @@
 import type { IncomingMessage } from "node:http";
-import { parseCookies } from "./auth.js";
+import { getDashboardSession, type DashboardSessionLookup } from "./auth.js";
 import type {
-  DashboardAuthSessionStore,
   DashboardSessionAuthMethod,
   DashboardSessionRecord,
 } from "./auth-session-store.js";
 
+export type DashboardUserSessionAuthMethod = Exclude<DashboardSessionAuthMethod, "admin_password">;
+
 export interface DashboardUserActorPrincipal {
   principalType: "user";
   sessionId: string;
-  authMethod: DashboardSessionAuthMethod;
+  authMethod: DashboardUserSessionAuthMethod;
   userId: string;
 }
 
@@ -21,11 +22,11 @@ export interface DashboardAdminActorPrincipal {
 
 export type DashboardActorPrincipal = DashboardUserActorPrincipal | DashboardAdminActorPrincipal;
 
-type DashboardActorSessionStore = Pick<DashboardAuthSessionStore, "getSessionByToken">;
+type DashboardActorSessionStore = DashboardSessionLookup;
 
 function toDashboardActorPrincipal(session: DashboardSessionRecord): DashboardActorPrincipal | undefined {
   if (session.principalType === "user") {
-    if (!session.userId) return undefined;
+    if (!session.userId || session.authMethod === "admin_password") return undefined;
     return {
       principalType: "user",
       sessionId: session.id,
@@ -35,6 +36,7 @@ function toDashboardActorPrincipal(session: DashboardSessionRecord): DashboardAc
   }
 
   if (session.principalType === "admin") {
+    if (session.authMethod !== "admin_password") return undefined;
     return {
       principalType: "admin_session",
       sessionId: session.id,
@@ -49,13 +51,7 @@ export async function resolveDashboardActorPrincipal(
   req: IncomingMessage,
   sessionStore?: DashboardActorSessionStore,
 ): Promise<DashboardActorPrincipal | undefined> {
-  if (!sessionStore) return undefined;
-
-  const cookies = parseCookies(req);
-  const sessionToken = cookies["gooseherd-session"];
-  if (!sessionToken) return undefined;
-
-  const session = await sessionStore.getSessionByToken(sessionToken);
+  const session = await getDashboardSession(req, sessionStore);
   if (!session) return undefined;
 
   return toDashboardActorPrincipal(session);
