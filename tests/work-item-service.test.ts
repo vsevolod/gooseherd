@@ -7,6 +7,31 @@ import { orgRoleAssignments, reviewRequestComments, teamMembers, teams, users, w
 import { WorkItemService } from "../src/work-items/service.js";
 import { RunStore } from "../src/store.js";
 
+function slackUserActor(userId: string, sessionId = "slack-session-1") {
+  return {
+    principalType: "user" as const,
+    userId,
+    authMethod: "slack" as const,
+    sessionId,
+  };
+}
+
+function systemUserActor(userId: string) {
+  return {
+    principalType: "user" as const,
+    userId,
+    authMethod: "system" as const,
+  };
+}
+
+function adminSessionActor(sessionId = "admin-session-1") {
+  return {
+    principalType: "admin_session" as const,
+    authMethod: "admin_password" as const,
+    sessionId,
+  };
+}
+
 async function createServiceFixture() {
   const testDb = await createTestDb();
   const pmUserId = randomUUID();
@@ -72,7 +97,7 @@ test("service creates discovery item, manages review round, and confirms discove
 
   const [reviewA, reviewB] = await service.requestReview({
     workItemId: discovery.id,
-    requestedByUserId: pmUserId,
+    actor: systemUserActor(pmUserId),
     requests: [
       {
         type: "review",
@@ -102,7 +127,7 @@ test("service creates discovery item, manages review round, and confirms discove
   await service.recordReviewOutcome({
     reviewRequestId: reviewA.id,
     outcome: "changes_requested",
-    authorUserId: reviewerUserId,
+    actor: systemUserActor(reviewerUserId),
     comment: "Please tighten the transition model.",
   });
 
@@ -114,7 +139,7 @@ test("service creates discovery item, manages review round, and confirms discove
 
   const [reviewC] = await service.requestReview({
     workItemId: discovery.id,
-    requestedByUserId: pmUserId,
+    actor: systemUserActor(pmUserId),
     requests: [
       {
         type: "review",
@@ -132,7 +157,7 @@ test("service creates discovery item, manages review round, and confirms discove
   await service.recordReviewOutcome({
     reviewRequestId: reviewC.id,
     outcome: "approved",
-    authorUserId: reviewerUserId,
+    actor: systemUserActor(reviewerUserId),
     comment: "Looks good now.",
   });
 
@@ -142,13 +167,13 @@ test("service creates discovery item, manages review round, and confirms discove
   await assert.rejects(() => service.confirmDiscovery({
     workItemId: discovery.id,
     approved: true,
-    actorUserId: pmUserId,
+    actor: systemUserActor(pmUserId),
   }), /jira/i);
 
   const completedDiscovery = await service.confirmDiscovery({
     workItemId: discovery.id,
     approved: true,
-    actorUserId: pmUserId,
+    actor: systemUserActor(pmUserId),
     jiraIssueKey: "HBL-101",
   });
   assert.equal(completedDiscovery.state, "done");
@@ -202,7 +227,7 @@ test("service enforces target-aware authorization for review responses", async (
   await service.startDiscovery(discovery.id);
   const [review] = await service.requestReview({
     workItemId: discovery.id,
-    requestedByUserId: pmUserId,
+    actor: systemUserActor(pmUserId),
     requests: [
       {
         type: "review",
@@ -216,14 +241,14 @@ test("service enforces target-aware authorization for review responses", async (
   await assert.rejects(() => service.recordReviewOutcome({
     reviewRequestId: review.id,
     outcome: "approved",
-    authorUserId: outsiderUserId,
+    actor: systemUserActor(outsiderUserId),
     comment: "I should not be able to approve this",
   }), /not authorized/i);
 
   const updated = await service.recordReviewOutcome({
     reviewRequestId: review.id,
     outcome: "approved",
-    authorUserId: reviewerUserId,
+    actor: systemUserActor(reviewerUserId),
     comment: "Approved by the correct reviewer",
   });
   assert.equal(updated.state, "waiting_for_pm_confirmation");
@@ -250,21 +275,21 @@ test("service rejects unauthorized override actors but allows org-role admins", 
   await assert.rejects(() => service.guardedOverrideState({
     workItemId: delivery.id,
     state: "cancelled",
-    actorUserId: outsiderUserId,
+    actor: systemUserActor(outsiderUserId),
     reason: "I should not be allowed",
   }), /not authorized/i);
 
   await assert.rejects(() => service.guardedOverrideState({
     workItemId: delivery.id,
     state: "cancelled",
-    actorUserId: ctoUserId,
+    actor: systemUserActor(ctoUserId),
     reason: "Non-admin org role should not override",
   }), /not authorized/i);
 
   const overridden = await service.guardedOverrideState({
     workItemId: delivery.id,
     state: "cancelled",
-    actorUserId: adminUserId,
+    actor: systemUserActor(adminUserId),
     reason: "Org admin override",
   });
   assert.equal(overridden.state, "cancelled");
@@ -286,7 +311,7 @@ test("service only allows owner-team PM to request review and confirm discovery 
 
   await assert.rejects(() => service.requestReview({
     workItemId: discovery.id,
-    requestedByUserId: reviewerUserId,
+    actor: systemUserActor(reviewerUserId),
     requests: [
       {
         type: "review",
@@ -299,7 +324,7 @@ test("service only allows owner-team PM to request review and confirm discovery 
 
   const [review] = await service.requestReview({
     workItemId: discovery.id,
-    requestedByUserId: pmUserId,
+    actor: systemUserActor(pmUserId),
     requests: [
       {
         type: "review",
@@ -313,19 +338,19 @@ test("service only allows owner-team PM to request review and confirm discovery 
   await service.recordReviewOutcome({
     reviewRequestId: review.id,
     outcome: "approved",
-    authorUserId: reviewerUserId,
+    actor: systemUserActor(reviewerUserId),
   });
 
   await assert.rejects(() => service.confirmDiscovery({
     workItemId: discovery.id,
     approved: false,
-    actorUserId: reviewerUserId,
+    actor: systemUserActor(reviewerUserId),
   }), /not authorized/i);
 
   const updated = await service.confirmDiscovery({
     workItemId: discovery.id,
     approved: false,
-    actorUserId: pmUserId,
+    actor: systemUserActor(pmUserId),
   });
 
   assert.equal(updated.state, "in_progress");
@@ -367,13 +392,13 @@ test("service stop processing requires manual transition authority, while overri
 
   await assert.rejects(() => service.stopProcessing({
     workItemId: workItem.id,
-    actorUserId: reviewerUserId,
+    actor: systemUserActor(reviewerUserId),
     cancelRun: async () => true,
   }), /not authorized/i);
 
   const stopResult = await service.stopProcessing({
     workItemId: workItem.id,
-    actorUserId: pmUserId,
+    actor: systemUserActor(pmUserId),
     cancelRun: async (runId) => {
       await runStore.updateRun(runId, {
         status: "cancel_requested",
@@ -387,17 +412,121 @@ test("service stop processing requires manual transition authority, while overri
   await assert.rejects(() => service.guardedOverrideState({
     workItemId: workItem.id,
     state: "cancelled",
-    actorUserId: pmUserId,
+    actor: systemUserActor(pmUserId),
     reason: "PM cannot globally override",
   }), /not authorized/i);
 
   const overridden = await service.guardedOverrideState({
     workItemId: workItem.id,
     state: "cancelled",
-    actorUserId: adminUserId,
+    actor: systemUserActor(adminUserId),
     reason: "Admin override",
   });
   assert.equal(overridden.state, "cancelled");
+});
+
+test("service records actor principal metadata in work item events", async (t) => {
+  const { db, cleanup, service, pmUserId, reviewerUserId, ownerTeamId } = await createServiceFixture();
+  t.after(cleanup);
+
+  const discovery = await service.createDiscoveryWorkItem({
+    title: "Actor metadata",
+    summary: "Events should preserve actor principal details",
+    ownerTeamId,
+    homeChannelId: "C_GROWTH",
+    homeThreadTs: "1740000000.403",
+    createdByUserId: pmUserId,
+  });
+  await service.startDiscovery(discovery.id);
+
+  const [review] = await service.requestReview({
+    workItemId: discovery.id,
+    actor: slackUserActor(pmUserId, "slack-session-request"),
+    requests: [
+      {
+        type: "review",
+        targetType: "user",
+        targetRef: { userId: reviewerUserId },
+        title: "Record actor principal",
+      },
+    ],
+  });
+
+  await service.recordReviewOutcome({
+    reviewRequestId: review.id,
+    actor: systemUserActor(reviewerUserId),
+    outcome: "approved",
+    comment: "Approved from system bridge",
+  });
+
+  const events = await db.select().from(workItemEvents).where(eq(workItemEvents.workItemId, discovery.id));
+  const createdEvent = events.find((event) => event.eventType === "review_request.created");
+  assert.ok(createdEvent);
+  assert.equal(createdEvent.actorUserId, pmUserId);
+  assert.equal(createdEvent.payload.actorPrincipalType, "user");
+  assert.equal(createdEvent.payload.actorAuthMethod, "slack");
+  assert.equal(createdEvent.payload.actorSessionId, "slack-session-request");
+
+  const completedEvent = events.find((event) => event.eventType === "review_request.completed");
+  assert.ok(completedEvent);
+  assert.equal(completedEvent.actorUserId, reviewerUserId);
+  assert.equal(completedEvent.payload.actorPrincipalType, "user");
+  assert.equal(completedEvent.payload.actorAuthMethod, "system");
+  assert.equal(completedEvent.payload.actorSessionId, undefined);
+});
+
+test("admin_session may override but cannot confirm discovery as a normal participant", async (t) => {
+  const { db, cleanup, service, pmUserId, reviewerUserId, ownerTeamId } = await createServiceFixture();
+  t.after(cleanup);
+
+  const discovery = await service.createDiscoveryWorkItem({
+    title: "Admin session boundary",
+    summary: "Admin session is override-only",
+    ownerTeamId,
+    homeChannelId: "C_GROWTH",
+    homeThreadTs: "1740000000.404",
+    createdByUserId: pmUserId,
+  });
+  await service.startDiscovery(discovery.id);
+  const [review] = await service.requestReview({
+    workItemId: discovery.id,
+    actor: slackUserActor(pmUserId, "pm-session"),
+    requests: [
+      {
+        type: "review",
+        targetType: "user",
+        targetRef: { userId: reviewerUserId },
+        title: "PM review request",
+      },
+    ],
+  });
+  await service.recordReviewOutcome({
+    reviewRequestId: review.id,
+    actor: slackUserActor(reviewerUserId, "reviewer-session"),
+    outcome: "approved",
+  });
+
+  await assert.rejects(() => service.confirmDiscovery({
+    workItemId: discovery.id,
+    approved: false,
+    actor: adminSessionActor("admin-confirm"),
+  }), /not authorized/i);
+
+  const overridden = await service.guardedOverrideState({
+    workItemId: discovery.id,
+    state: "cancelled",
+    actor: adminSessionActor("admin-override"),
+    reason: "Emergency dashboard override",
+  });
+  assert.equal(overridden.state, "cancelled");
+
+  const events = await db.select().from(workItemEvents).where(eq(workItemEvents.workItemId, discovery.id));
+  const overrideRequested = events.find((event) => event.eventType === "override.requested");
+  assert.ok(overrideRequested);
+  assert.equal(overrideRequested.actorUserId, null);
+  assert.equal(overrideRequested.payload.actorPrincipalType, "admin_session");
+  assert.equal(overrideRequested.payload.actorAuthMethod, "admin_password");
+  assert.equal(overrideRequested.payload.actorSessionId, "admin-override");
 });
 
 test("service can attach an existing run to a work item", async (t) => {
@@ -477,14 +606,14 @@ test("service stops active processing before guarded override", async (t) => {
   await assert.rejects(() => service.guardedOverrideState({
     workItemId: workItem.id,
     state: "cancelled",
-    actorUserId: adminUserId,
+    actor: systemUserActor(adminUserId),
     reason: "stuck worker",
     hasActiveProcessing: async () => service.hasActiveProcessing(workItem.id),
   }), /processing is active/);
 
   const stopResult = await service.stopProcessing({
     workItemId: workItem.id,
-    actorUserId: pmUserId,
+    actor: systemUserActor(pmUserId),
     cancelRun: async (runId) => {
       await runStore.updateRun(runId, {
         status: "cancel_requested",
@@ -500,7 +629,7 @@ test("service stops active processing before guarded override", async (t) => {
   const overridden = await service.guardedOverrideState({
     workItemId: workItem.id,
     state: "cancelled",
-    actorUserId: adminUserId,
+    actor: systemUserActor(adminUserId),
     reason: "stopped the worker first",
     hasActiveProcessing: async () => service.hasActiveProcessing(workItem.id),
   });

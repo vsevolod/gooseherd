@@ -15,6 +15,14 @@ import { ReviewRequestStore } from "../src/work-items/review-request-store.js";
 import { WorkItemEventsStore } from "../src/work-items/events-store.js";
 import { WorkItemService } from "../src/work-items/service.js";
 
+function systemActor(userId: string) {
+  return {
+    principalType: "user" as const,
+    userId,
+    authMethod: "system" as const,
+  };
+}
+
 let nextPort = 30500 + Math.floor(Math.random() * 1000);
 function getPort(): number {
   return nextPort++;
@@ -262,7 +270,7 @@ async function createWorkItemsSource(): Promise<DashboardWorkItemsSource & {
     await service.startDiscovery(discovery.id);
     await service.requestReview({
       workItemId: discovery.id,
-      requestedByUserId: pmUserId,
+      actor: systemActor(pmUserId),
       requests: [
         {
           type: "review",
@@ -299,9 +307,28 @@ async function createWorkItemsSource(): Promise<DashboardWorkItemsSource & {
       listReviewRequestComments: (reviewRequestId: string) => reviewRequestStore.listComments(reviewRequestId),
       listEventsForWorkItem: (workItemId: string) => eventsStore.listForWorkItem(workItemId),
       createDiscoveryWorkItem: (input) => service.createDiscoveryWorkItem(input),
-      createReviewRequests: (input) => service.requestReview(input),
-      respondToReviewRequest: (input) => service.recordReviewOutcome(input),
-      confirmDiscovery: (input) => service.confirmDiscovery(input),
+      createReviewRequests: (input) => service.requestReview({
+        workItemId: input.workItemId,
+        actor: systemActor(input.requestedByUserId),
+        requests: input.requests,
+      }),
+      respondToReviewRequest: (input) => {
+        if (!input.authorUserId) {
+          throw new Error("Dashboard review responses require an actor user id");
+        }
+        return service.recordReviewOutcome({
+          reviewRequestId: input.reviewRequestId,
+          actor: systemActor(input.authorUserId),
+          outcome: input.outcome,
+          comment: input.comment,
+        });
+      },
+      confirmDiscovery: (input) => service.confirmDiscovery({
+        workItemId: input.workItemId,
+        approved: input.approved,
+        actor: systemActor(input.actorUserId),
+        jiraIssueKey: input.jiraIssueKey,
+      }),
       stopProcessing: async ({ workItemId, actorUserId }) => {
         void actorUserId;
         return {

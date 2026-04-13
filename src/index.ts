@@ -45,6 +45,7 @@ import { WorkItemEventsStore } from "./work-items/events-store.js";
 import { WorkItemService } from "./work-items/service.js";
 import { postWorkItemReviewNotifications } from "./work-items/slack-actions.js";
 import { WorkItemIdentityStore } from "./work-items/identity-store.js";
+import type { WorkItemActor } from "./work-items/actor.js";
 import { WorkItemContextResolver } from "./work-items/context-resolver.js";
 import { GitHubWorkItemSync, parseGitHubWorkItemWebhookPayload } from "./work-items/github-sync.js";
 import { JiraWorkItemSync, parseJiraWorkItemWebhookPayload } from "./work-items/jira-sync.js";
@@ -106,6 +107,22 @@ function resolveKubernetesInternalBaseUrl(config: AppConfig): string {
   }
 
   return `http://host.minikube.internal:${String(config.dashboardPort)}`;
+}
+
+function systemActor(userId: string): WorkItemActor {
+  return {
+    principalType: "user",
+    userId,
+    authMethod: "system",
+  };
+}
+
+function slackActor(userId: string): WorkItemActor {
+  return {
+    principalType: "user",
+    userId,
+    authMethod: "slack",
+  };
 }
 
 async function createServices(config: AppConfig, db: Database): Promise<Services> {
@@ -309,7 +326,11 @@ async function createServices(config: AppConfig, db: Database): Promise<Services
       });
     },
     createReviewRequests: async (input) => {
-      const reviewRequests = await workItemService.requestReview(input);
+      const reviewRequests = await workItemService.requestReview({
+        workItemId: input.workItemId,
+        actor: systemActor(input.requestedByUserId),
+        requests: input.requests,
+      });
       if (webClient) {
         const workItem = await workItemService.getWorkItem(input.workItemId);
         if (workItem) {
@@ -318,14 +339,34 @@ async function createServices(config: AppConfig, db: Database): Promise<Services
       }
       return reviewRequests;
     },
-    respondToReviewRequest: (input) => workItemService.recordReviewOutcome(input),
-    confirmDiscovery: (input) => workItemService.confirmDiscovery(input),
+    respondToReviewRequest: (input) => {
+      if (!input.authorUserId) {
+        throw new Error("Dashboard review responses require an actor user id");
+      }
+      return workItemService.recordReviewOutcome({
+        reviewRequestId: input.reviewRequestId,
+        actor: systemActor(input.authorUserId),
+        outcome: input.outcome,
+        comment: input.comment,
+      });
+    },
+    confirmDiscovery: (input) => workItemService.confirmDiscovery({
+      workItemId: input.workItemId,
+      approved: input.approved,
+      actor: systemActor(input.actorUserId),
+      jiraIssueKey: input.jiraIssueKey,
+    }),
     stopProcessing: (input) => workItemService.stopProcessing({
-      ...input,
+      workItemId: input.workItemId,
+      actor: systemActor(input.actorUserId),
       cancelRun: (runId) => runManager.cancelRun(runId),
     }),
     guardedOverrideState: (input) => workItemService.guardedOverrideState({
-      ...input,
+      workItemId: input.workItemId,
+      state: input.state,
+      substate: input.substate,
+      actor: systemActor(input.actorUserId),
+      reason: input.reason,
       hasActiveProcessing: async (workItem) => workItemService.hasActiveProcessing(workItem.id),
     }),
   };
@@ -522,9 +563,14 @@ async function main(): Promise<void> {
         const actor = input.authorUserId
           ? await new WorkItemIdentityStore(db).getUserBySlackUserId(input.authorUserId)
           : undefined;
+        if (!actor) {
+          throw new Error("Unknown Slack actor");
+        }
         return svc.workItemService.recordReviewOutcome({
-          ...input,
-          authorUserId: actor?.id,
+          reviewRequestId: input.reviewRequestId,
+          actor: slackActor(actor.id),
+          outcome: input.outcome,
+          comment: input.comment,
           source: "slack",
         });
       },

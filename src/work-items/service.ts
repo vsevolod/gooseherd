@@ -1,5 +1,6 @@
 import type { Database } from "../db/index.js";
 import { RunStore } from "../store.js";
+import { actorAuditFields, isAdminOverrideActor, requireUserActor, type WorkItemActor } from "./actor.js";
 import { WorkItemAuthorization } from "./authorization.js";
 import { WorkItemEventsStore } from "./events-store.js";
 import { nextDiscoveryStateAfterPmConfirmation, evaluateDiscoveryReviewRound } from "./product-discovery-policy.js";
@@ -68,7 +69,7 @@ export class WorkItemService {
 
   async requestReview(input: {
     workItemId: string;
-    requestedByUserId: string;
+    actor: WorkItemActor;
     requests: Array<{
       type: ReviewRequestRecord["type"];
       targetType: ReviewRequestRecord["targetType"];
@@ -79,7 +80,8 @@ export class WorkItemService {
     }>;
   }): Promise<ReviewRequestRecord[]> {
     const workItem = await this.requireWorkItem(input.workItemId);
-    await this.authorization.assertCanRequestReview(input.requestedByUserId, workItem);
+    const actor = requireUserActor(input.actor);
+    await this.authorization.assertCanRequestReview(actor.userId, workItem);
     const currentRequests = await this.reviewRequests.listReviewRequestsForWorkItem(workItem.id);
     const nextReviewRound = Math.max(0, ...currentRequests.map((request) => request.reviewRound)) + 1;
 
@@ -95,7 +97,7 @@ export class WorkItemService {
         title: request.title,
         requestMessage: request.requestMessage,
         focusPoints: request.focusPoints,
-        requestedByUserId: input.requestedByUserId,
+        requestedByUserId: actor.userId,
       }));
     }
 
@@ -107,14 +109,18 @@ export class WorkItemService {
     await this.events.append({
       workItemId: input.workItemId,
       eventType: "review_request.created",
-      actorUserId: input.requestedByUserId,
-      payload: { reviewRound: nextReviewRound, reviewRequestIds: created.map((request) => request.id) },
+      actorUserId: actor.userId,
+      payload: {
+        reviewRound: nextReviewRound,
+        reviewRequestIds: created.map((request) => request.id),
+        ...actorAuditFields(actor),
+      },
     });
     await this.events.append({
       workItemId: input.workItemId,
       eventType: "work_item.state_changed",
-      actorUserId: input.requestedByUserId,
-      payload: { state: updated.state, substate: updated.substate },
+      actorUserId: actor.userId,
+      payload: { state: updated.state, substate: updated.substate, ...actorAuditFields(actor) },
     });
 
     return created;
@@ -122,17 +128,18 @@ export class WorkItemService {
 
   async recordReviewOutcome(input: {
     reviewRequestId: string;
+    actor: WorkItemActor;
     outcome: NonNullable<ReviewRequestRecord["outcome"]>;
-    authorUserId?: string;
     comment?: string;
     source?: ReviewRequestCommentSource;
   }): Promise<WorkItemRecord> {
+    const actor = requireUserActor(input.actor);
     const existingReviewRequest = await this.reviewRequests.getReviewRequest(input.reviewRequestId);
     if (!existingReviewRequest) {
       throw new Error(`ReviewRequest not found: ${input.reviewRequestId}`);
     }
     const workItem = await this.requireWorkItem(existingReviewRequest.workItemId);
-    await this.authorization.assertCanRespondToReviewRequest(input.authorUserId, workItem, existingReviewRequest);
+    await this.authorization.assertCanRespondToReviewRequest(actor.userId, workItem, existingReviewRequest);
 
     const completed = await this.reviewRequests.completeReviewRequest(input.reviewRequestId, {
       outcome: input.outcome,
@@ -141,22 +148,26 @@ export class WorkItemService {
     if (input.comment) {
       await this.reviewRequests.addComment({
         reviewRequestId: input.reviewRequestId,
-        authorUserId: input.authorUserId,
+        authorUserId: actor.userId,
         source: input.source ?? "dashboard",
         body: input.comment,
       });
       await this.events.append({
         workItemId: completed.workItemId,
         eventType: "review_request.comment_added",
-        actorUserId: input.authorUserId,
-        payload: { reviewRequestId: input.reviewRequestId, source: input.source ?? "dashboard" },
+        actorUserId: actor.userId,
+        payload: {
+          reviewRequestId: input.reviewRequestId,
+          source: input.source ?? "dashboard",
+          ...actorAuditFields(actor),
+        },
       });
       if (input.source === "slack") {
         await this.events.append({
           workItemId: completed.workItemId,
           eventType: "slack.action_observed",
-          actorUserId: input.authorUserId,
-          payload: { reviewRequestId: input.reviewRequestId, outcome: input.outcome },
+          actorUserId: actor.userId,
+          payload: { reviewRequestId: input.reviewRequestId, outcome: input.outcome, ...actorAuditFields(actor) },
         });
       }
     }
@@ -177,14 +188,14 @@ export class WorkItemService {
     await this.events.append({
       workItemId: workItem.id,
       eventType: "review_request.completed",
-      actorUserId: input.authorUserId,
-      payload: { reviewRequestId: input.reviewRequestId, outcome: input.outcome },
+      actorUserId: actor.userId,
+      payload: { reviewRequestId: input.reviewRequestId, outcome: input.outcome, ...actorAuditFields(actor) },
     });
     await this.events.append({
       workItemId: workItem.id,
       eventType: "work_item.state_changed",
-      actorUserId: input.authorUserId,
-      payload: { state: updated.state, substate: updated.substate },
+      actorUserId: actor.userId,
+      payload: { state: updated.state, substate: updated.substate, ...actorAuditFields(actor) },
     });
 
     return updated;
@@ -193,11 +204,12 @@ export class WorkItemService {
   async confirmDiscovery(input: {
     workItemId: string;
     approved: boolean;
-    actorUserId: string;
+    actor: WorkItemActor;
     jiraIssueKey?: string;
   }): Promise<WorkItemRecord> {
     const workItem = await this.requireWorkItem(input.workItemId);
-    await this.authorization.assertCanApplyManualTransition(input.actorUserId, workItem);
+    const actor = requireUserActor(input.actor);
+    await this.authorization.assertCanApplyManualTransition(actor.userId, workItem);
 
     if (input.approved) {
       const jiraIssueKey = input.jiraIssueKey?.trim() || workItem.jiraIssueKey;
@@ -226,7 +238,7 @@ export class WorkItemService {
         originThreadTs: workItem.originThreadTs,
         jiraIssueKey,
         sourceWorkItemId: workItem.id,
-        createdByUserId: input.actorUserId,
+        createdByUserId: actor.userId,
         flags: [],
       });
 
@@ -238,14 +250,14 @@ export class WorkItemService {
       await this.events.append({
         workItemId: input.workItemId,
         eventType: "work_item.state_changed",
-        actorUserId: input.actorUserId,
-        payload: { state: updated.state, approved: input.approved, jiraIssueKey },
+        actorUserId: actor.userId,
+        payload: { state: updated.state, approved: input.approved, jiraIssueKey, ...actorAuditFields(actor) },
       });
       await this.events.append({
         workItemId: delivery.id,
         eventType: "work_item.created",
-        actorUserId: input.actorUserId,
-        payload: { workflow: delivery.workflow, sourceWorkItemId: workItem.id, jiraIssueKey },
+        actorUserId: actor.userId,
+        payload: { workflow: delivery.workflow, sourceWorkItemId: workItem.id, jiraIssueKey, ...actorAuditFields(actor) },
       });
 
       return await this.requireWorkItem(input.workItemId);
@@ -261,8 +273,8 @@ export class WorkItemService {
     await this.events.append({
       workItemId: input.workItemId,
       eventType: "work_item.state_changed",
-      actorUserId: input.actorUserId,
-      payload: { state: updated.state, approved: input.approved },
+      actorUserId: actor.userId,
+      payload: { state: updated.state, approved: input.approved, ...actorAuditFields(actor) },
     });
 
     return updated;
@@ -367,12 +379,16 @@ export class WorkItemService {
     workItemId: string;
     state: WorkItemRecord["state"];
     substate?: string;
-    actorUserId: string;
+    actor: WorkItemActor;
     reason: string;
     hasActiveProcessing?: (workItem: WorkItemRecord) => Promise<boolean>;
   }): Promise<WorkItemRecord> {
     const workItem = await this.requireWorkItem(input.workItemId);
-    await this.authorization.assertCanOverrideWorkItem(input.actorUserId);
+    const actor = input.actor;
+    if (!isAdminOverrideActor(actor)) {
+      const userActor = requireUserActor(actor);
+      await this.authorization.assertCanOverrideWorkItem(userActor.userId);
+    }
     if (input.hasActiveProcessing && await input.hasActiveProcessing(workItem)) {
       throw new Error("Cannot override state while work item processing is active");
     }
@@ -380,11 +396,12 @@ export class WorkItemService {
     await this.events.append({
       workItemId: workItem.id,
       eventType: "override.requested",
-      actorUserId: input.actorUserId,
+      actorUserId: actor.principalType === "user" ? actor.userId : undefined,
       payload: {
         requestedState: input.state,
         requestedSubstate: input.substate,
         reason: input.reason,
+        ...actorAuditFields(actor),
       },
     });
 
@@ -395,13 +412,14 @@ export class WorkItemService {
     await this.events.append({
       workItemId: workItem.id,
       eventType: "override.applied",
-      actorUserId: input.actorUserId,
+      actorUserId: actor.principalType === "user" ? actor.userId : undefined,
       payload: {
         previousState: workItem.state,
         previousSubstate: workItem.substate,
         nextState: updated.state,
         nextSubstate: updated.substate,
         reason: input.reason,
+        ...actorAuditFields(actor),
       },
     });
     return updated;
@@ -414,11 +432,12 @@ export class WorkItemService {
 
   async stopProcessing(input: {
     workItemId: string;
-    actorUserId: string;
+    actor: WorkItemActor;
     cancelRun: (runId: string) => Promise<boolean>;
   }): Promise<{ workItem: WorkItemRecord; stoppedRunIds: string[]; alreadyIdleRunIds: string[]; failedRunIds: string[] }> {
     const workItem = await this.requireWorkItem(input.workItemId);
-    await this.authorization.assertCanApplyManualTransition(input.actorUserId, workItem);
+    const actor = requireUserActor(input.actor);
+    await this.authorization.assertCanApplyManualTransition(actor.userId, workItem);
     const runs = await this.runs.listRunsForWorkItem(workItem.id);
 
     const stoppedRunIds: string[] = [];
@@ -442,8 +461,8 @@ export class WorkItemService {
     await this.events.append({
       workItemId: workItem.id,
       eventType: "processing.stop_requested",
-      actorUserId: input.actorUserId,
-      payload: { stoppedRunIds, alreadyIdleRunIds, failedRunIds },
+      actorUserId: actor.userId,
+      payload: { stoppedRunIds, alreadyIdleRunIds, failedRunIds, ...actorAuditFields(actor) },
     });
 
     return { workItem, stoppedRunIds, alreadyIdleRunIds, failedRunIds };
