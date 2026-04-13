@@ -33,11 +33,7 @@ export class WorkItemAuthorization {
     throw new Error("Actor is not authorized to request review for this work item");
   }
 
-  async assertCanApplyManualTransition(
-    actorUserId: string,
-    workItem: WorkItemRecord,
-    transition: string,
-  ): Promise<void> {
+  async assertCanApplyManualTransition(actorUserId: string, workItem: WorkItemRecord): Promise<void> {
     await this.requireActiveUser(actorUserId);
 
     if (await this.identity.userIsPmForTeam(actorUserId, workItem.ownerTeamId)) {
@@ -46,7 +42,7 @@ export class WorkItemAuthorization {
     if (await this.identity.userIsAdmin(actorUserId)) {
       return;
     }
-    throw new Error(`Actor is not authorized to apply manual transition: ${transition}`);
+    throw new Error("Actor is not authorized to apply manual transitions for this work item");
   }
 
   async assertCanOverrideWorkItem(actorUserId: string): Promise<void> {
@@ -102,15 +98,6 @@ export class WorkItemAuthorization {
       }
       throw new Error("Actor is not authorized to respond to this review request");
     }
-  }
-
-  async assertCanCreateForTeam(actorUserId: string, ownerTeamId: string): Promise<void> {
-    await this.assertCanCreateWorkItem(actorUserId, ownerTeamId);
-  }
-
-  async assertCanManageWorkItem(actorUserId: string | undefined, workItem: WorkItemRecord): Promise<void> {
-    if (!actorUserId) return;
-    await this.assertCanRequestReview(actorUserId, workItem);
   }
 
   private async requireActiveUser(userId: string) {

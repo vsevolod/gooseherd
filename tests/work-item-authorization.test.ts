@@ -107,16 +107,16 @@ test("only owner-team PM or admin can request review and apply manual transition
   const workItem = makeWorkItem(fixture.ownerTeamId, fixture.ownerPmUserId);
 
   await fixture.authorization.assertCanRequestReview(fixture.ownerPmUserId, workItem);
-  await fixture.authorization.assertCanApplyManualTransition(fixture.ownerPmUserId, workItem, "cancelled");
+  await fixture.authorization.assertCanApplyManualTransition(fixture.ownerPmUserId, workItem);
   await fixture.authorization.assertCanRequestReview(fixture.adminUserId, workItem);
-  await fixture.authorization.assertCanApplyManualTransition(fixture.adminUserId, workItem, "cancelled");
+  await fixture.authorization.assertCanApplyManualTransition(fixture.adminUserId, workItem);
 
   await assert.rejects(
     () => fixture.authorization.assertCanRequestReview(fixture.ownerEngineerUserId, workItem),
     /not authorized/i,
   );
   await assert.rejects(
-    () => fixture.authorization.assertCanApplyManualTransition(fixture.ownerEngineerUserId, workItem, "cancelled"),
+    () => fixture.authorization.assertCanApplyManualTransition(fixture.ownerEngineerUserId, workItem),
     /not authorized/i,
   );
   await assert.rejects(
@@ -124,7 +124,7 @@ test("only owner-team PM or admin can request review and apply manual transition
     /not authorized/i,
   );
   await assert.rejects(
-    () => fixture.authorization.assertCanApplyManualTransition(fixture.outsiderUserId, workItem, "cancelled"),
+    () => fixture.authorization.assertCanApplyManualTransition(fixture.outsiderUserId, workItem),
     /not authorized/i,
   );
 });
@@ -161,7 +161,7 @@ test("non-admin org roles are not elevated for management or manual transitions"
     /not authorized/i,
   );
   await assert.rejects(
-    () => fixture.authorization.assertCanApplyManualTransition(fixture.ctoUserId, workItem, "cancelled"),
+    () => fixture.authorization.assertCanApplyManualTransition(fixture.ctoUserId, workItem),
     /not authorized/i,
   );
   await assert.rejects(

@@ -36,7 +36,7 @@ export class WorkItemService {
   }
 
   async createDiscoveryWorkItem(input: Omit<CreateWorkItemInput, "workflow" | "state">): Promise<WorkItemRecord> {
-    await this.authorization.assertCanCreateForTeam(input.createdByUserId, input.ownerTeamId);
+    await this.authorization.assertCanCreateWorkItem(input.createdByUserId, input.ownerTeamId);
     const workItem = await this.workItems.createWorkItem({
       ...input,
       workflow: "product_discovery",
@@ -197,9 +197,8 @@ export class WorkItemService {
     jiraIssueKey?: string;
   }): Promise<WorkItemRecord> {
     const workItem = await this.requireWorkItem(input.workItemId);
-    if (input.actorUserId) {
-      await this.authorization.assertCanApplyManualTransition(input.actorUserId, workItem, input.approved ? "approve_discovery" : "reject_discovery");
-    }
+    const actorUserId = this.requireActorUserId(input.actorUserId, "confirm discovery");
+    await this.authorization.assertCanApplyManualTransition(actorUserId, workItem);
 
     if (input.approved) {
       const jiraIssueKey = input.jiraIssueKey?.trim() || workItem.jiraIssueKey;
@@ -228,7 +227,7 @@ export class WorkItemService {
         originThreadTs: workItem.originThreadTs,
         jiraIssueKey,
         sourceWorkItemId: workItem.id,
-        createdByUserId: input.actorUserId ?? workItem.createdByUserId,
+        createdByUserId: actorUserId,
         flags: [],
       });
 
@@ -240,13 +239,13 @@ export class WorkItemService {
       await this.events.append({
         workItemId: input.workItemId,
         eventType: "work_item.state_changed",
-        actorUserId: input.actorUserId,
+        actorUserId,
         payload: { state: updated.state, approved: input.approved, jiraIssueKey },
       });
       await this.events.append({
         workItemId: delivery.id,
         eventType: "work_item.created",
-        actorUserId: input.actorUserId,
+        actorUserId,
         payload: { workflow: delivery.workflow, sourceWorkItemId: workItem.id, jiraIssueKey },
       });
 
@@ -263,7 +262,7 @@ export class WorkItemService {
     await this.events.append({
       workItemId: input.workItemId,
       eventType: "work_item.state_changed",
-      actorUserId: input.actorUserId,
+      actorUserId,
       payload: { state: updated.state, approved: input.approved },
     });
 
@@ -374,9 +373,8 @@ export class WorkItemService {
     hasActiveProcessing?: (workItem: WorkItemRecord) => Promise<boolean>;
   }): Promise<WorkItemRecord> {
     const workItem = await this.requireWorkItem(input.workItemId);
-    if (input.actorUserId) {
-      await this.authorization.assertCanOverrideWorkItem(input.actorUserId);
-    }
+    const actorUserId = this.requireActorUserId(input.actorUserId, "override work item state");
+    await this.authorization.assertCanOverrideWorkItem(actorUserId);
     if (input.hasActiveProcessing && await input.hasActiveProcessing(workItem)) {
       throw new Error("Cannot override state while work item processing is active");
     }
@@ -384,7 +382,7 @@ export class WorkItemService {
     await this.events.append({
       workItemId: workItem.id,
       eventType: "override.requested",
-      actorUserId: input.actorUserId,
+      actorUserId,
       payload: {
         requestedState: input.state,
         requestedSubstate: input.substate,
@@ -399,7 +397,7 @@ export class WorkItemService {
     await this.events.append({
       workItemId: workItem.id,
       eventType: "override.applied",
-      actorUserId: input.actorUserId,
+      actorUserId,
       payload: {
         previousState: workItem.state,
         previousSubstate: workItem.substate,
@@ -422,9 +420,8 @@ export class WorkItemService {
     cancelRun: (runId: string) => Promise<boolean>;
   }): Promise<{ workItem: WorkItemRecord; stoppedRunIds: string[]; alreadyIdleRunIds: string[]; failedRunIds: string[] }> {
     const workItem = await this.requireWorkItem(input.workItemId);
-    if (input.actorUserId) {
-      await this.authorization.assertCanApplyManualTransition(input.actorUserId, workItem, "stop_processing");
-    }
+    const actorUserId = this.requireActorUserId(input.actorUserId, "stop work item processing");
+    await this.authorization.assertCanApplyManualTransition(actorUserId, workItem);
     const runs = await this.runs.listRunsForWorkItem(workItem.id);
 
     const stoppedRunIds: string[] = [];
@@ -448,7 +445,7 @@ export class WorkItemService {
     await this.events.append({
       workItemId: workItem.id,
       eventType: "processing.stop_requested",
-      actorUserId: input.actorUserId,
+      actorUserId,
       payload: { stoppedRunIds, alreadyIdleRunIds, failedRunIds },
     });
 
@@ -475,6 +472,13 @@ export class WorkItemService {
     const workItem = await this.workItems.getWorkItem(id);
     if (!workItem) throw new Error(`WorkItem not found: ${id}`);
     return workItem;
+  }
+
+  private requireActorUserId(actorUserId: string | undefined, action: string): string {
+    if (!actorUserId) {
+      throw new Error(`actorUserId is required to ${action}`);
+    }
+    return actorUserId;
   }
 }
 
