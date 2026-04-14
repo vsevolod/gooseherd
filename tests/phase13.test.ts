@@ -4,6 +4,7 @@
 
 import assert from "node:assert/strict";
 import { describe, test, mock } from "node:test";
+import { createServer } from "node:http";
 import { mkdtemp, rm, writeFile, mkdir } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -226,6 +227,38 @@ describe("setup wizard helpers", () => {
     assert.match(html, /function renderPrefillSummary/);
     assert.match(html, /function applySetupPrefill/);
     assert.match(html, /applySetupPrefill\(data\.prefill\)/);
+  });
+
+  test("wizardHtml promotes Skip buttons when the current step has its required fields", () => {
+    const html = wizardHtml("Gooseherd");
+    assert.match(html, /id="gh-skip-btn"/);
+    assert.match(html, /id="llm-skip-btn"/);
+    assert.match(html, /id="slack-skip-btn"/);
+    assert.match(html, /function hasGithubRequiredFields\(\)/);
+    assert.match(html, /function hasLlmRequiredFields\(\)/);
+    assert.match(html, /function hasSlackRequiredFields\(\)/);
+    assert.match(html, /function hasGithubReadyForSkip\(\)/);
+    assert.match(html, /function hasLlmReadyForSkip\(\)/);
+    assert.match(html, /function hasSlackReadyForSkip\(\)/);
+    assert.match(html, /function syncSkipButtons\(\)/);
+    assert.match(html, /const prefillState = \{/);
+    assert.match(html, /token:\s*false/);
+    assert.match(html, /apiKey:\s*false/);
+    assert.match(html, /botToken:\s*false/);
+    assert.match(html, /appToken:\s*false/);
+    assert.match(html, /document\.getElementById\('gh-skip-btn'\)\?\.classList\.toggle\('ready', hasGithubReadyForSkip\(\) \|\| state\.github\)/);
+    assert.match(html, /document\.getElementById\('llm-skip-btn'\)\?\.classList\.toggle\('ready', hasLlmReadyForSkip\(\) \|\| state\.llm\)/);
+    assert.match(html, /document\.getElementById\('slack-skip-btn'\)\?\.classList\.toggle\('ready', hasSlackReadyForSkip\(\) \|\| state\.slack\)/);
+    assert.match(html, /prefillState\.github\.token = hasPrefillValue\(prefill\.github\?\.token\)/);
+    assert.match(html, /prefillState\.llm\.apiKey = hasPrefillValue\(prefill\.llm\?\.apiKey\)/);
+    assert.match(html, /prefillState\.slack\.botToken = hasPrefillValue\(prefill\.slack\?\.botToken\)/);
+    assert.match(html, /prefillState\.slack\.appToken = hasPrefillValue\(prefill\.slack\?\.appToken\)/);
+  });
+
+  test("wizardHtml gives ready Skip buttons a distinct visual treatment", () => {
+    const html = wizardHtml("Gooseherd");
+    assert.match(html, /\.btn-skip\.ready \{ background: rgba\(37, 99, 235, 0\.2\); color: #dbeafe; border-color: #3b82f6; box-shadow: inset 0 0 0 1px rgba\(96, 165, 250, 0\.25\); \}/);
+    assert.match(html, /\.btn-skip\.ready:hover \{ background: rgba\(37, 99, 235, 0\.32\); \}/);
   });
 
   // ── validateGithubToken ──
@@ -651,6 +684,32 @@ describe("ObserverDaemon tokenGetter", () => {
     assert.ok(daemon, "Daemon should instantiate without tokenGetter");
 
     await testDb.cleanup();
+  });
+
+  test("ObserverDaemon does not bind observerWebhookPort when dashboard server is enabled", async (t) => {
+    const mod = await import("../src/observer/daemon.js");
+    const ObserverDaemon = mod.ObserverDaemon;
+    const testDb = await createTestDb();
+
+    const occupied = createServer();
+    await new Promise<void>((resolve) => occupied.listen(0, "127.0.0.1", () => resolve()));
+    const occupiedPort = (occupied.address() as { port: number }).port;
+
+    const mockConfig = makeMinimalConfig({
+      dashboardEnabled: true,
+      observerGithubWebhookSecret: "github-secret",
+      observerWebhookPort: occupiedPort,
+    }) as any;
+    mockConfig.dataDir = os.tmpdir();
+
+    const daemon = new ObserverDaemon(mockConfig, { onRunTerminal: () => {} } as any, undefined, undefined, undefined, testDb.db);
+    t.after(async () => {
+      occupied.close();
+      await daemon.stop();
+      await testDb.cleanup();
+    });
+
+    await daemon.start();
   });
 });
 

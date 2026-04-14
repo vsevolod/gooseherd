@@ -102,6 +102,8 @@ export function wizardHtml(appName: string, reconfig = false): string {
     .btn-secondary:hover { background: #334155; }
     .btn-skip { background: transparent; color: #64748b; border: 1px solid #22314f; }
     .btn-skip:hover { background: #1e293b; }
+    .btn-skip.ready { background: rgba(37, 99, 235, 0.2); color: #dbeafe; border-color: #3b82f6; box-shadow: inset 0 0 0 1px rgba(96, 165, 250, 0.25); }
+    .btn-skip.ready:hover { background: rgba(37, 99, 235, 0.32); }
     .btn-validate { background: #0f766e; color: #fff; flex: none; width: auto; padding: 10px 18px; }
     .btn-validate:hover { background: #115e59; }
     .error { color: #ef4444; font-size: 13px; margin-bottom: 12px; min-height: 18px; }
@@ -205,7 +207,7 @@ export function wizardHtml(appName: string, reconfig = false): string {
     </div>
 
     <div class="btn-row">
-      <button class="btn btn-skip" onclick="goStep(2)">Skip</button>
+      <button class="btn btn-skip" id="gh-skip-btn" onclick="goStep(2)">Skip</button>
       <button class="btn btn-validate" id="gh-validate-btn" onclick="validateGithub()">Validate</button>
       <button class="btn btn-primary" onclick="saveGithub()">Save & Continue</button>
     </div>
@@ -234,7 +236,7 @@ export function wizardHtml(appName: string, reconfig = false): string {
 
     <div class="btn-row">
       <button class="btn btn-secondary" onclick="goStep(1)">Back</button>
-      <button class="btn btn-skip" onclick="goStep(3)">Skip</button>
+      <button class="btn btn-skip" id="llm-skip-btn" onclick="goStep(3)">Skip</button>
       <button class="btn btn-validate" id="llm-validate-btn" onclick="validateLlm()">Validate</button>
       <button class="btn btn-primary" onclick="saveLlm()">Save & Continue</button>
     </div>
@@ -288,7 +290,7 @@ export function wizardHtml(appName: string, reconfig = false): string {
 
     <div class="btn-row">
       <button class="btn btn-secondary" onclick="goStep(2)">Back</button>
-      <button class="btn btn-skip" onclick="goStep(4)">Skip</button>
+      <button class="btn btn-skip" id="slack-skip-btn" onclick="goStep(4)">Skip</button>
       <button class="btn btn-validate" id="slack-validate-btn" onclick="validateSlack()">Validate</button>
       <button class="btn btn-primary" onclick="saveSlack()">Save & Continue</button>
     </div>
@@ -310,6 +312,11 @@ export function wizardHtml(appName: string, reconfig = false): string {
 <script>
 let currentStep = 0;
 const state = { password: false, github: false, llm: false, slack: false };
+const prefillState = {
+  github: { token: false, appId: false, installationId: false, privateKey: false },
+  llm: { apiKey: false },
+  slack: { botToken: false, appToken: false }
+};
 
 function goStep(n) {
   document.querySelectorAll('.step').forEach(s => s.classList.remove('active'));
@@ -320,6 +327,7 @@ function goStep(n) {
     if (i === n) d.classList.add('active');
   });
   currentStep = n;
+  syncSkipButtons();
   if (n === 4) renderReview();
 }
 
@@ -327,6 +335,54 @@ function toggleGhMode() {
   const mode = document.querySelector('input[name="gh-mode"]:checked').value;
   document.getElementById('gh-pat-fields').classList.toggle('hidden', mode !== 'pat');
   document.getElementById('gh-app-fields').classList.toggle('hidden', mode !== 'app');
+  syncSkipButtons();
+}
+
+function hasValue(id) {
+  const el = document.getElementById(id);
+  return !!el && typeof el.value === 'string' && el.value.trim().length > 0;
+}
+
+function hasPrefillValue(field) {
+  return !!field && !!field.source && field.source !== 'none';
+}
+
+function hasGithubRequiredFields() {
+  const mode = document.querySelector('input[name="gh-mode"]:checked')?.value;
+  if (mode === 'app') {
+    return hasValue('gh-app-id') && hasValue('gh-install-id') && hasValue('gh-key');
+  }
+  return hasValue('gh-token');
+}
+
+function hasLlmRequiredFields() {
+  return hasValue('llm-key');
+}
+
+function hasSlackRequiredFields() {
+  return hasValue('slack-bot-token') && hasValue('slack-app-token');
+}
+
+function hasGithubReadyForSkip() {
+  const mode = document.querySelector('input[name="gh-mode"]:checked')?.value;
+  if (mode === 'app') {
+    return hasGithubRequiredFields() || (prefillState.github.appId && prefillState.github.installationId && prefillState.github.privateKey);
+  }
+  return hasGithubRequiredFields() || prefillState.github.token;
+}
+
+function hasLlmReadyForSkip() {
+  return hasLlmRequiredFields() || prefillState.llm.apiKey;
+}
+
+function hasSlackReadyForSkip() {
+  return hasSlackRequiredFields() || (prefillState.slack.botToken && prefillState.slack.appToken);
+}
+
+function syncSkipButtons() {
+  document.getElementById('gh-skip-btn')?.classList.toggle('ready', hasGithubReadyForSkip() || state.github);
+  document.getElementById('llm-skip-btn')?.classList.toggle('ready', hasLlmReadyForSkip() || state.llm);
+  document.getElementById('slack-skip-btn')?.classList.toggle('ready', hasSlackReadyForSkip() || state.slack);
 }
 
 function sourceLabel(source) {
@@ -366,6 +422,14 @@ function renderPrefillSummary(containerId, rows) {
 function applySetupPrefill(prefill) {
   if (!prefill) return;
 
+  prefillState.github.token = hasPrefillValue(prefill.github?.token);
+  prefillState.github.appId = hasPrefillValue(prefill.github?.appId);
+  prefillState.github.installationId = hasPrefillValue(prefill.github?.installationId);
+  prefillState.github.privateKey = hasPrefillValue(prefill.github?.privateKey);
+  prefillState.llm.apiKey = hasPrefillValue(prefill.llm?.apiKey);
+  prefillState.slack.botToken = hasPrefillValue(prefill.slack?.botToken);
+  prefillState.slack.appToken = hasPrefillValue(prefill.slack?.appToken);
+
   setGitHubAuthMode(prefill.github?.authMode);
   setInputValue('gh-owner', prefill.github?.defaultOwner);
   setInputValue('gh-app-id', prefill.github?.appId);
@@ -401,6 +465,8 @@ function applySetupPrefill(prefill) {
     { label: 'Client secret', source: prefill.slack?.clientSecret?.source },
     { label: 'Auth redirect URI', source: prefill.slack?.authRedirectUri?.source, value: prefill.slack?.authRedirectUri?.value },
   ]);
+
+  syncSkipButtons();
 }
 
 async function post(url, body) {
@@ -483,6 +549,7 @@ async function saveGithub() {
     return;
   }
   state.github = true;
+  syncSkipButtons();
   goStep(2);
 }
 
@@ -530,6 +597,7 @@ async function saveLlm() {
     return;
   }
   state.llm = true;
+  syncSkipButtons();
   goStep(3); // → Slack step
 }
 
@@ -582,6 +650,7 @@ async function saveSlack() {
     return;
   }
   state.slack = true;
+  syncSkipButtons();
   goStep(4);
 }
 
@@ -617,6 +686,11 @@ async function finishSetup() {
 }
 
 // Check initial status
+['gh-token', 'gh-owner', 'gh-app-id', 'gh-install-id', 'gh-key', 'llm-key', 'llm-model', 'slack-bot-token', 'slack-app-token', 'slack-signing-secret', 'slack-command', 'slack-client-id', 'slack-client-secret', 'slack-auth-redirect-uri']
+  .forEach(id => document.getElementById(id)?.addEventListener('input', syncSkipButtons));
+document.querySelectorAll('input[name="gh-mode"]').forEach(el => el.addEventListener('change', syncSkipButtons));
+syncSkipButtons();
+
 fetch('/api/setup/status', { credentials: 'same-origin' })
   .then(r => r.json())
   .then(data => {
@@ -625,6 +699,7 @@ fetch('/api/setup/status', { credentials: 'same-origin' })
     if (data.hasLlm) state.llm = true;
     if (data.hasSlack) state.slack = true;
     applySetupPrefill(data.prefill);
+    syncSkipButtons();
     ${reconfig ? "// In reconfig mode, start from step 1 (skip password if already set)\n    if (state.password) goStep(1);" : ""}
   })
   .catch(() => {});
