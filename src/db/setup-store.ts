@@ -101,9 +101,6 @@ export class SetupStore {
   // In-memory cache to avoid 2 DB queries per HTTP request
   private cachedComplete: boolean | undefined;
   private cachedPasswordHash: string | undefined | null; // null = queried, not set
-  private legacyConfigMigrationDone = false;
-  private legacyConfigMigrationPromise: Promise<void> | undefined;
-
   constructor(db: Database, encryptionKey?: string) {
     this.db = db;
     this.encryptionKey = encryptionKey;
@@ -119,7 +116,6 @@ export class SetupStore {
 
   /** Get current setup status for the wizard UI. */
   async getStatus(): Promise<SetupStatus> {
-    await this.ensureLegacyConfigsMigrated();
     const rows = await this.db.select().from(setup).where(eq(setup.id, 1));
     const row = rows[0];
     const sections = await this.db
@@ -145,7 +141,6 @@ export class SetupStore {
   }
 
   async getWizardState(): Promise<SetupWizardState> {
-    await this.ensureLegacyConfigsMigrated();
     const status = await this.getStatus();
     const github = await this.readConfigSection("github");
     const llm = await this.readConfigSection("llm");
@@ -294,7 +289,6 @@ export class SetupStore {
   async applyToEnv(): Promise<void> {
     const row = await this.getSetupRow();
     if (!row || !row.completedAt) return;
-    await this.ensureLegacyConfigsMigrated();
 
     const github = await this.readConfigSection("github");
     if (github && !this.shouldUseEnvOverride("github", github.overrideFromEnv)) {
@@ -337,60 +331,6 @@ export class SetupStore {
       setEnvValue("SLACK_CLIENT_ID", stringOrUndefined(slack.config.clientId));
       setEnvValue("SLACK_CLIENT_SECRET", stringOrUndefined(slack.secrets.clientSecret));
       setEnvValue("SLACK_AUTH_REDIRECT_URI", stringOrUndefined(slack.config.authRedirectUri));
-    }
-  }
-
-  private async ensureLegacyConfigsMigrated(): Promise<void> {
-    if (this.legacyConfigMigrationDone) return;
-    if (this.legacyConfigMigrationPromise) {
-      await this.legacyConfigMigrationPromise;
-      return;
-    }
-
-    this.legacyConfigMigrationPromise = this.migrateLegacyConfigs();
-    try {
-      await this.legacyConfigMigrationPromise;
-      this.legacyConfigMigrationDone = true;
-    } finally {
-      this.legacyConfigMigrationPromise = undefined;
-    }
-  }
-
-  private async migrateLegacyConfigs(): Promise<void> {
-    const row = await this.getSetupRow();
-    if (!row) return;
-
-    const existingRows = await this.db
-      .select({ section: configSections.section })
-      .from(configSections);
-    const existing = new Set(existingRows.map((entry) => entry.section));
-    const key = await this.getEncryptionKey();
-
-    if (!existing.has("github") && (row.githubConfig || row.githubTokenEnc || row.githubAppKeyEnc)) {
-      const githubConfig = (row.githubConfig as Record<string, unknown> | null) ?? {};
-      const githubSecrets: Record<string, unknown> = {};
-      if (row.githubTokenEnc) githubSecrets.token = decrypt(row.githubTokenEnc, key);
-      if (row.githubAppKeyEnc) githubSecrets.privateKey = decrypt(row.githubAppKeyEnc, key);
-      await this.upsertConfigSection("github", githubConfig, githubSecrets);
-    }
-
-    if (!existing.has("llm") && (row.llmConfig || row.llmApiKeyEnc)) {
-      const llmConfig = (row.llmConfig as Record<string, unknown> | null) ?? {};
-      const llmSecrets: Record<string, unknown> = {};
-      if (row.llmApiKeyEnc) llmSecrets.apiKey = decrypt(row.llmApiKeyEnc, key);
-      await this.upsertConfigSection("llm", llmConfig, llmSecrets);
-    }
-
-    if (!existing.has("slack") && (row.slackConfig || row.slackBotTokenEnc || row.slackAppTokenEnc)) {
-      const legacySlackConfig = (row.slackConfig as Record<string, unknown> | null) ?? {};
-      const slackConfig: Record<string, unknown> = {
-        commandName: legacySlackConfig.commandName,
-      };
-      const slackSecrets: Record<string, unknown> = {};
-      if (row.slackBotTokenEnc) slackSecrets.botToken = decrypt(row.slackBotTokenEnc, key);
-      if (row.slackAppTokenEnc) slackSecrets.appToken = decrypt(row.slackAppTokenEnc, key);
-      if (legacySlackConfig.signingSecret) slackSecrets.signingSecret = String(legacySlackConfig.signingSecret);
-      await this.upsertConfigSection("slack", slackConfig, slackSecrets);
     }
   }
 

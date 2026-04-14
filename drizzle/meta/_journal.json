@@ -71,6 +71,13 @@
       "when": 1779100000000,
       "tag": "0009_dashboard_auth_slack",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1779150000000,
+      "tag": "0010_remove_legacy_setup_storage",
+      "breakpoints": true
     }
   ]
 }
