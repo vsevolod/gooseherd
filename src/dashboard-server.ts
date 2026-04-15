@@ -26,13 +26,14 @@ import {
 } from "./dashboard/auth.js";
 import { DashboardAuthSessionStore } from "./dashboard/auth-session-store.js";
 import {
+  isDashboardAdminPrincipal,
   requireDashboardUserActor,
   resolveDashboardActorPrincipal,
   type DashboardActorPrincipal,
   type DashboardUserActorPrincipal,
 } from "./dashboard/actor-principal.js";
 import { SlackAuthFlow, isSlackAuthConfigured } from "./dashboard/slack-auth.js";
-import { resolveMappedSlackTeams, syncSlackUserGroupMemberships } from "./dashboard/team-membership-sync.js";
+import { syncSlackUserGroupMemberships } from "./dashboard/team-membership-sync.js";
 import type { PipelineStore } from "./pipeline/pipeline-store.js";
 import type { LearningStore } from "./observer/learning-store.js";
 import { SetupStore } from "./db/setup-store.js";
@@ -41,6 +42,7 @@ import { users } from "./db/schema.js";
 import { wizardHtml } from "./dashboard/wizard-html.js";
 import { agentProfileWizardHtml } from "./dashboard/agent-profile-wizard-html.js";
 import { agentProfileListHtml } from "./dashboard/agent-profile-list-html.js";
+import { usersHtml } from "./dashboard/users-html.js";
 import { GitHubService } from "./github.js";
 import type { EvalStore } from "./eval/eval-store.js";
 import { loadScenariosFromDir } from "./eval/scenario-loader.js";
@@ -58,6 +60,7 @@ import { routeControlPlaneRequest } from "./runtime/control-plane-router.js";
 import type { ArtifactStore } from "./runtime/artifact-store.js";
 import { formatSandboxRuntimeLabel } from "./runtime/runtime-mode.js";
 import type { ReviewRequestRecord, WorkItemEventRecord, WorkItemRecord } from "./work-items/types.js";
+import { UserDirectoryService } from "./user-directory/service.js";
 
 /** Lean interface — dashboard only reads observer state, never mutates it. */
 export interface DashboardObserver {
@@ -136,6 +139,13 @@ export interface DashboardWorkItemsSource {
 function requireDashboardActor(principal: DashboardActorPrincipal | undefined): DashboardActorPrincipal {
   if (!principal) {
     throw new Error("Dashboard session actor is required");
+  }
+  return principal;
+}
+
+function requireDashboardAdminActor(principal: DashboardActorPrincipal | undefined) {
+  if (!isDashboardAdminPrincipal(principal)) {
+    throw new Error("Admin dashboard session is required");
   }
   return principal;
 }
@@ -504,6 +514,7 @@ export function startDashboardServer(
   let githubRepositoriesCache: CachedGitHubRepositories | undefined;
   const authSessionStore = db ? new DashboardAuthSessionStore(db) : undefined;
   const slackAuthFlow = new SlackAuthFlow(config);
+  const userDirectory = db ? new UserDirectoryService(db) : undefined;
 
   const server = createServer(async (req, res) => {
     try {
@@ -566,6 +577,17 @@ export function startDashboardServer(
         return;
       }
 
+      if (req.method === "GET" && pathname === "/users") {
+        try {
+          requireDashboardAdminActor(actorPrincipal);
+        } catch (error) {
+          sendJson(res, 403, { error: error instanceof Error ? error.message : "Forbidden" });
+          return;
+        }
+        sendText(res, 200, usersHtml(config.appName), "text/html");
+        return;
+      }
+
       if (req.method === "GET" && pathname === "/api/setup/status") {
         if (!setupStore) { sendJson(res, 501, { error: "Setup not available" }); return; }
         const status = await setupStore.getWizardState();
@@ -593,8 +615,7 @@ export function startDashboardServer(
         const hash = await setupStore.setPassword(password);
         // Set session cookie so subsequent wizard steps are authenticated
         const sessionValue = hashToken(hash);
-        const secureSuffix = config.dashboardPublicUrl?.startsWith("https") ? "; Secure" : "";
-        res.setHeader("set-cookie", `gooseherd-session=${sessionValue}; HttpOnly; SameSite=Strict; Path=/${secureSuffix}`);
+        res.setHeader("set-cookie", buildDashboardSessionCookie(sessionValue, config));
         sendJson(res, 200, { ok: true });
         return;
       }
@@ -859,13 +880,6 @@ export function startDashboardServer(
               res.end();
               return;
             }
-            const matchedTeamIds = await resolveMappedSlackTeams(db, config.slackBotToken, identity.slackUserId);
-            if (matchedTeamIds.length === 0) {
-              res.statusCode = 302;
-              res.setHeader("location", "/login?error=Your%20Slack%20account%20is%20not%20assigned%20to%20any%20Gooseherd%20teams%20yet.");
-              res.end();
-              return;
-            }
 
             const inserted = await db.transaction(async (tx) => {
               const createdUser = {
@@ -952,9 +966,100 @@ export function startDashboardServer(
             agentCommandTemplate: config.agentCommandTemplate,
             activeAgentProfile: config.activeAgentProfile,
             agentProfiles: profiles,
+            permissions: {
+              manageUsers: isDashboardAdminPrincipal(actorPrincipal),
+            },
           },
           stats,
         });
+        return;
+      }
+
+      if (req.method === "GET" && pathname === "/api/users") {
+        if (!userDirectory) {
+          sendJson(res, 501, { error: "User directory is unavailable" });
+          return;
+        }
+        try {
+          requireDashboardAdminActor(actorPrincipal);
+        } catch (error) {
+          sendJson(res, 403, { error: error instanceof Error ? error.message : "Forbidden" });
+          return;
+        }
+        const listedUsers = await userDirectory.listUsers();
+        sendJson(res, 200, { users: listedUsers });
+        return;
+      }
+
+      if (req.method === "POST" && pathname === "/api/users") {
+        if (!userDirectory) {
+          sendJson(res, 501, { error: "User directory is unavailable" });
+          return;
+        }
+        try {
+          requireDashboardAdminActor(actorPrincipal);
+        } catch (error) {
+          sendJson(res, 403, { error: error instanceof Error ? error.message : "Forbidden" });
+          return;
+        }
+        const raw = await readBody(req);
+        if (raw === null) { sendJson(res, 413, { error: "Request body too large" }); return; }
+        let parsed: {
+          displayName?: string;
+          slackUserId?: string | null;
+          githubLogin?: string | null;
+          jiraAccountId?: string | null;
+          isActive?: boolean;
+        } = {};
+        try {
+          parsed = raw ? JSON.parse(raw) as typeof parsed : {};
+        } catch {
+          sendJson(res, 400, { error: "Invalid JSON body" });
+          return;
+        }
+        try {
+          const user = await userDirectory.createUser(parsed);
+          sendJson(res, 201, { user });
+        } catch (error) {
+          sendJson(res, 400, { error: error instanceof Error ? error.message : "Failed to create user" });
+        }
+        return;
+      }
+
+      const usersMatch = pathname.match(/^\/api\/users\/([^/]+)$/);
+      if (req.method === "PATCH" && usersMatch) {
+        if (!userDirectory) {
+          sendJson(res, 501, { error: "User directory is unavailable" });
+          return;
+        }
+        try {
+          requireDashboardAdminActor(actorPrincipal);
+        } catch (error) {
+          sendJson(res, 403, { error: error instanceof Error ? error.message : "Forbidden" });
+          return;
+        }
+        const raw = await readBody(req);
+        if (raw === null) { sendJson(res, 413, { error: "Request body too large" }); return; }
+        let parsed: {
+          displayName?: string;
+          slackUserId?: string | null;
+          githubLogin?: string | null;
+          jiraAccountId?: string | null;
+          isActive?: boolean;
+        } = {};
+        try {
+          parsed = raw ? JSON.parse(raw) as typeof parsed : {};
+        } catch {
+          sendJson(res, 400, { error: "Invalid JSON body" });
+          return;
+        }
+        try {
+          const user = await userDirectory.updateUser(usersMatch[1]!, parsed);
+          sendJson(res, 200, { user });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Failed to update user";
+          sendJson(res, /User not found:/i.test(message) ? 404 : 400, { error: message });
+        }
         return;
       }
 

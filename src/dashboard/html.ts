@@ -4270,10 +4270,14 @@ export function dashboardHtml(config: AppConfig): string {
         var data = await fetchJson('/api/settings');
         var c = data.config || {};
         var s = data.stats || {};
+        var canManageUsers = Boolean(c.permissions && c.permissions.manageUsers);
         var sandboxRuntimeLabel = c.sandboxRuntimeLabel || c.sandboxRuntime || '';
         var sandboxStatus = c.sandboxStatus && c.sandboxStatus.enabled === false
           ? ' <span class="settings-badge off">Disabled</span>'
           : ' ' + settingsBadge(Boolean(c.sandboxStatus && c.sandboxStatus.enabled));
+        var usersLink = canManageUsers
+          ? '<a href="/users" class="top-btn" style="padding:6px 12px;">Users</a>'
+          : '';
         el.settingsBody.innerHTML =
           '<div class="settings-section"><h3>Configuration</h3>' +
           '<div class="settings-row"><span class="label">App Name</span><span class="value compact">' + esc(c.appName || '') + '</span></div>' +
@@ -4283,7 +4287,10 @@ export function dashboardHtml(config: AppConfig): string {
           '<div class="settings-row stacked">' +
           '<div style="display:flex; justify-content:space-between; align-items:center; gap:12px; margin-bottom:8px;">' +
           '<span class="label">Agent Command</span>' +
+          '<div style="display:flex; gap:8px; align-items:center;">' +
+          usersLink +
           '<a href="/agent-profiles" class="top-btn" style="padding:6px 12px;">Edit</a>' +
+          '</div>' +
           '</div>' +
           '<span class="value settings-code" title="' + esc(c.agentCommandTemplate || '') + '">' + esc(c.agentCommandTemplate || '') + '</span></div>' +
           '</div>' +
