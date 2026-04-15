@@ -2,7 +2,7 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { AppConfig } from "../config.js";
 import { verifyPassword } from "../db/setup-store.js";
-import type { DashboardAuthSessionStore } from "./auth-session-store.js";
+import type { DashboardAuthSessionStore, DashboardSessionRecord } from "./auth-session-store.js";
 import { escapeHtml } from "./html.js";
 
 function sendJson(res: ServerResponse, status: number, payload: unknown): void {
@@ -36,6 +36,10 @@ export function safeTokenCompare(a: string, b: string): boolean {
   return timingSafeEqual(aBuf, bBuf);
 }
 
+const dashboardSessionCache = new WeakMap<IncomingMessage, DashboardSessionRecord | null>();
+
+export type DashboardSessionLookup = Pick<DashboardAuthSessionStore, "getSessionByToken">;
+
 export interface AuthOptions {
   dashboardToken?: string;
   passwordHash?: string;
@@ -50,6 +54,28 @@ const PUBLIC_AUTH_PATHS = new Set([
   "/auth/slack/signup",
   "/auth/slack/callback",
 ]);
+
+export async function getDashboardSession(
+  req: IncomingMessage,
+  sessionStore?: DashboardSessionLookup,
+): Promise<DashboardSessionRecord | undefined> {
+  if (!sessionStore) return undefined;
+
+  if (dashboardSessionCache.has(req)) {
+    return dashboardSessionCache.get(req) ?? undefined;
+  }
+
+  const cookies = parseCookies(req);
+  const sessionToken = cookies["gooseherd-session"];
+  if (!sessionToken) {
+    dashboardSessionCache.set(req, null);
+    return undefined;
+  }
+
+  const session = await sessionStore.getSessionByToken(sessionToken);
+  dashboardSessionCache.set(req, session ?? null);
+  return session;
+}
 
 export async function checkAuth(
   req: IncomingMessage,
@@ -84,12 +110,8 @@ export async function checkAuth(
     return false;
   }
 
-  const cookies = parseCookies(req);
-  const sessionToken = cookies["gooseherd-session"];
-  if (sessionToken && opts.sessionStore) {
-    const session = await opts.sessionStore.getSessionByToken(sessionToken);
-    if (session) return true;
-  }
+  const session = await getDashboardSession(req, opts.sessionStore);
+  if (session) return true;
 
   if (opts.dashboardToken && pathname.startsWith("/api/")) {
     const authHeader = req.headers["authorization"] ?? "";
