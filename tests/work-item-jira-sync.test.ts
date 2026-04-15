@@ -87,7 +87,7 @@ test("jira sync creates discovery work item for automation-labeled issue", async
   assert.equal(stored?.workflow, "product_discovery");
 });
 
-test("jira sync creates delivery work item for ai_delivery-labeled issue and records event", async (t) => {
+test("jira sync creates delivery work item for ai:delivery-labeled issue and records event", async (t) => {
   const { cleanup, jiraSync, workItems, db, teamId } = await createJiraSyncFixture();
   t.after(cleanup);
 
@@ -95,7 +95,7 @@ test("jira sync creates delivery work item for ai_delivery-labeled issue and rec
     issueKey: "HBL-802",
     title: "Ship managed delivery",
     summary: "Ready for implementation",
-    labels: ["ai_delivery"],
+    labels: ["ai:delivery"],
     actorJiraAccountId: "JIRA_PM",
     ownerTeamId: teamId,
     originChannelId: "C_GROWTH",
@@ -112,4 +112,22 @@ test("jira sync creates delivery work item for ai_delivery-labeled issue and rec
 
   const events = await db.select().from(workItemEvents).where(eq(workItemEvents.workItemId, workItem!.id));
   assert.ok(events.some((event) => event.eventType === "jira.issue_created"));
+});
+
+test("jira sync ignores unrelated delivery label", async (t) => {
+  const { cleanup, jiraSync, teamId } = await createJiraSyncFixture();
+  t.after(cleanup);
+
+  const workItem = await jiraSync.handleWebhookPayload({
+    issueKey: "HBL-803",
+    title: "Unrelated label should not create delivery",
+    summary: "Ready for implementation",
+    labels: ["legacy-delivery"],
+    actorJiraAccountId: "JIRA_PM",
+    ownerTeamId: teamId,
+    originChannelId: "C_GROWTH",
+    originThreadTs: "1740000000.201",
+  });
+
+  assert.equal(workItem, undefined);
 });

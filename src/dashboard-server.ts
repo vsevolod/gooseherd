@@ -562,7 +562,7 @@ export function startDashboardServer(
 
       if (req.method === "GET" && pathname === "/api/setup/status") {
         if (!setupStore) { sendJson(res, 501, { error: "Setup not available" }); return; }
-        const status = await setupStore.getStatus();
+        const status = await setupStore.getWizardState();
         sendJson(res, 200, status);
         return;
       }

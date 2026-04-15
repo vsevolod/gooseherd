@@ -82,7 +82,7 @@ export class JiraWorkItemSync {
     this.service = new WorkItemService(db);
     this.events = new WorkItemEventsStore(db);
     this.discoveryLabels = (options.discoveryLabels ?? ["automation"]).map((label) => label.toLowerCase());
-    this.deliveryLabels = (options.deliveryLabels ?? ["ai_delivery"]).map((label) => label.toLowerCase());
+    this.deliveryLabels = (options.deliveryLabels ?? ["ai:delivery"]).map((label) => label.toLowerCase());
     this.resolveDiscoveryContext = options.resolveDiscoveryContext;
     this.resolveDeliveryContext = options.resolveDeliveryContext;
   }

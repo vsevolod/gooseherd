@@ -21,6 +21,8 @@ describe("setup wizard helpers", () => {
   let parseExistingEnv: typeof import("../scripts/setup.js").parseExistingEnv;
   let mergeEnvValues: typeof import("../scripts/setup.js").mergeEnvValues;
   let generateEnvContent: typeof import("../scripts/setup.js").generateEnvContent;
+  let wizardHtml: typeof import("../src/dashboard/wizard-html.js").wizardHtml;
+  let SetupStore: typeof import("../src/db/setup-store.js").SetupStore;
 
   test("load setup helpers", async () => {
     const mod = await import("../scripts/setup.js");
@@ -31,6 +33,8 @@ describe("setup wizard helpers", () => {
     parseExistingEnv = mod.parseExistingEnv;
     mergeEnvValues = mod.mergeEnvValues;
     generateEnvContent = mod.generateEnvContent;
+    wizardHtml = (await import("../src/dashboard/wizard-html.js")).wizardHtml;
+    SetupStore = (await import("../src/db/setup-store.js")).SetupStore;
   });
 
   // ── maskSecret ──
@@ -70,6 +74,158 @@ describe("setup wizard helpers", () => {
 
   test("validateSlackToken accepts valid xapp token", () => {
     assert.equal(validateSlackToken("xapp-1-A123-456-abcdef", "xapp-"), undefined);
+  });
+
+  test("wizardHtml includes Slack OpenID fields and serializes them in the Slack payload", () => {
+    const html = wizardHtml("Gooseherd");
+    assert.match(html, /id="slack-client-id"/);
+    assert.match(html, /id="slack-client-secret"/);
+    assert.match(html, /id="slack-auth-redirect-uri"/);
+    assert.match(html, /placeholder="\/auth\/slack\/callback"/);
+    assert.match(html, /clientId:\s*document\.getElementById\('slack-client-id'\)\.value \|\| undefined/);
+    assert.match(html, /clientSecret:\s*document\.getElementById\('slack-client-secret'\)\.value \|\| undefined/);
+    assert.match(html, /authRedirectUri:\s*document\.getElementById\('slack-auth-redirect-uri'\)\.value \|\| undefined/);
+  });
+
+  test("SetupStore.applyToEnv injects Slack OpenID values saved by the wizard", async () => {
+    const keys = [
+      "SLACK_BOT_TOKEN",
+      "SLACK_APP_TOKEN",
+      "SLACK_SIGNING_SECRET",
+      "SLACK_COMMAND_NAME",
+      "SLACK_CLIENT_ID",
+      "SLACK_CLIENT_SECRET",
+      "SLACK_AUTH_REDIRECT_URI",
+    ] as const;
+    const previous = new Map<string, string | undefined>(keys.map((key) => [key, process.env[key]]));
+    for (const key of keys) delete process.env[key];
+
+    const testDb = await createTestDb();
+    try {
+      const store = new SetupStore(testDb.db);
+      await store.setPassword("super-secret-password");
+      await store.saveSlack({
+        botToken: "xoxb-123",
+        appToken: "xapp-456",
+        signingSecret: "signing-secret",
+        commandName: "gooseherd",
+        clientId: "111.222",
+        clientSecret: "client-secret",
+        authRedirectUri: "/auth/slack/callback",
+      });
+      await store.markComplete();
+
+      await store.applyToEnv();
+
+      assert.equal(process.env.SLACK_BOT_TOKEN, "xoxb-123");
+      assert.equal(process.env.SLACK_APP_TOKEN, "xapp-456");
+      assert.equal(process.env.SLACK_SIGNING_SECRET, "signing-secret");
+      assert.equal(process.env.SLACK_COMMAND_NAME, "gooseherd");
+      assert.equal(process.env.SLACK_CLIENT_ID, "111.222");
+      assert.equal(process.env.SLACK_CLIENT_SECRET, "client-secret");
+      assert.equal(process.env.SLACK_AUTH_REDIRECT_URI, "/auth/slack/callback");
+    } finally {
+      for (const [key, value] of previous) {
+        if (value === undefined) {
+          delete process.env[key];
+        } else {
+          process.env[key] = value;
+        }
+      }
+      await testDb.cleanup();
+    }
+  });
+
+  test("SetupStore.getWizardState prefers ENV for sources and falls back to wizard values", async () => {
+    const keys = [
+      "GITHUB_DEFAULT_OWNER",
+      "GITHUB_APP_ID",
+      "OPENROUTER_API_KEY",
+      "DEFAULT_LLM_MODEL",
+      "SLACK_COMMAND_NAME",
+      "SLACK_CLIENT_ID",
+      "SLACK_CLIENT_SECRET",
+      "SLACK_AUTH_REDIRECT_URI",
+    ] as const;
+    const previous = new Map<string, string | undefined>(keys.map((key) => [key, process.env[key]]));
+
+    process.env.GITHUB_DEFAULT_OWNER = "env-org";
+    process.env.GITHUB_APP_ID = "12345";
+    process.env.OPENROUTER_API_KEY = "sk-or-env";
+    process.env.DEFAULT_LLM_MODEL = "openrouter/auto";
+    delete process.env.SLACK_COMMAND_NAME;
+    process.env.SLACK_CLIENT_ID = "env-client-id";
+    process.env.SLACK_CLIENT_SECRET = "env-client-secret";
+    process.env.SLACK_AUTH_REDIRECT_URI = "https://env.example.com/auth/slack/callback";
+
+    const testDb = await createTestDb();
+    try {
+      const store = new SetupStore(testDb.db);
+      await store.setPassword("super-secret-password");
+      await store.saveGitHub({
+        authMode: "app",
+        defaultOwner: "wizard-org",
+        appId: "99999",
+        installationId: "77777",
+        privateKey: "wizard-private-key",
+      });
+      await store.saveLLM({
+        provider: "anthropic",
+        apiKey: "wizard-api-key",
+        defaultModel: "claude-3-7-sonnet",
+      });
+      await store.saveSlack({
+        botToken: "xoxb-123",
+        appToken: "xapp-456",
+        commandName: "wizard-goose",
+        clientId: "wizard-client-id",
+        clientSecret: "wizard-client-secret",
+        authRedirectUri: "https://wizard.example.com/auth/slack/callback",
+      });
+
+      const state = await store.getWizardState();
+
+      assert.equal(state.prefill.github.defaultOwner.value, "env-org");
+      assert.equal(state.prefill.github.defaultOwner.source, "env");
+      assert.equal(state.prefill.github.appId.value, "12345");
+      assert.equal(state.prefill.github.appId.source, "env");
+      assert.equal(state.prefill.github.installationId.value, "77777");
+      assert.equal(state.prefill.github.installationId.source, "wizard");
+      assert.equal(state.prefill.github.privateKey.source, "wizard");
+
+      assert.equal(state.prefill.llm.provider.value, "openrouter");
+      assert.equal(state.prefill.llm.provider.source, "env");
+      assert.equal(state.prefill.llm.apiKey.source, "env");
+      assert.equal(state.prefill.llm.defaultModel.value, "openrouter/auto");
+      assert.equal(state.prefill.llm.defaultModel.source, "env");
+
+      assert.equal(state.prefill.slack.commandName.value, "wizard-goose");
+      assert.equal(state.prefill.slack.commandName.source, "wizard");
+      assert.equal(state.prefill.slack.clientId.value, "env-client-id");
+      assert.equal(state.prefill.slack.clientId.source, "env");
+      assert.equal(state.prefill.slack.clientSecret.source, "env");
+      assert.equal(state.prefill.slack.authRedirectUri.value, "https://env.example.com/auth/slack/callback");
+      assert.equal(state.prefill.slack.authRedirectUri.source, "env");
+    } finally {
+      for (const [key, value] of previous) {
+        if (value === undefined) {
+          delete process.env[key];
+        } else {
+          process.env[key] = value;
+        }
+      }
+      await testDb.cleanup();
+    }
+  });
+
+  test("wizardHtml includes setup prefill hooks for source-aware values", () => {
+    const html = wizardHtml("Gooseherd");
+    assert.match(html, /id="gh-prefill-summary"/);
+    assert.match(html, /id="llm-prefill-summary"/);
+    assert.match(html, /id="slack-prefill-summary"/);
+    assert.match(html, /function renderPrefillSummary/);
+    assert.match(html, /function applySetupPrefill/);
+    assert.match(html, /applySetupPrefill\(data\.prefill\)/);
   });
 
   // ── validateGithubToken ──

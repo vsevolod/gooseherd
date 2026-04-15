@@ -107,6 +107,19 @@ export function wizardHtml(appName: string, reconfig = false): string {
     .error { color: #ef4444; font-size: 13px; margin-bottom: 12px; min-height: 18px; }
     .success { color: #22c55e; font-size: 13px; margin-bottom: 12px; min-height: 18px; }
     .warn { color: #f59e0b; font-size: 13px; margin-bottom: 12px; }
+    .prefill-summary {
+      display: none;
+      margin-bottom: 16px;
+      padding: 10px 12px;
+      border: 1px solid #22314f;
+      border-radius: 10px;
+      background: #0a1325;
+      color: #cbd5e1;
+      font-size: 12px;
+      line-height: 1.6;
+    }
+    .prefill-summary.active { display: block; }
+    .prefill-summary strong { color: #e2e8f0; }
     .hidden { display: none; }
     .review-list { list-style: none; padding: 0; }
     .review-list li {
@@ -168,6 +181,7 @@ export function wizardHtml(appName: string, reconfig = false): string {
     <p>Configure how Gooseherd accesses your repositories.</p>
     <div class="error" id="gh-error"></div>
     <div class="success" id="gh-success"></div>
+    <div class="prefill-summary" id="gh-prefill-summary"></div>
 
     <div class="radio-group">
       <label><input type="radio" name="gh-mode" value="pat" checked onchange="toggleGhMode()"> Personal Access Token</label>
@@ -203,6 +217,7 @@ export function wizardHtml(appName: string, reconfig = false): string {
     <p>Choose your AI provider for orchestration and analysis.</p>
     <div class="error" id="llm-error"></div>
     <div class="success" id="llm-success"></div>
+    <div class="prefill-summary" id="llm-prefill-summary"></div>
 
     <label for="llm-provider">Provider</label>
     <select id="llm-provider">
@@ -231,6 +246,7 @@ export function wizardHtml(appName: string, reconfig = false): string {
     <p>Set up a Slack bot so Gooseherd can receive commands and post updates.</p>
     <div class="error" id="slack-error"></div>
     <div class="success" id="slack-success"></div>
+    <div class="prefill-summary" id="slack-prefill-summary"></div>
 
     <details style="margin-bottom:18px; color:#94a3b8; font-size:13px;">
       <summary style="cursor:pointer; color:#60a5fa; font-weight:600; margin-bottom:8px;">How to create a Slack App</summary>
@@ -244,6 +260,7 @@ export function wizardHtml(appName: string, reconfig = false): string {
         <li><strong>Event Subscriptions</strong> — go to <em>Event Subscriptions</em>, enable events, then under <em>Subscribe to bot events</em> add: <code>app_mention</code>, <code>message.channels</code>, <code>message.groups</code>, <code>message.im</code>.</li>
         <li><strong>Slash Command</strong> — go to <em>Slash Commands</em> and create one (e.g. <code>/gooseherd</code>). Set the request URL to anything — Socket Mode handles routing.</li>
         <li><strong>Install App</strong> — go to <em>Install App</em> and install to your workspace. Copy the <strong>Bot User OAuth Token</strong> (starts with <code>xoxb-</code>).</li>
+        <li><strong>Browser login</strong> — in <em>Basic Information</em>, copy the <strong>Client ID</strong> and <strong>Client Secret</strong>. In <em>OAuth & Permissions</em>, add a redirect URL like <code>/auth/slack/callback</code> under your dashboard base URL.</li>
         <li>Back in <em>Basic Information</em>, copy the <strong>Signing Secret</strong>.</li>
       </ol>
     </details>
@@ -259,6 +276,15 @@ export function wizardHtml(appName: string, reconfig = false): string {
 
     <label for="slack-command">Slash Command Name (optional)</label>
     <input type="text" id="slack-command" placeholder="/gooseherd" />
+
+    <label for="slack-client-id">Client ID (optional)</label>
+    <input type="text" id="slack-client-id" placeholder="111.222" />
+
+    <label for="slack-client-secret">Client Secret (optional)</label>
+    <input type="password" id="slack-client-secret" />
+
+    <label for="slack-auth-redirect-uri">Auth Redirect URI (optional)</label>
+    <input type="text" id="slack-auth-redirect-uri" placeholder="/auth/slack/callback" />
 
     <div class="btn-row">
       <button class="btn btn-secondary" onclick="goStep(2)">Back</button>
@@ -301,6 +327,80 @@ function toggleGhMode() {
   const mode = document.querySelector('input[name="gh-mode"]:checked').value;
   document.getElementById('gh-pat-fields').classList.toggle('hidden', mode !== 'pat');
   document.getElementById('gh-app-fields').classList.toggle('hidden', mode !== 'app');
+}
+
+function sourceLabel(source) {
+  return source === 'env' ? 'From ENV' : source === 'wizard' ? 'Saved in wizard' : '';
+}
+
+function setInputValue(id, field) {
+  if (!field || !field.value) return;
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.value = field.value;
+}
+
+function setGitHubAuthMode(field) {
+  if (!field || !field.value) return;
+  const radio = document.querySelector('input[name="gh-mode"][value="' + field.value + '"]');
+  if (!radio) return;
+  radio.checked = true;
+  toggleGhMode();
+}
+
+function renderPrefillSummary(containerId, rows) {
+  const el = document.getElementById(containerId);
+  const filtered = rows.filter(row => row.source && row.source !== 'none');
+  if (!el) return;
+  if (filtered.length === 0) {
+    el.classList.remove('active');
+    el.innerHTML = '';
+    return;
+  }
+  el.classList.add('active');
+  el.innerHTML = filtered.map(row =>
+    '<div><strong>' + row.label + ':</strong> ' + sourceLabel(row.source) + (row.value ? ' (' + row.value + ')' : '') + '</div>'
+  ).join('');
+}
+
+function applySetupPrefill(prefill) {
+  if (!prefill) return;
+
+  setGitHubAuthMode(prefill.github?.authMode);
+  setInputValue('gh-owner', prefill.github?.defaultOwner);
+  setInputValue('gh-app-id', prefill.github?.appId);
+  setInputValue('gh-install-id', prefill.github?.installationId);
+  renderPrefillSummary('gh-prefill-summary', [
+    { label: 'Auth mode', source: prefill.github?.authMode?.source, value: prefill.github?.authMode?.value },
+    { label: 'Default owner', source: prefill.github?.defaultOwner?.source, value: prefill.github?.defaultOwner?.value },
+    { label: 'Token', source: prefill.github?.token?.source },
+    { label: 'App ID', source: prefill.github?.appId?.source, value: prefill.github?.appId?.value },
+    { label: 'Installation ID', source: prefill.github?.installationId?.source, value: prefill.github?.installationId?.value },
+    { label: 'Private key', source: prefill.github?.privateKey?.source },
+  ]);
+
+  if (prefill.llm?.provider?.value) {
+    document.getElementById('llm-provider').value = prefill.llm.provider.value;
+  }
+  setInputValue('llm-model', prefill.llm?.defaultModel);
+  renderPrefillSummary('llm-prefill-summary', [
+    { label: 'Provider', source: prefill.llm?.provider?.source, value: prefill.llm?.provider?.value },
+    { label: 'API key', source: prefill.llm?.apiKey?.source },
+    { label: 'Default model', source: prefill.llm?.defaultModel?.source, value: prefill.llm?.defaultModel?.value },
+  ]);
+
+  setInputValue('slack-command', prefill.slack?.commandName);
+  setInputValue('slack-client-id', prefill.slack?.clientId);
+  setInputValue('slack-auth-redirect-uri', prefill.slack?.authRedirectUri);
+  renderPrefillSummary('slack-prefill-summary', [
+    { label: 'Bot token', source: prefill.slack?.botToken?.source },
+    { label: 'App token', source: prefill.slack?.appToken?.source },
+    { label: 'Signing secret', source: prefill.slack?.signingSecret?.source },
+    { label: 'Slash command', source: prefill.slack?.commandName?.source, value: prefill.slack?.commandName?.value },
+    { label: 'Client ID', source: prefill.slack?.clientId?.source, value: prefill.slack?.clientId?.value },
+    { label: 'Client secret', source: prefill.slack?.clientSecret?.source },
+    { label: 'Auth redirect URI', source: prefill.slack?.authRedirectUri?.source, value: prefill.slack?.authRedirectUri?.value },
+  ]);
 }
 
 async function post(url, body) {
@@ -438,7 +538,10 @@ function buildSlackBody() {
     botToken: document.getElementById('slack-bot-token').value,
     appToken: document.getElementById('slack-app-token').value,
     signingSecret: document.getElementById('slack-signing-secret').value || undefined,
-    commandName: document.getElementById('slack-command').value || undefined
+    commandName: document.getElementById('slack-command').value || undefined,
+    clientId: document.getElementById('slack-client-id').value || undefined,
+    clientSecret: document.getElementById('slack-client-secret').value || undefined,
+    authRedirectUri: document.getElementById('slack-auth-redirect-uri').value || undefined
   };
 }
 
@@ -521,6 +624,7 @@ fetch('/api/setup/status', { credentials: 'same-origin' })
     if (data.hasGithub) state.github = true;
     if (data.hasLlm) state.llm = true;
     if (data.hasSlack) state.slack = true;
+    applySetupPrefill(data.prefill);
     ${reconfig ? "// In reconfig mode, start from step 1 (skip password if already set)\n    if (state.password) goStep(1);" : ""}
   })
   .catch(() => {});
