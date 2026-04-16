@@ -59,7 +59,7 @@ import type { ControlPlaneStore } from "./runtime/control-plane-store.js";
 import { routeControlPlaneRequest } from "./runtime/control-plane-router.js";
 import type { ArtifactStore } from "./runtime/artifact-store.js";
 import { formatSandboxRuntimeLabel } from "./runtime/runtime-mode.js";
-import type { ReviewRequestRecord, WorkItemEventRecord, WorkItemRecord } from "./work-items/types.js";
+import type { ReviewRequestRecord, WorkItemEventRecord, WorkItemLinkedRunRecord, WorkItemRecord } from "./work-items/types.js";
 import { UserDirectoryService } from "./user-directory/service.js";
 
 /** Lean interface — dashboard only reads observer state, never mutates it. */
@@ -78,6 +78,7 @@ export interface DashboardConversationSource {
 export interface DashboardWorkItemsSource {
   listWorkItems(workflow?: string): Promise<WorkItemRecord[]>;
   getWorkItem(id: string): Promise<WorkItemRecord | undefined>;
+  listRunsForWorkItem(workItemId: string): Promise<WorkItemLinkedRunRecord[]>;
   listReviewRequestsForWorkItem(workItemId: string): Promise<ReviewRequestRecord[]>;
   listReviewRequestComments(reviewRequestId: string): Promise<Array<{
     id: number;
@@ -1749,6 +1750,12 @@ export function startDashboardServer(
         if (parts.length === 4 && parts[3] === "review-requests" && req.method === "GET") {
           const reviewRequests = await workItemsSource.listReviewRequestsForWorkItem(workItemId);
           sendJson(res, 200, { reviewRequests });
+          return;
+        }
+
+        if (parts.length === 4 && parts[3] === "runs" && req.method === "GET") {
+          const runs = await workItemsSource.listRunsForWorkItem(workItemId);
+          sendJson(res, 200, { runs });
           return;
         }
 

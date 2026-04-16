@@ -107,8 +107,10 @@ test("dashboard HTML includes work item board controls and data fetch hooks", ()
   assert.match(html, /\/api\/work-items\?workflow=/);
   assert.match(html, /id="board-detail"/);
   assert.match(html, /id="board-detail-reviews"/);
+  assert.match(html, /id="board-detail-runs"/);
   assert.match(html, /id="board-detail-events"/);
   assert.match(html, /review-requests\/' \+ encodeURIComponent\(request\.id\) \+ '\/comments/);
+  assert.match(html, /\/api\/work-items\/' \+ encodedId \+ '\/runs/);
   assert.match(html, /id="board-stop-processing"/);
   assert.match(html, /id="board-override-state"/);
   assert.match(html, /id="board-confirm-approve"/);

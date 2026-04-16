@@ -33,8 +33,9 @@ export class UserDirectoryService {
     const normalized = normalizeInput(input);
     try {
       return await this.db.transaction(async (tx) => {
-        const txStore = new UserDirectoryStore(tx as Database);
-        const txIdentity = new WorkItemIdentityStore(tx as Database);
+        const txDb = tx as unknown as Database;
+        const txStore = new UserDirectoryStore(txDb);
+        const txIdentity = new WorkItemIdentityStore(txDb);
         const created = await txStore.createUser(normalized);
         if (created.primaryTeamId) {
           await txIdentity.ensureUserTeamMembership(created.id, created.primaryTeamId, "primary_team", true);
@@ -50,8 +51,9 @@ export class UserDirectoryService {
     const normalized = normalizeInput(input);
     try {
       return await this.db.transaction(async (tx) => {
-        const txStore = new UserDirectoryStore(tx as Database);
-        const txIdentity = new WorkItemIdentityStore(tx as Database);
+        const txDb = tx as unknown as Database;
+        const txStore = new UserDirectoryStore(txDb);
+        const txIdentity = new WorkItemIdentityStore(txDb);
         const updated = await txStore.updateUser(id, normalized);
         if (updated.primaryTeamId) {
           await txIdentity.ensureUserTeamMembership(updated.id, updated.primaryTeamId, "primary_team");

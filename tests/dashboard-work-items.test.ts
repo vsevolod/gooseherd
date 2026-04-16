@@ -15,6 +15,7 @@ import { WorkItemStore } from "../src/work-items/store.js";
 import { ReviewRequestStore } from "../src/work-items/review-request-store.js";
 import { WorkItemEventsStore } from "../src/work-items/events-store.js";
 import { WorkItemService } from "../src/work-items/service.js";
+import type { NewRunInput } from "../src/types.js";
 
 function systemActor(userId: string) {
   return {
@@ -252,11 +253,13 @@ describe("Dashboard Work Item API routes", () => {
   async function createWorkItemsSource(): Promise<DashboardWorkItemsSource & {
     db: Awaited<ReturnType<typeof createTestDb>>["db"];
     discoveryId: string;
+    deliveryId: string;
     pmUserId: string;
     reviewerUserId: string;
     ownerTeamId: string;
     createAdminSessionCookie(): Promise<string>;
     createUserSessionCookie(userId: string): Promise<string>;
+    createLinkedRun(input?: Partial<NewRunInput> & { workItemId?: string; status?: string; phase?: string; title?: string }): Promise<string>;
   }> {
     const testDb = await createTestDb();
     cleanups.push(testDb.cleanup);
@@ -283,6 +286,7 @@ describe("Dashboard Work Item API routes", () => {
     const workItemStore = new WorkItemStore(testDb.db);
     const reviewRequestStore = new ReviewRequestStore(testDb.db);
     const eventsStore = new WorkItemEventsStore(testDb.db);
+    const runStore = new RunStore(testDb.db);
 
     const discovery = await service.createDiscoveryWorkItem({
       title: "Discovery item",
@@ -308,7 +312,7 @@ describe("Dashboard Work Item API routes", () => {
       ],
     });
 
-    await service.createDeliveryFromJira({
+    const delivery = await service.createDeliveryFromJira({
       title: "Delivery item",
       summary: "Implement the feature",
       ownerTeamId,
@@ -323,6 +327,7 @@ describe("Dashboard Work Item API routes", () => {
     return {
       db: testDb.db,
       discoveryId: discovery.id,
+      deliveryId: delivery.id,
       pmUserId,
       reviewerUserId,
       ownerTeamId,
@@ -343,11 +348,53 @@ describe("Dashboard Work Item API routes", () => {
         });
         return `gooseherd-session=${session.token}`;
       },
+      createLinkedRun: async (input = {}) => {
+        const run = await runStore.createRun({
+          repoSlug: input.repoSlug ?? "hubstaff/gooseherd",
+          task: input.task ?? "Run linked work item task",
+          baseBranch: input.baseBranch ?? "main",
+          requestedBy: input.requestedBy ?? "dashboard-test",
+          channelId: input.channelId ?? "dashboard",
+          threadTs: input.threadTs ?? `dash-${Date.now()}`,
+          runtime: input.runtime ?? "local",
+          parentRunId: input.parentRunId,
+          feedbackNote: input.feedbackNote,
+          pipelineHint: input.pipelineHint,
+          skipNodes: input.skipNodes,
+          enableNodes: input.enableNodes,
+          teamId: input.teamId,
+        }, "goose/test");
+        const updated = await runStore.updateRun(run.id, {
+          workItemId: input.workItemId ?? discovery.id,
+          status: (input.status as never) ?? "queued",
+          phase: (input.phase as never) ?? "queued",
+          title: input.title,
+        });
+        return updated.id;
+      },
       listWorkItems: async (workflow?: string) => {
         const items = await workItemStore.listWorkItems();
-        return workflow ? items.filter((item) => item.workflow === workflow) : items;
+        const filtered = workflow ? items.filter((item) => item.workflow === workflow) : items;
+        const activeStatuses = new Set(["queued", "running", "validating", "pushing", "awaiting_ci", "ci_fixing"]);
+        return Promise.all(filtered.map(async (item) => {
+          const runs = await runStore.listRunsForWorkItem(item.id);
+          return {
+            ...item,
+            activeRunCount: runs.filter((run) => activeStatuses.has(run.status)).length,
+          };
+        }));
       },
-      getWorkItem: (id: string) => workItemStore.getWorkItem(id),
+      getWorkItem: async (id: string) => {
+        const item = await workItemStore.getWorkItem(id);
+        if (!item) return undefined;
+        const activeStatuses = new Set(["queued", "running", "validating", "pushing", "awaiting_ci", "ci_fixing"]);
+        const runs = await runStore.listRunsForWorkItem(id);
+        return {
+          ...item,
+          activeRunCount: runs.filter((run) => activeStatuses.has(run.status)).length,
+        };
+      },
+      listRunsForWorkItem: (workItemId: string) => runStore.listRunsForWorkItem(workItemId),
       listReviewRequestsForWorkItem: (workItemId: string) => reviewRequestStore.listReviewRequestsForWorkItem(workItemId),
       listReviewRequestComments: (reviewRequestId: string) => reviewRequestStore.listComments(reviewRequestId),
       listEventsForWorkItem: (workItemId: string) => eventsStore.listForWorkItem(workItemId),
@@ -421,6 +468,20 @@ describe("Dashboard Work Item API routes", () => {
     assert.equal(items[0]?.workflow, "product_discovery");
   });
 
+  test("GET /api/work-items includes activeRunCount computed from linked active runs", async () => {
+    const source = await createWorkItemsSource();
+    await source.createLinkedRun({ workItemId: source.discoveryId, status: "queued", phase: "queued", title: "Queued run" });
+    await source.createLinkedRun({ workItemId: source.discoveryId, status: "awaiting_ci", phase: "awaiting_ci", title: "CI wait run" });
+    await source.createLinkedRun({ workItemId: source.discoveryId, status: "completed", phase: "completed", title: "Done run" });
+    const port = await startServer(source);
+
+    const res = await request(port, "GET", "/api/work-items?workflow=product_discovery");
+    assert.equal(res.status, 200);
+    const items = res.data.workItems as Array<{ id: string; activeRunCount?: number }>;
+    assert.equal(items[0]?.id, source.discoveryId);
+    assert.equal(items[0]?.activeRunCount, 2);
+  });
+
   test("GET /api/work-items/:id returns work item detail", async () => {
     const source = await createWorkItemsSource();
     const port = await startServer(source);
@@ -428,6 +489,32 @@ describe("Dashboard Work Item API routes", () => {
     const res = await request(port, "GET", `/api/work-items/${source.discoveryId}`);
     assert.equal(res.status, 200);
     assert.equal((res.data.workItem as { id: string }).id, source.discoveryId);
+  });
+
+  test("GET /api/work-items/:id/runs returns linked runs newest first", async () => {
+    const source = await createWorkItemsSource();
+    const olderRunId = await source.createLinkedRun({
+      workItemId: source.deliveryId,
+      status: "completed",
+      phase: "completed",
+      title: "Older linked run",
+    });
+    const newerRunId = await source.createLinkedRun({
+      workItemId: source.deliveryId,
+      status: "running",
+      phase: "agent",
+      title: "Newer linked run",
+    });
+    const port = await startServer(source);
+
+    const res = await request(port, "GET", `/api/work-items/${source.deliveryId}/runs`);
+    assert.equal(res.status, 200);
+    const runs = res.data.runs as Array<{ id: string; status: string; title?: string }>;
+    assert.equal(runs.length, 2);
+    assert.equal(runs[0]?.id, newerRunId);
+    assert.equal(runs[0]?.status, "running");
+    assert.equal(runs[0]?.title, "Newer linked run");
+    assert.equal(runs[1]?.id, olderRunId);
   });
 
   test("GET /api/work-items/:id/review-requests returns review requests", async () => {

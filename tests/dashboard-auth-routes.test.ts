@@ -248,6 +248,7 @@ function makeDashboardWorkItemsSource(overrides: Partial<DashboardWorkItemsSourc
   return {
     listWorkItems: async () => [],
     getWorkItem: async () => undefined,
+    listRunsForWorkItem: async () => [],
     listReviewRequestsForWorkItem: async () => [],
     listReviewRequestComments: async () => [],
     listEventsForWorkItem: async (): Promise<WorkItemEventRecord[]> => [],

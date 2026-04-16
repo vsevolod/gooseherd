@@ -254,7 +254,7 @@ async function createServices(config: AppConfig, db: Database): Promise<Services
           isActive: true,
         });
         await workItemIdentityStore.ensureUserTeamMembership(created.id, defaultTeam.id, "default_team", true);
-        actor = await userDirectoryService.updateUser(created.id, {
+        await userDirectoryService.updateUser(created.id, {
           displayName: created.displayName,
           slackUserId: created.slackUserId ?? null,
           githubLogin: created.githubLogin,
@@ -262,11 +262,12 @@ async function createServices(config: AppConfig, db: Database): Promise<Services
           primaryTeamId: defaultTeam.id,
           isActive: created.isActive,
         });
+        actor = await workItemIdentityStore.getUser(created.id);
       } else {
         const primaryTeam = await workItemIdentityStore.getPrimaryTeamForUser(actor.id);
         if (!primaryTeam) {
           await workItemIdentityStore.ensureUserTeamMembership(actor.id, defaultTeam.id, "default_team", true);
-          actor = await userDirectoryService.updateUser(actor.id, {
+          await userDirectoryService.updateUser(actor.id, {
             displayName: actor.displayName,
             slackUserId: actor.slackUserId ?? null,
             githubLogin: actor.githubLogin ?? null,
@@ -274,7 +275,12 @@ async function createServices(config: AppConfig, db: Database): Promise<Services
             primaryTeamId: defaultTeam.id,
             isActive: actor.isActive,
           });
+          actor = await workItemIdentityStore.getUser(actor.id);
         }
+      }
+
+      if (!actor) {
+        return undefined;
       }
 
       const resolvedPrimaryTeam = await workItemIdentityStore.getPrimaryTeamForUser(actor.id);
@@ -365,11 +371,43 @@ async function createServices(config: AppConfig, db: Database): Promise<Services
   conversationStore.startCleanupTimer();
 
   const dashboardWorkItemsSource: DashboardWorkItemsSource = {
-    listWorkItems: async (workflow?: string) => {
-      const workItems = await workItemStore.listWorkItems();
-      return workflow ? workItems.filter((workItem) => workItem.workflow === workflow) : workItems;
+    listRunsForWorkItem: async (workItemId) => {
+      const runs = await store.listRunsForWorkItem(workItemId);
+      return runs.map((run) => ({
+        id: run.id,
+        status: run.status,
+        phase: run.phase,
+        title: run.title,
+        repoSlug: run.repoSlug,
+        createdAt: run.createdAt,
+        startedAt: run.startedAt,
+        finishedAt: run.finishedAt,
+      }));
     },
-    getWorkItem: (id) => workItemStore.getWorkItem(id),
+    listWorkItems: async (workflow?: string) => {
+      const activeStatuses = new Set(["queued", "running", "validating", "pushing", "awaiting_ci", "ci_fixing"]);
+      const workItems = await workItemStore.listWorkItems();
+      const filtered = workflow ? workItems.filter((workItem) => workItem.workflow === workflow) : workItems;
+      return Promise.all(filtered.map(async (workItem) => {
+        const runs = await store.listRunsForWorkItem(workItem.id);
+        return {
+          ...workItem,
+          activeRunCount: runs.filter((run) => activeStatuses.has(run.status)).length,
+        };
+      }));
+    },
+    getWorkItem: async (id) => {
+      const workItem = await workItemStore.getWorkItem(id);
+      if (!workItem) {
+        return undefined;
+      }
+      const activeStatuses = new Set(["queued", "running", "validating", "pushing", "awaiting_ci", "ci_fixing"]);
+      const runs = await store.listRunsForWorkItem(id);
+      return {
+        ...workItem,
+        activeRunCount: runs.filter((run) => activeStatuses.has(run.status)).length,
+      };
+    },
     listReviewRequestsForWorkItem: (workItemId) => reviewRequestStore.listReviewRequestsForWorkItem(workItemId),
     listReviewRequestComments: (reviewRequestId) => reviewRequestStore.listComments(reviewRequestId),
     listEventsForWorkItem: (workItemId) => workItemEventsStore.listForWorkItem(workItemId),

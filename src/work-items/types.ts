@@ -33,6 +33,7 @@ export interface WorkItemRecord {
   workflow: WorkItemWorkflow;
   state: WorkItemState;
   substate?: string;
+  activeRunCount?: number;
   flags: string[];
   title: string;
   summary: string;
@@ -50,6 +51,17 @@ export interface WorkItemRecord {
   createdAt: string;
   updatedAt: string;
   completedAt?: string;
+}
+
+export interface WorkItemLinkedRunRecord {
+  id: string;
+  status: string;
+  phase?: string;
+  title?: string;
+  repoSlug: string;
+  createdAt: string;
+  startedAt?: string;
+  finishedAt?: string;
 }
 
 export interface CreateWorkItemInput {

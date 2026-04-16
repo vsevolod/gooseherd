@@ -569,6 +569,22 @@ export function dashboardHtml(config: AppConfig): string {
       gap: 6px;
       flex-wrap: wrap;
     }
+    .board-run-badge {
+      min-width: 20px;
+      height: 20px;
+      border-radius: 999px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      padding: 0 6px;
+      border: 1px solid color-mix(in srgb, var(--running) 42%, var(--border));
+      background: color-mix(in srgb, var(--running) 18%, transparent);
+      color: color-mix(in srgb, var(--running) 82%, var(--text));
+      font-size: 11px;
+      font-weight: 700;
+      line-height: 1;
+      animation: pulse-dot 1.4s ease-in-out infinite;
+    }
     .board-empty {
       border: 1px dashed var(--border);
       border-radius: 10px;
@@ -626,6 +642,7 @@ export function dashboardHtml(config: AppConfig): string {
       background: color-mix(in srgb, var(--panel-3) 88%, transparent);
     }
     .board-review-item,
+    .board-run-item,
     .board-event-item {
       border: 1px solid var(--border);
       background: var(--panel-3);
@@ -634,7 +651,11 @@ export function dashboardHtml(config: AppConfig): string {
       display: grid;
       gap: 8px;
     }
+    .board-run-item {
+      gap: 6px;
+    }
     .board-review-head,
+    .board-run-head,
     .board-event-head {
       display: flex;
       align-items: center;
@@ -646,6 +667,11 @@ export function dashboardHtml(config: AppConfig): string {
       font-size: 13px;
       font-weight: 700;
       line-height: 1.35;
+    }
+    .board-run-meta {
+      font-size: 12px;
+      color: var(--muted);
+      line-height: 1.45;
     }
     .board-review-message,
     .board-event-payload {
@@ -2011,6 +2037,10 @@ export function dashboardHtml(config: AppConfig): string {
                 <div id="board-detail-reviews" class="board-detail-empty">No review requests loaded.</div>
               </div>
               <div class="board-detail-section">
+                <div class="board-detail-section-title">Runs</div>
+                <div id="board-detail-runs" class="board-detail-empty">No runs loaded.</div>
+              </div>
+              <div class="board-detail-section">
                 <div class="board-detail-section-title">Guarded Override</div>
                 <div class="board-detail-form">
                   <label for="board-override-state">State</label>
@@ -2169,6 +2199,7 @@ export function dashboardHtml(config: AppConfig): string {
       selectedWorkItem: null,
       selectedWorkItemReviewRequests: [],
       selectedWorkItemReviewComments: {},
+      selectedWorkItemRuns: [],
       selectedWorkItemEvents: [],
       selectedId: null,
       interval: null,
@@ -2204,6 +2235,7 @@ export function dashboardHtml(config: AppConfig): string {
       boardDetailFlags: document.getElementById('board-detail-flags'),
       boardDetailSummary: document.getElementById('board-detail-summary'),
       boardDetailReviews: document.getElementById('board-detail-reviews'),
+      boardDetailRuns: document.getElementById('board-detail-runs'),
       boardDetailEvents: document.getElementById('board-detail-events'),
       boardStopProcessing: document.getElementById('board-stop-processing'),
       boardConfirmApprove: document.getElementById('board-confirm-approve'),
@@ -3505,6 +3537,7 @@ export function dashboardHtml(config: AppConfig): string {
         state.selectedWorkItem = null;
         state.selectedWorkItemReviewRequests = [];
         state.selectedWorkItemEvents = [];
+        state.selectedWorkItemRuns = [];
       }
       if (el.boardMeta) {
         el.boardMeta.textContent = state.workItems.length + ' work items';
@@ -3595,6 +3628,14 @@ export function dashboardHtml(config: AppConfig): string {
             top.appendChild(substate);
           }
 
+          if ((item.activeRunCount || 0) > 0) {
+            var runBadge = document.createElement('span');
+            runBadge.className = 'board-run-badge';
+            runBadge.textContent = String(item.activeRunCount);
+            runBadge.title = String(item.activeRunCount) + ' active runs';
+            top.appendChild(runBadge);
+          }
+
           var titleNode = document.createElement('div');
           titleNode.className = 'board-card-title';
           titleNode.textContent = item.title || '(untitled work item)';
@@ -3643,6 +3684,7 @@ export function dashboardHtml(config: AppConfig): string {
         state.selectedWorkItem = null;
         state.selectedWorkItemReviewRequests = [];
         state.selectedWorkItemReviewComments = {};
+        state.selectedWorkItemRuns = [];
         state.selectedWorkItemEvents = [];
         renderBoardDetail();
         return;
@@ -3651,13 +3693,15 @@ export function dashboardHtml(config: AppConfig): string {
       var encodedId = encodeURIComponent(state.selectedWorkItemId);
       var results = await Promise.all([
         fetchJson('/api/work-items/' + encodedId),
+        fetchJson('/api/work-items/' + encodedId + '/runs').catch(function() { return { runs: [] }; }),
         fetchJson('/api/work-items/' + encodedId + '/review-requests').catch(function() { return { reviewRequests: [] }; }),
         fetchJson('/api/work-items/' + encodedId + '/events').catch(function() { return { events: [] }; }),
       ]);
 
       state.selectedWorkItem = results[0].workItem || null;
-      state.selectedWorkItemReviewRequests = Array.isArray(results[1].reviewRequests) ? results[1].reviewRequests : [];
-      state.selectedWorkItemEvents = Array.isArray(results[2].events) ? results[2].events : [];
+      state.selectedWorkItemRuns = Array.isArray(results[1].runs) ? results[1].runs : [];
+      state.selectedWorkItemReviewRequests = Array.isArray(results[2].reviewRequests) ? results[2].reviewRequests : [];
+      state.selectedWorkItemEvents = Array.isArray(results[3].events) ? results[3].events : [];
       state.selectedWorkItemReviewComments = {};
       if (state.selectedWorkItemReviewRequests.length > 0) {
         var commentResults = await Promise.all(state.selectedWorkItemReviewRequests.map(function(request) {
@@ -3696,6 +3740,8 @@ export function dashboardHtml(config: AppConfig): string {
         el.boardDetailSummary.textContent = 'Choose a work item from the board to see details.';
         el.boardDetailReviews.className = 'board-detail-empty';
         el.boardDetailReviews.textContent = 'No review requests loaded.';
+        el.boardDetailRuns.className = 'board-detail-empty';
+        el.boardDetailRuns.textContent = 'No runs loaded.';
         el.boardDetailEvents.className = 'board-detail-empty';
         el.boardDetailEvents.textContent = 'No events loaded.';
         el.boardStopProcessing.disabled = true;
@@ -3749,7 +3795,18 @@ export function dashboardHtml(config: AppConfig): string {
       el.boardConfirmRework.disabled = !canConfirmDiscovery;
 
       renderBoardReviewRequests(item);
+      renderBoardRuns();
       renderBoardEvents();
+    }
+
+    function openWorkItemRun(runId) {
+      if (!runId) return;
+      state.viewMode = 'runs';
+      state.selectedId = runId;
+      window.location.hash = '#run/' + runId.slice(0, 8);
+      updateDashboardChrome();
+      renderRuns();
+      refreshSelected().catch(console.error);
     }
 
     function renderBoardReviewRequests(item) {
@@ -3869,6 +3926,64 @@ export function dashboardHtml(config: AppConfig): string {
       el.boardDetailReviews.className = '';
       el.boardDetailReviews.innerHTML = '';
       el.boardDetailReviews.appendChild(container);
+    }
+
+    function renderBoardRuns() {
+      var runs = state.selectedWorkItemRuns || [];
+      if (!runs.length) {
+        el.boardDetailRuns.className = 'board-detail-empty';
+        el.boardDetailRuns.textContent = 'No runs linked to this work item yet.';
+        return;
+      }
+
+      var container = document.createElement('div');
+      container.className = 'board-detail-section';
+
+      runs.forEach(function(run) {
+        var wrapper = document.createElement('div');
+        wrapper.className = 'board-run-item';
+
+        var head = document.createElement('div');
+        head.className = 'board-run-head';
+
+        var title = document.createElement('div');
+        title.className = 'board-review-title';
+        title.textContent = run.title || ('Run ' + shortId(run.id));
+
+        var status = document.createElement('span');
+        status.className = statusClass(run.status);
+        status.textContent = run.status;
+
+        head.appendChild(title);
+        head.appendChild(status);
+        wrapper.appendChild(head);
+
+        var meta = document.createElement('div');
+        meta.className = 'board-run-meta';
+        meta.textContent = run.repoSlug + ' · Created ' + timeAgo(run.createdAt);
+        wrapper.appendChild(meta);
+
+        var actions = document.createElement('div');
+        actions.className = 'board-inline-actions';
+
+        var openLink = document.createElement('a');
+        openLink.className = 'top-btn';
+        openLink.href = '#run/' + shortId(run.id);
+        openLink.textContent = 'Open run';
+        openLink.onclick = function(event) {
+          event.preventDefault();
+          openWorkItemRun(run.id);
+        };
+
+        actions.appendChild(openLink);
+        wrapper.appendChild(actions);
+
+        container.appendChild(wrapper);
+      });
+
+      el.boardDetailRuns.className = '';
+      el.boardDetailRuns.innerHTML = '';
+      el.boardDetailRuns.appendChild(container);
     }
 
     function renderBoardEvents() {
