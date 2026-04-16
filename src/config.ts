@@ -20,6 +20,10 @@ const envSchema = z.object({
   GITHUB_DEFAULT_OWNER: z.string().optional(),
   REPO_ALLOWLIST: z.string().optional(),
 
+  DEFAULT_TEAM_NAME: z.string().optional(),
+  DEFAULT_TEAM_SLACK_CHANNEL_ID: z.string().optional(),
+  DEFAULT_TEAM_SLACK_CHANNEL_NAME: z.string().optional(),
+
   JIRA_BASE_URL: z.string().optional(),
   JIRA_USER: z.string().optional(),
   JIRA_API_TOKEN: z.string().optional(),
@@ -200,6 +204,9 @@ export interface AppConfig {
   githubAppInstallationId?: number;
   githubDefaultOwner?: string;
   repoAllowlist: string[];
+  defaultTeamName: string;
+  defaultTeamSlackChannelId?: string;
+  defaultTeamSlackChannelName: string;
 
   /** Canonical Jira read-access config for future discovery/work-items integrations. */
   jiraBaseUrl?: string;
@@ -463,6 +470,9 @@ export function loadConfig(): AppConfig {
       : undefined,
     githubDefaultOwner: parsed.GITHUB_DEFAULT_OWNER,
     repoAllowlist: parseList(parsed.REPO_ALLOWLIST),
+    defaultTeamName: parsed.DEFAULT_TEAM_NAME?.trim() || "default",
+    defaultTeamSlackChannelId: parsed.DEFAULT_TEAM_SLACK_CHANNEL_ID?.trim() || undefined,
+    defaultTeamSlackChannelName: parsed.DEFAULT_TEAM_SLACK_CHANNEL_NAME?.trim() || "#general",
     jiraBaseUrl: parsed.JIRA_BASE_URL?.trim() || undefined,
     jiraUser: parsed.JIRA_USER?.trim() || undefined,
     jiraApiToken: parsed.JIRA_API_TOKEN?.trim() || undefined,

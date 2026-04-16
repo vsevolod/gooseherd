@@ -1,4 +1,5 @@
 import type { Database } from "../db/index.js";
+import { WorkItemIdentityStore } from "../work-items/identity-store.js";
 import {
   type CreateUserDirectoryInput,
   type UpdateUserDirectoryInput,
@@ -11,13 +12,16 @@ export interface UserDirectoryMutationInput {
   slackUserId?: string | null;
   githubLogin?: string | null;
   jiraAccountId?: string | null;
+  primaryTeamId?: string | null;
   isActive?: boolean;
 }
 
 export class UserDirectoryService {
+  private readonly db: Database;
   private readonly store: UserDirectoryStore;
 
   constructor(db: Database) {
+    this.db = db;
     this.store = new UserDirectoryStore(db);
   }
 
@@ -28,7 +32,15 @@ export class UserDirectoryService {
   async createUser(input: UserDirectoryMutationInput): Promise<UserDirectoryRecord> {
     const normalized = normalizeInput(input);
     try {
-      return await this.store.createUser(normalized);
+      return await this.db.transaction(async (tx) => {
+        const txStore = new UserDirectoryStore(tx as Database);
+        const txIdentity = new WorkItemIdentityStore(tx as Database);
+        const created = await txStore.createUser(normalized);
+        if (created.primaryTeamId) {
+          await txIdentity.ensureUserTeamMembership(created.id, created.primaryTeamId, "primary_team", true);
+        }
+        return created;
+      });
     } catch (error) {
       throw rewriteUserDirectoryError(error);
     }
@@ -37,7 +49,15 @@ export class UserDirectoryService {
   async updateUser(id: string, input: UserDirectoryMutationInput): Promise<UserDirectoryRecord> {
     const normalized = normalizeInput(input);
     try {
-      return await this.store.updateUser(id, normalized);
+      return await this.db.transaction(async (tx) => {
+        const txStore = new UserDirectoryStore(tx as Database);
+        const txIdentity = new WorkItemIdentityStore(tx as Database);
+        const updated = await txStore.updateUser(id, normalized);
+        if (updated.primaryTeamId) {
+          await txIdentity.ensureUserTeamMembership(updated.id, updated.primaryTeamId, "primary_team");
+        }
+        return updated;
+      });
     } catch (error) {
       throw rewriteUserDirectoryError(error);
     }
@@ -55,6 +75,7 @@ function normalizeInput(input: UserDirectoryMutationInput): CreateUserDirectoryI
     slackUserId: normalizeOptionalIdentity(input.slackUserId),
     githubLogin: normalizeOptionalIdentity(input.githubLogin),
     jiraAccountId: normalizeOptionalIdentity(input.jiraAccountId),
+    primaryTeamId: normalizeOptionalIdentity(input.primaryTeamId),
     isActive: input.isActive ?? true,
   };
 }

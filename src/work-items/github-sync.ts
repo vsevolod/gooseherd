@@ -22,6 +22,7 @@ export interface GitHubWorkItemWebhookPayload {
   prTitle?: string;
   prBody?: string;
   prUrl?: string;
+  authorLogin?: string;
   baseBranch?: string;
   labels?: string[];
   reviewer?: string;
@@ -53,6 +54,10 @@ export interface GitHubWorkItemSyncOptions {
     jiraIssueKey: string;
     repo?: string;
     prNumber?: number;
+    prTitle?: string;
+    prBody?: string;
+    prUrl?: string;
+    authorLogin?: string;
   }) => Promise<DeliveryContextResolverResult | undefined>;
 }
 
@@ -87,6 +92,7 @@ export function parseGitHubWorkItemWebhookPayload(
       prTitle: pullRequest["title"] as string | undefined,
       prBody: pullRequest["body"] as string | undefined,
       prUrl: pullRequest["html_url"] as string | undefined,
+      authorLogin: (pullRequest["user"] as Record<string, unknown> | undefined)?.["login"] as string | undefined,
       baseBranch: (pullRequest["base"] as Record<string, unknown> | undefined)?.["ref"] as string | undefined,
       labels,
       merged: pullRequest["merged"] as boolean | undefined,
@@ -168,7 +174,7 @@ export class GitHubWorkItemSync {
       return undefined;
     }
 
-    const existing = await this.workItems.findByRepoAndGitHubPrNumber(payload.repo, prNumber);
+    const existing = await this.findExistingWorkItemForPullRequest(payload.repo, prNumber, payload.prUrl);
     if (existing) {
       await this.events.append({
         workItemId: existing.id,
@@ -260,6 +266,10 @@ export class GitHubWorkItemSync {
       jiraIssueKey,
       repo: payload.repo,
       prNumber,
+      prTitle: payload.prTitle,
+      prBody: payload.prBody,
+      prUrl: payload.prUrl,
+      authorLogin: payload.authorLogin,
     });
     if (!context) {
       return undefined;
@@ -388,7 +398,7 @@ export class GitHubWorkItemSync {
     }
 
     const workItem = payload.repo
-      ? await this.workItems.findByRepoAndGitHubPrNumber(payload.repo, payload.prNumber)
+      ? await this.findExistingWorkItemForPullRequest(payload.repo, payload.prNumber)
       : undefined;
     if (!workItem) {
       return undefined;
@@ -552,12 +562,34 @@ export class GitHubWorkItemSync {
       return undefined;
     }
     for (const prNumber of prNumbers ?? []) {
-      const workItem = await this.workItems.findByRepoAndGitHubPrNumber(repo, prNumber);
+      const workItem = await this.findExistingWorkItemForPullRequest(repo, prNumber);
       if (workItem) {
         return workItem;
       }
     }
     return undefined;
+  }
+
+  private async findExistingWorkItemForPullRequest(
+    repo: string,
+    prNumber: number,
+    prUrl?: string
+  ): Promise<WorkItemRecord | undefined> {
+    const exact = await this.workItems.findByRepoAndGitHubPrNumber(repo, prNumber);
+    if (exact) {
+      return exact;
+    }
+
+    const legacy = await this.workItems.findUniqueLegacyByGitHubPrNumber(prNumber);
+    if (!legacy) {
+      return undefined;
+    }
+
+    return this.workItems.linkPullRequest(legacy.id, {
+      repo,
+      githubPrNumber: prNumber,
+      githubPrUrl: prUrl ?? legacy.githubPrUrl,
+    });
   }
 
   private shouldResetEngineeringReviewOnNewCommits(): boolean {

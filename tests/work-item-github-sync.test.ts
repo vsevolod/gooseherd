@@ -3,9 +3,16 @@ import { randomUUID } from "node:crypto";
 import test from "node:test";
 import { eq } from "drizzle-orm";
 import { createTestDb } from "./helpers/test-db.js";
-import { teams, users, workItemEvents } from "../src/db/schema.js";
+import { teamMembers, teams, users, workItemEvents } from "../src/db/schema.js";
 import { WorkItemService } from "../src/work-items/service.js";
-import { GitHubWorkItemSync, parseJiraIssueKey } from "../src/work-items/github-sync.js";
+import { WorkItemIdentityStore } from "../src/work-items/identity-store.js";
+import { UserDirectoryService } from "../src/user-directory/service.js";
+import { WorkItemContextResolver } from "../src/work-items/context-resolver.js";
+import {
+  GitHubWorkItemSync,
+  parseGitHubWorkItemWebhookPayload,
+  parseJiraIssueKey,
+} from "../src/work-items/github-sync.js";
 
 async function createGitHubSyncFixture() {
   const testDb = await createTestDb();
@@ -41,9 +48,139 @@ async function createGitHubSyncFixture() {
   };
 }
 
+async function createGitHubPrFirstFixture() {
+  const testDb = await createTestDb();
+  const defaultTeamId = randomUUID();
+  const ownerTeamId = randomUUID();
+  const existingUserId = randomUUID();
+  const createdHomeThreads: Array<{ channelId: string; text: string }> = [];
+
+  await testDb.db.insert(teams).values([
+    {
+      id: defaultTeamId,
+      name: "default",
+      slackChannelId: "C_DEFAULT",
+      isDefault: true,
+    },
+    {
+      id: ownerTeamId,
+      name: "growth",
+      slackChannelId: "C_GROWTH",
+    },
+  ]);
+
+  await testDb.db.insert(users).values({
+    id: existingUserId,
+    slackUserId: "U_EXISTING",
+    githubLogin: "existing-gh",
+    displayName: "Existing GitHub User",
+    primaryTeamId: ownerTeamId,
+  });
+  await testDb.db.insert(teamMembers).values({
+    teamId: ownerTeamId,
+    userId: existingUserId,
+    functionalRoles: ["pm"],
+  });
+
+  const identityStore = new WorkItemIdentityStore(testDb.db);
+  const userDirectory = new UserDirectoryService(testDb.db);
+  const contextResolver = new WorkItemContextResolver(testDb.db);
+
+  const resolveDeliveryContext = async (input: {
+    jiraIssueKey: string;
+    repo?: string;
+    prNumber?: number;
+    prTitle?: string;
+    prBody?: string;
+    prUrl?: string;
+    authorLogin?: string;
+  }) => {
+    const githubLogin = input.authorLogin?.trim();
+    const defaultTeam = await identityStore.getDefaultTeam();
+    if (!defaultTeam || !githubLogin) {
+      return undefined;
+    }
+
+    let actor = await identityStore.getUserByGitHubLogin(githubLogin);
+    if (!actor) {
+      const created = await userDirectory.createUser({
+        displayName: githubLogin,
+        slackUserId: null,
+        githubLogin,
+        jiraAccountId: null,
+        primaryTeamId: null,
+        isActive: true,
+      });
+      await identityStore.ensureUserTeamMembership(created.id, defaultTeam.id, "default_team", true);
+      actor = await userDirectory.updateUser(created.id, {
+        displayName: created.displayName,
+        slackUserId: created.slackUserId ?? null,
+        githubLogin: created.githubLogin,
+        jiraAccountId: created.jiraAccountId ?? null,
+        primaryTeamId: defaultTeam.id,
+        isActive: created.isActive,
+      });
+    } else if (!(await identityStore.getPrimaryTeamForUser(actor.id))) {
+      await identityStore.ensureUserTeamMembership(actor.id, defaultTeam.id, "default_team", true);
+      actor = await userDirectory.updateUser(actor.id, {
+        displayName: actor.displayName,
+        slackUserId: actor.slackUserId ?? null,
+        githubLogin: actor.githubLogin ?? null,
+        jiraAccountId: null,
+        primaryTeamId: defaultTeam.id,
+        isActive: actor.isActive,
+      });
+    }
+
+    const ownerTeam = (await identityStore.getPrimaryTeamForUser(actor.id)) ?? defaultTeam;
+    return contextResolver.resolveDeliveryContext({
+      createdByUserId: actor.id,
+      ownerTeamId: ownerTeam.id,
+      title: input.prTitle ?? input.jiraIssueKey,
+      createHomeThread: async (threadInput) => {
+        createdHomeThreads.push(threadInput);
+        return "1740000001.100";
+      },
+    });
+  };
+
+  return {
+    db: testDb.db,
+    cleanup: testDb.cleanup,
+    defaultTeamId,
+    ownerTeamId,
+    existingUserId,
+    createdHomeThreads,
+    identityStore,
+    userDirectory,
+    sync: new GitHubWorkItemSync(testDb.db, { resolveDeliveryContext }),
+  };
+}
+
 test("parseJiraIssueKey extracts issue key from PR body", () => {
   assert.equal(parseJiraIssueKey("Implements feature.\n\nJira: HBL-404"), "HBL-404");
   assert.equal(parseJiraIssueKey("no issue here"), undefined);
+});
+
+test("parseGitHubWorkItemWebhookPayload extracts author login from PR payload", () => {
+  const parsed = parseGitHubWorkItemWebhookPayload(
+    { "x-github-event": "pull_request" },
+    {
+      action: "opened",
+      number: 82,
+      repository: { full_name: "hubstaff/gooseherd" },
+      pull_request: {
+        title: "PR author login",
+        body: "Refs HBL-582",
+        html_url: "https://github.com/hubstaff/gooseherd/pull/82",
+        base: { ref: "main" },
+        labels: [],
+        user: { login: "github-author" },
+      },
+    },
+  );
+
+  assert.equal(parsed?.authorLogin, "github-author");
 });
 
 test("github sync adopts labeled PR into delivery work item", async (t) => {
@@ -89,6 +226,26 @@ test("github sync ignores unrelated label", async (t) => {
     prUrl: "https://github.com/hubstaff/gooseherd/pull/779",
     labels: ["legacy-assist"],
     baseBranch: "main",
+  });
+
+  assert.equal(adopted, undefined);
+});
+
+test("github sync ignores labeled PRs without a Jira issue key", async (t) => {
+  const { cleanup, sync } = await createGitHubSyncFixture();
+  t.after(cleanup);
+
+  const adopted = await sync.handleWebhookPayload({
+    eventType: "pull_request",
+    action: "labeled",
+    repo: "hubstaff/gooseherd",
+    prNumber: 780,
+    prTitle: "No Jira issue",
+    prBody: "Just a PR body",
+    prUrl: "https://github.com/hubstaff/gooseherd/pull/780",
+    labels: ["ai:assist"],
+    baseBranch: "main",
+    authorLogin: "github-author",
   });
 
   assert.equal(adopted, undefined);
@@ -210,7 +367,65 @@ test("github sync logs ambiguity when multiple unlinked delivery candidates exis
   assert.ok(eventsB.some((event) => event.eventType === "github.pr_adoption_ambiguous"));
 });
 
-test("github sync leaves legacy repo-null PR rows unresolved after deploy", async (t) => {
+test("github sync creates a PR-first delivery for an existing GitHub author using their primary team", async (t) => {
+  const { cleanup, sync, db, existingUserId, ownerTeamId } = await createGitHubPrFirstFixture();
+  t.after(cleanup);
+
+  const adopted = await sync.handleWebhookPayload({
+    eventType: "pull_request",
+    action: "labeled",
+    repo: "hubstaff/gooseherd",
+    prNumber: 83,
+    prTitle: "Primary team adoption",
+    prBody: "Feature work\n\nRefs HBL-583",
+    prUrl: "https://github.com/hubstaff/gooseherd/pull/83",
+    labels: ["ai:assist"],
+    baseBranch: "main",
+    authorLogin: "existing-gh",
+  });
+
+  assert.ok(adopted);
+  assert.equal(adopted?.createdByUserId, existingUserId);
+  assert.equal(adopted?.ownerTeamId, ownerTeamId);
+  assert.equal(adopted?.state, "auto_review");
+  assert.equal(adopted?.substate, "pr_adopted");
+  assert.equal(adopted?.repo, "hubstaff/gooseherd");
+  assert.equal(adopted?.githubPrNumber, 83);
+  assert.equal(adopted?.jiraIssueKey, "HBL-583");
+});
+
+test("github sync auto-creates a GitHub author on the default team when none exists", async (t) => {
+  const { cleanup, sync, db, defaultTeamId, identityStore, userDirectory, createdHomeThreads } = await createGitHubPrFirstFixture();
+  t.after(cleanup);
+
+  const adopted = await sync.handleWebhookPayload({
+    eventType: "pull_request",
+    action: "labeled",
+    repo: "hubstaff/gooseherd",
+    prNumber: 84,
+    prTitle: "New GitHub author",
+    prBody: "Feature work\n\nRefs HBL-584",
+    prUrl: "https://github.com/hubstaff/gooseherd/pull/84",
+    labels: ["ai:assist"],
+    baseBranch: "main",
+    authorLogin: "new-github-author",
+  });
+
+  assert.ok(adopted);
+  assert.equal(createdHomeThreads.length, 1);
+
+  const createdUser = await identityStore.getUserByGitHubLogin("new-github-author");
+  assert.ok(createdUser);
+  assert.equal(createdUser?.primaryTeamId, defaultTeamId);
+
+  const defaultTeam = await identityStore.getDefaultTeam();
+  assert.equal(defaultTeam?.id, defaultTeamId);
+  const memberships = await db.select().from(teamMembers).where(eq(teamMembers.userId, createdUser!.id));
+  assert.equal(memberships.length, 1);
+  assert.equal(memberships[0]?.teamId, defaultTeamId);
+});
+
+test("github sync self-heals a unique legacy repo-null PR row on the next webhook", async (t) => {
   const { cleanup, service, sync, ownerTeamId, pmUserId } = await createGitHubSyncFixture();
   t.after(cleanup);
 
@@ -236,10 +451,10 @@ test("github sync leaves legacy repo-null PR rows unresolved after deploy", asyn
     prUrl: "https://github.com/hubstaff/gooseherd/pull/81",
   });
 
-  assert.equal(existing, undefined);
+  assert.equal(existing?.id, legacy.id);
   const stored = await service.getWorkItem(legacy.id);
   assert.equal(stored?.githubPrNumber, 81);
-  assert.equal(stored?.repo, undefined);
+  assert.equal(stored?.repo, "hubstaff/gooseherd");
 });
 
 test("github sync keeps same PR number isolated by repo", async (t) => {

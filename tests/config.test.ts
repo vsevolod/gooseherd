@@ -195,6 +195,35 @@ test("work item GitHub adoption labels default to ai:assist", () => {
   }
 });
 
+test("default team config defaults and env overrides", () => {
+  const originalEnv = process.env;
+  try {
+    process.env = {
+      ...originalEnv,
+      DEFAULT_TEAM_NAME: undefined,
+      DEFAULT_TEAM_SLACK_CHANNEL_ID: undefined,
+      DEFAULT_TEAM_SLACK_CHANNEL_NAME: undefined,
+    };
+    const defaults = loadConfig();
+    assert.equal(defaults.defaultTeamName, "default");
+    assert.equal(defaults.defaultTeamSlackChannelId, undefined);
+    assert.equal(defaults.defaultTeamSlackChannelName, "#general");
+
+    process.env = {
+      ...originalEnv,
+      DEFAULT_TEAM_NAME: "growth",
+      DEFAULT_TEAM_SLACK_CHANNEL_ID: "C_GROWTH",
+      DEFAULT_TEAM_SLACK_CHANNEL_NAME: "#growth",
+    };
+    const overridden = loadConfig();
+    assert.equal(overridden.defaultTeamName, "growth");
+    assert.equal(overridden.defaultTeamSlackChannelId, "C_GROWTH");
+    assert.equal(overridden.defaultTeamSlackChannelName, "#growth");
+  } finally {
+    process.env = originalEnv;
+  }
+});
+
 test("work item GitHub adoption labels respect comma-separated env", () => {
   const originalEnv = process.env;
   try {

@@ -9,6 +9,7 @@ export interface UserDirectoryRecord {
   slackUserId: string | null;
   githubLogin: string | null;
   jiraAccountId: string | null;
+  primaryTeamId: string | null;
   isActive: boolean;
   createdAt: string;
   updatedAt: string;
@@ -19,6 +20,7 @@ export interface CreateUserDirectoryInput {
   slackUserId: string | null;
   githubLogin: string | null;
   jiraAccountId: string | null;
+  primaryTeamId: string | null;
   isActive: boolean;
 }
 
@@ -31,6 +33,7 @@ function toRecord(row: typeof users.$inferSelect): UserDirectoryRecord {
     slackUserId: row.slackUserId ?? null,
     githubLogin: row.githubLogin ?? null,
     jiraAccountId: row.jiraAccountId ?? null,
+    primaryTeamId: row.primaryTeamId ?? null,
     isActive: row.isActive,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
@@ -59,6 +62,7 @@ export class UserDirectoryStore {
       slackUserId: input.slackUserId,
       githubLogin: input.githubLogin,
       jiraAccountId: input.jiraAccountId,
+      primaryTeamId: input.primaryTeamId,
       isActive: input.isActive,
       createdAt: now,
       updatedAt: now,
@@ -72,6 +76,7 @@ export class UserDirectoryStore {
       slackUserId: input.slackUserId,
       githubLogin: input.githubLogin,
       jiraAccountId: input.jiraAccountId,
+      primaryTeamId: input.primaryTeamId,
       isActive: input.isActive,
       updatedAt: new Date(),
     }).where(eq(users.id, id));

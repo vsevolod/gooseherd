@@ -49,8 +49,10 @@ import { WorkItemEventsStore } from "./work-items/events-store.js";
 import { WorkItemService } from "./work-items/service.js";
 import { postWorkItemReviewNotifications } from "./work-items/slack-actions.js";
 import { WorkItemIdentityStore } from "./work-items/identity-store.js";
+import { UserDirectoryService } from "./user-directory/service.js";
 import type { WorkItemActor } from "./work-items/actor.js";
 import { WorkItemContextResolver } from "./work-items/context-resolver.js";
+import { ensureDefaultTeam } from "./work-items/default-team-bootstrap.js";
 import { GitHubWorkItemSync, parseGitHubWorkItemWebhookPayload } from "./work-items/github-sync.js";
 import { JiraWorkItemSync, parseJiraWorkItemWebhookPayload } from "./work-items/jira-sync.js";
 import {
@@ -211,6 +213,7 @@ async function createServices(config: AppConfig, db: Database): Promise<Services
   const workItemEventsStore = new WorkItemEventsStore(db);
   const workItemService = new WorkItemService(db);
   const workItemIdentityStore = new WorkItemIdentityStore(db);
+  const userDirectoryService = new UserDirectoryService(db);
   const workItemContextResolver = new WorkItemContextResolver(db);
   const createHomeThread = webClient
     ? async (input: { channelId: string; text: string }) => {
@@ -229,22 +232,73 @@ async function createServices(config: AppConfig, db: Database): Promise<Services
     adoptionLabels: config.workItemGithubAdoptionLabels,
     resetEngineeringReviewOnNewCommits: config.featureDeliveryResetEngineeringReviewOnNewCommits,
     resetQaReviewOnNewCommits: config.featureDeliveryResetQaReviewOnNewCommits,
-    resolveDeliveryContext: async ({ jiraIssueKey, repo, prNumber }) => {
+    resolveDeliveryContext: async ({ jiraIssueKey, repo, prNumber, prTitle, authorLogin }) => {
+      const githubLogin = authorLogin?.trim();
+      if (!githubLogin) {
+        return undefined;
+      }
+
+      const defaultTeam = await workItemIdentityStore.getDefaultTeam();
+      if (!defaultTeam) {
+        return undefined;
+      }
+
+      let actor = await workItemIdentityStore.getUserByGitHubLogin(githubLogin);
+      if (!actor) {
+        const created = await userDirectoryService.createUser({
+          displayName: githubLogin,
+          slackUserId: null,
+          githubLogin,
+          jiraAccountId: null,
+          primaryTeamId: null,
+          isActive: true,
+        });
+        await workItemIdentityStore.ensureUserTeamMembership(created.id, defaultTeam.id, "default_team", true);
+        actor = await userDirectoryService.updateUser(created.id, {
+          displayName: created.displayName,
+          slackUserId: created.slackUserId ?? null,
+          githubLogin: created.githubLogin,
+          jiraAccountId: created.jiraAccountId ?? null,
+          primaryTeamId: defaultTeam.id,
+          isActive: created.isActive,
+        });
+      } else {
+        const primaryTeam = await workItemIdentityStore.getPrimaryTeamForUser(actor.id);
+        if (!primaryTeam) {
+          await workItemIdentityStore.ensureUserTeamMembership(actor.id, defaultTeam.id, "default_team", true);
+          actor = await userDirectoryService.updateUser(actor.id, {
+            displayName: actor.displayName,
+            slackUserId: actor.slackUserId ?? null,
+            githubLogin: actor.githubLogin ?? null,
+            jiraAccountId: actor.jiraAccountId ?? null,
+            primaryTeamId: defaultTeam.id,
+            isActive: actor.isActive,
+          });
+        }
+      }
+
+      const resolvedPrimaryTeam = await workItemIdentityStore.getPrimaryTeamForUser(actor.id);
+      const ownerTeamId = resolvedPrimaryTeam?.id ?? defaultTeam.id;
       const existing = repo && typeof prNumber === "number"
         ? await workItemStore.findByRepoAndGitHubPrNumber(repo, prNumber)
         : undefined;
-      const contextSource = existing ?? await workItemStore.findProductDiscoveryByJiraIssueKey(jiraIssueKey);
-      if (contextSource) {
+      if (existing) {
         return {
-          ownerTeamId: contextSource.ownerTeamId,
-          homeChannelId: contextSource.homeChannelId,
-          homeThreadTs: contextSource.homeThreadTs,
-          createdByUserId: contextSource.createdByUserId,
-          originChannelId: contextSource.originChannelId,
-          originThreadTs: contextSource.originThreadTs,
+          ownerTeamId: existing.ownerTeamId,
+          homeChannelId: existing.homeChannelId,
+          homeThreadTs: existing.homeThreadTs,
+          createdByUserId: existing.createdByUserId,
+          originChannelId: existing.originChannelId,
+          originThreadTs: existing.originThreadTs,
         };
       }
-      return undefined;
+
+      return workItemContextResolver.resolveDeliveryContext({
+        createdByUserId: actor.id,
+        ownerTeamId,
+        title: prTitle ?? jiraIssueKey,
+        createHomeThread,
+      });
     },
   });
   const workItemJiraSync = new JiraWorkItemSync(db, {
@@ -429,7 +483,10 @@ async function main(): Promise<void> {
   // 2. Load config (reads env vars, including any injected by wizard)
   const config = loadConfig();
 
-  // 3. One-time registrations (plugins)
+  // 3. Bootstrap default team (required for work-item startup paths)
+  await ensureDefaultTeam(db, config);
+
+  // 4. One-time registrations (plugins)
   const pluginResult = await loadPlugins(getPluginDir());
   if (pluginResult.loaded.length > 0) {
     logInfo("Plugins loaded", { count: pluginResult.loaded.length, names: pluginResult.loaded });
@@ -439,7 +496,7 @@ async function main(): Promise<void> {
     VALID_ACTIONS.add(action);
   }
 
-  // 4. Create core services
+  // 5. Create core services
   const svc = await createServices(config, db);
   const activeAgentProfile = await svc.agentProfileStore.getActive();
   if (activeAgentProfile) {

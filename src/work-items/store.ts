@@ -92,6 +92,22 @@ export class WorkItemStore {
     return rows[0] ? rowToRecord(rows[0]) : undefined;
   }
 
+  async findUniqueLegacyByGitHubPrNumber(githubPrNumber: number): Promise<WorkItemRecord | undefined> {
+    const rows = await this.db
+      .select()
+      .from(workItems)
+      .where(eq(workItems.githubPrNumber, githubPrNumber))
+      .limit(2);
+    if (rows.length !== 1) {
+      return undefined;
+    }
+    const row = rows[0]!;
+    if (row.repo) {
+      return undefined;
+    }
+    return rowToRecord(row);
+  }
+
   async findByJiraIssueKey(jiraIssueKey: string): Promise<WorkItemRecord | undefined> {
     const rows = await this.db
       .select()

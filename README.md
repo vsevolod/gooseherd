@@ -94,6 +94,14 @@ Relevant `.env` variables:
 - `SLACK_CLIENT_SECRET`: required for browser login via Sign in with Slack
 - `SLACK_AUTH_REDIRECT_URI`: optional override for the browser auth callback; defaults to `<DASHBOARD_PUBLIC_URL>/auth/slack/callback`
 
+Default team bootstrap:
+
+- `DEFAULT_TEAM_NAME`: optional, defaults to `default`
+- `DEFAULT_TEAM_SLACK_CHANNEL_ID`: required; startup fails fast if it is missing
+- `DEFAULT_TEAM_SLACK_CHANNEL_NAME`: optional, defaults to `#general`; keep it aligned with the channel behind `DEFAULT_TEAM_SLACK_CHANNEL_ID` in your deployment config
+
+On startup, Gooseherd bootstraps or updates the default team record from `DEFAULT_TEAM_NAME` and `DEFAULT_TEAM_SLACK_CHANNEL_ID`.
+
 If you add new scopes after the app is already installed, reinstall the Slack app in the workspace so the new permissions take effect.
 
 ## GitHub Setup

@@ -300,6 +300,22 @@ These values are appropriate for a `ConfigMap` or Helm values file.
 | `GITHUB_DEFAULT_OWNER` | No | unset | Default owner/org when users specify only repo name. |
 | `REPO_ALLOWLIST` | Recommended | empty | Restrict which repos Gooseherd may operate on. |
 
+### Default team bootstrap
+
+| Variable | Required | Default | Purpose / Recommendation |
+| --- | --- | --- | --- |
+| `DEFAULT_TEAM_NAME` | No | `default` | Default team name. |
+| `DEFAULT_TEAM_SLACK_CHANNEL_ID` | Yes | unset | Slack channel ID for the default team. Startup fails fast if this is missing. |
+| `DEFAULT_TEAM_SLACK_CHANNEL_NAME` | No | `#general` | Operator-facing channel label to keep aligned with the channel behind `DEFAULT_TEAM_SLACK_CHANNEL_ID`. |
+
+Minimum recommended values:
+
+```text
+DEFAULT_TEAM_NAME=default
+DEFAULT_TEAM_SLACK_CHANNEL_ID=<default-team Slack channel ID>
+DEFAULT_TEAM_SLACK_CHANNEL_NAME=#general
+```
+
 ### Agent and pipeline behavior
 
 | Variable | Required | Default | Purpose / Recommendation |
@@ -415,6 +431,8 @@ These are only relevant for `SANDBOX_RUNTIME=docker`, not for Kubernetes executi
 | `SLACK_COMMAND_NAME` | No | derived from app slug | Slash command / mention prefix. |
 | `SLACK_ALLOWED_CHANNELS` | No | empty | Restrict bot operation to specific channels. |
 
+At startup, Gooseherd bootstraps or updates the default team record from `DEFAULT_TEAM_NAME` and `DEFAULT_TEAM_SLACK_CHANNEL_ID`.
+
 ## Secret Environment Values
 
 These values should live in a Kubernetes `Secret`, external secret manager, or sealed-secret workflow.
@@ -516,6 +534,9 @@ KUBERNETES_RUNNER_ENV_SECRET
 KUBERNETES_RUNNER_ENV_CONFIGMAP
 DEFAULT_BASE_BRANCH
 REPO_ALLOWLIST
+DEFAULT_TEAM_NAME=default
+DEFAULT_TEAM_SLACK_CHANNEL_ID=<default-team Slack channel ID>
+DEFAULT_TEAM_SLACK_CHANNEL_NAME=#general
 ```
 
 ### Secret
