@@ -12,3 +12,13 @@ test("createServices passes sandboxRuntime into WorkItemOrchestrator config", as
     /workItemOrchestrator\s*=\s*new WorkItemOrchestrator\(db,\s*\{\s*config:\s*\{\s*defaultBaseBranch:\s*config\.defaultBaseBranch,\s*sandboxRuntime:\s*config\.sandboxRuntime,\s*\},\s*runManager,\s*\}\);/s,
   );
 });
+
+test("main wires failed terminal runs into auto-review prefetch rollback handling", async () => {
+  const indexPath = path.resolve(import.meta.dirname, "../src/index.ts");
+  const source = await readFile(indexPath, "utf8");
+
+  assert.match(
+    source,
+    /runManager\.onRunTerminal\(\(runId,\s*status\)\s*=>\s*\{\s*if \(status !== "failed"\) \{\s*return;\s*\}\s*s(?:vc)?\.workItemOrchestrator\.handlePrefetchFailure\(runId\)/s,
+  );
+});

@@ -5,6 +5,7 @@ import { loadConfig, type AppConfig } from "./config.js";
 import { initDatabase, closeDatabase, type Database } from "./db/index.js";
 import { RunStore } from "./store.js";
 import { GitHubService } from "./github.js";
+import { JiraClient } from "./jira.js";
 import { PipelineEngine } from "./pipeline/index.js";
 import { CemsProvider } from "./memory/cems-provider.js";
 import { RunLifecycleHooks } from "./hooks/run-lifecycle.js";
@@ -44,6 +45,7 @@ import { RuntimeReconciler } from "./runtime/reconciler.js";
 import { KubernetesRuntimeFactsReader } from "./runtime/kubernetes/runtime-facts.js";
 import { recoverRunsAfterRestart } from "./runtime/startup-recovery.js";
 import { WorkItemStore } from "./work-items/store.js";
+import { RunContextPrefetcher } from "./runtime/run-context-prefetcher.js";
 import { ReviewRequestStore } from "./work-items/review-request-store.js";
 import { WorkItemEventsStore } from "./work-items/events-store.js";
 import { WorkItemService } from "./work-items/service.js";
@@ -211,6 +213,12 @@ async function createServices(config: AppConfig, db: Database): Promise<Services
 
   const controlPlaneStore = new ControlPlaneStore(db);
   const workItemStore = new WorkItemStore(db);
+  const jiraClient = JiraClient.create(config);
+  const runContextPrefetcher = new RunContextPrefetcher({
+    workItems: workItemStore,
+    github: githubService,
+    jira: jiraClient,
+  });
   const reviewRequestStore = new ReviewRequestStore(db);
   const workItemEventsStore = new WorkItemEventsStore(db);
   const workItemService = new WorkItemService(db);
@@ -361,7 +369,7 @@ async function createServices(config: AppConfig, db: Database): Promise<Services
     docker: new DockerExecutionBackend(pipelineEngine),
     kubernetes: kubernetesBackend,
   };
-  const runManager = new RunManager(config, store, runtimeRegistry, webClient, hooks, pipelineStore, learningStore);
+  const runManager = new RunManager(config, store, runtimeRegistry, webClient, hooks, pipelineStore, learningStore, runContextPrefetcher);
   runManager.onRunTerminal((runId, _status, runtime) => {
     if (runtime !== "kubernetes") {
       return;
@@ -582,6 +590,17 @@ async function main(): Promise<void> {
     svc.workItemOrchestrator.writebackWorkItem(runId).catch((error) => {
       const message = error instanceof Error ? error.message : "unknown";
       logError("Failed to write back auto-review run status", { runId, status, error: message });
+    });
+  });
+
+  svc.runManager.onRunTerminal((runId, status) => {
+    if (status !== "failed") {
+      return;
+    }
+
+    svc.workItemOrchestrator.handlePrefetchFailure(runId).catch((error) => {
+      const message = error instanceof Error ? error.message : "unknown";
+      logError("Failed to roll back auto-review work item after prefetch failure", { runId, error: message });
     });
   });
 

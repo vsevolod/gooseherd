@@ -107,7 +107,8 @@ export class PipelineEngine {
       baseBranch: run.baseBranch,
       branchName: run.branchName,
       task: run.task,
-      requestedBy: run.requestedBy
+      requestedBy: run.requestedBy,
+      ...(run.prefetchContext ? { prefetchContext: run.prefetchContext } : {})
     });
     // Merge pipeline-level context
     if (pipeline.context) {

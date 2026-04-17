@@ -48,6 +48,35 @@ test("kubernetes backend launches job, waits for success, redacts manifest token
   let jobReads = 0;
   let revokedRunId: string | undefined;
   let createdEnvelope: { payloadJson: Record<string, unknown> } | undefined;
+  const prefetchContext: NonNullable<RunRecord["prefetchContext"]> = {
+    meta: {
+      fetchedAt: "2026-04-17T00:00:00.000Z",
+      sources: ["github_pr"],
+    },
+    workItem: {
+      id: "work-item-1",
+      title: "Work item",
+      workflow: "feature_delivery",
+      githubPrUrl: "https://github.com/org/repo/pull/42",
+      githubPrNumber: 42,
+    },
+    github: {
+      pr: {
+        number: 42,
+        url: "https://github.com/org/repo/pull/42",
+        title: "Prefetched PR",
+        body: "body",
+        state: "open",
+      },
+      discussionComments: [],
+      reviews: [],
+      reviewComments: [],
+      ci: {
+        headSha: "abc123",
+        conclusion: "success",
+      },
+    },
+  };
 
   const resourceClient: Pick<KubernetesResourceClientType, "applySecret" | "applyJob" | "readJob" | "listPodsForJob" | "readJobLogs" | "deleteJob" | "deletePodsForJob" | "deleteSecret"> = {
     applySecret: async () => {
@@ -132,7 +161,10 @@ test("kubernetes backend launches job, waits for success, redacts manifest token
   });
 
   try {
-    const result = await backend.execute(makeRun(), {
+    const result = await backend.execute(makeRun({
+      prefetchContext,
+      autoReviewSourceSubstate: "pr_adopted",
+    }), {
       onPhase: async () => undefined,
       pipelineFile: "pipelines/kubernetes-smoke.yml",
     });
@@ -152,6 +184,8 @@ test("kubernetes backend launches job, waits for success, redacts manifest token
     assert.doesNotMatch(manifest, /issued-token/);
     assert.match(manifest, /REDACTED/);
     assert.equal(revokedRunId, "run-k8s-backend-1");
+    assert.deepEqual(createdEnvelope?.payloadJson.prefetch, prefetchContext);
+    assert.equal(createdEnvelope?.payloadJson.autoReviewSourceSubstate, "pr_adopted");
     assert.deepEqual(createdEnvelope?.payloadJson.runnerConfig, {
       agentCommandTemplate: "profile command",
       agentFollowUpTemplate: "profile follow-up",

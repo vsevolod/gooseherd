@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { runPipelineRunner } from "../src/runner/pipeline-runner.js";
+import { deriveRunRecordFromPayload, runPipelineRunner } from "../src/runner/pipeline-runner.js";
 import type { RunEnvelope, RunnerCompletionPayload, RunnerEventPayload } from "../src/runtime/control-plane-types.js";
 
 const samplePayload: RunEnvelope = {
@@ -18,6 +18,25 @@ const samplePayload: RunEnvelope = {
       channelId: "runner",
       threadTs: "runner",
       createdAt: new Date("2026-04-10T00:00:00.000Z").toISOString(),
+      prefetchContext: {
+        meta: {
+          fetchedAt: new Date("2026-04-10T00:00:00.000Z").toISOString(),
+          sources: ["jira"],
+        },
+        workItem: {
+          id: "work-item-1",
+          title: "Work item",
+          workflow: "feature_delivery",
+        },
+        jira: {
+          issue: {
+            key: "HUB-1",
+            description: "issue description",
+          },
+          comments: [],
+        },
+      },
+      autoReviewSourceSubstate: "pr_adopted",
     },
   },
   runtime: "kubernetes",
@@ -61,4 +80,57 @@ test("pipeline runner ignores transient cancellation polling failures during a s
   assert.equal(completions.length, 1);
   assert.equal(completions[0]?.status, "success");
   assert.equal(completions[0]?.artifactState, "complete");
+});
+
+test("deriveRunRecordFromPayload preserves prefetched context and auto-review substate", () => {
+  const run = deriveRunRecordFromPayload(samplePayload);
+
+  assert.equal(run.prefetchContext?.workItem.id, "work-item-1");
+  assert.equal(run.prefetchContext?.jira?.issue.key, "HUB-1");
+  assert.equal(run.autoReviewSourceSubstate, "pr_adopted");
+});
+
+test("deriveRunRecordFromPayload reads top-level prefetched context from control-plane payload", () => {
+  const run = deriveRunRecordFromPayload({
+    ...samplePayload,
+    payloadJson: {
+      run: {
+        ...samplePayload.payloadJson.run,
+        prefetchContext: undefined,
+        autoReviewSourceSubstate: undefined,
+      },
+      prefetch: {
+        meta: {
+          fetchedAt: new Date("2026-04-11T00:00:00.000Z").toISOString(),
+          sources: ["github_pr"],
+        },
+        workItem: {
+          id: "work-item-2",
+          title: "Another work item",
+          workflow: "feature_delivery",
+        },
+        github: {
+          pr: {
+            number: 99,
+            url: "https://github.com/org/repo/pull/99",
+            title: "Prefetched PR",
+            body: "body",
+            state: "open",
+          },
+          discussionComments: [],
+          reviews: [],
+          reviewComments: [],
+          ci: {
+            headSha: "deadbeef",
+            conclusion: "success",
+          },
+        },
+      },
+      autoReviewSourceSubstate: "applying_review_feedback",
+    },
+  });
+
+  assert.equal(run.prefetchContext?.workItem.id, "work-item-2");
+  assert.equal(run.prefetchContext?.github?.pr.number, 99);
+  assert.equal(run.autoReviewSourceSubstate, "applying_review_feedback");
 });

@@ -3,6 +3,7 @@ import path from "node:path";
 import type { NodeConfig, NodeResult, NodeDeps } from "../types.js";
 import type { ContextBag } from "../context-bag.js";
 import type { RunRecord } from "../../types.js";
+import type { RunPrefetchContext } from "../../runtime/run-context-types.js";
 import { runShellCapture } from "../shell.js";
 
 /**
@@ -17,6 +18,7 @@ export async function hydrateContextNode(
   const repoDir = ctx.getRequired<string>("repoDir");
   const promptFile = ctx.getRequired<string>("promptFile");
   const isFollowUp = ctx.get<boolean>("isFollowUp") ?? false;
+  const prefetchContext = getPrefetchContext(run, ctx);
 
   // Enrich prompt with org memories via lifecycle hooks
   const hookSections = deps.hooks ? await deps.hooks.onPromptEnrich(run) : [];
@@ -80,6 +82,11 @@ export async function hydrateContextNode(
   const repoSummary = await buildRepoSummary(repoDir, deps.logFile, run.task);
   if (repoSummary) {
     sections.push("## Repository Context", "", repoSummary, "");
+  }
+
+  const prefetchSections = prefetchContext ? buildPrefetchedContextSections(prefetchContext) : [];
+  if (prefetchSections.length > 0) {
+    sections.push(...prefetchSections, "");
   }
 
   const implementationPlan = ctx.get<string>("implementationPlan");
@@ -259,6 +266,268 @@ const MODE_INSTRUCTIONS: Record<string, string[]> = {
 
 export function getModeInstructions(mode: string): string[] {
   return MODE_INSTRUCTIONS[mode] ?? MODE_INSTRUCTIONS["standard"]!;
+}
+
+// ── Prefetched context rendering ──
+
+function getPrefetchContext(run: RunRecord, ctx: ContextBag): RunPrefetchContext | undefined {
+  return ctx.get<RunPrefetchContext>("prefetchContext") ?? run.prefetchContext;
+}
+
+function buildPrefetchedContextSections(prefetchContext: RunPrefetchContext): string[] {
+  const parts: string[] = ["## Prefetched Context"];
+
+  appendPrefetchedSection(parts, "Work Item Context", formatWorkItemContext(prefetchContext));
+  appendPrefetchedSection(parts, "PR Description", formatBodySection(prefetchContext.github?.pr.body));
+  appendPrefetchedSection(
+    parts,
+    "PR Discussion Comments",
+    formatDiscussionComments(
+      prefetchContext.github?.discussionComments,
+      prefetchContext.github?.discussionCommentsTotalCount
+    )
+  );
+  appendPrefetchedSection(
+    parts,
+    "PR Review Summaries",
+    formatReviewSummaries(prefetchContext.github?.reviews, prefetchContext.github?.reviewsTotalCount)
+  );
+  appendPrefetchedSection(
+    parts,
+    "PR Unresolved Inline Review Comments",
+    formatInlineReviewComments(
+      prefetchContext.github?.reviewComments,
+      prefetchContext.github?.reviewCommentsTotalCount
+    )
+  );
+  appendPrefetchedSection(parts, "CI Snapshot", formatCiSnapshot(prefetchContext.github?.ci));
+  appendPrefetchedSection(parts, "Jira Description", formatBodySection(prefetchContext.jira?.issue.description));
+  appendPrefetchedSection(
+    parts,
+    "Jira Comments",
+    formatJiraComments(prefetchContext.jira?.comments, prefetchContext.jira?.commentsTotalCount)
+  );
+
+  return parts;
+}
+
+function appendPrefetchedSection(parts: string[], title: string, lines: string[]): void {
+  if (lines.length === 0) {
+    return;
+  }
+  parts.push(`### ${title}`, "", ...lines, "");
+}
+
+function formatWorkItemContext(prefetchContext: RunPrefetchContext): string[] {
+  const lines = [
+    `- Work Item ID: ${prefetchContext.workItem.id}`,
+    `- Title: ${prefetchContext.workItem.title}`,
+    `- Workflow: ${prefetchContext.workItem.workflow}`,
+  ];
+
+  if (prefetchContext.workItem.state) {
+    lines.push(`- State: ${prefetchContext.workItem.state}`);
+  }
+  if (prefetchContext.workItem.jiraIssueKey) {
+    lines.push(`- Jira Issue: ${prefetchContext.workItem.jiraIssueKey}`);
+  }
+  if (prefetchContext.workItem.githubPrUrl) {
+    lines.push(`- PR URL: ${prefetchContext.workItem.githubPrUrl}`);
+  }
+  if (prefetchContext.workItem.githubPrNumber !== undefined) {
+    lines.push(`- PR Number: ${String(prefetchContext.workItem.githubPrNumber)}`);
+  }
+
+  lines.push(`- Fetched at: ${prefetchContext.meta.fetchedAt}`);
+  if (prefetchContext.meta.sources.length > 0) {
+    lines.push(`- Sources: ${prefetchContext.meta.sources.join(", ")}`);
+  }
+
+  return lines;
+}
+
+function formatBodySection(body: string | undefined): string[] {
+  if (!body?.trim()) {
+    return [];
+  }
+  return body.split("\n");
+}
+
+function formatDiscussionComments(
+  comments: NonNullable<RunPrefetchContext["github"]>["discussionComments"] | undefined,
+  totalCount?: number
+): string[] {
+  if (!comments || comments.length === 0) {
+    return [];
+  }
+  return withTruncationNotice(
+    formatEntryList(
+      comments.map((comment) => ({
+        header: formatCommentHeader(comment.authorLogin ? `@${comment.authorLogin}` : undefined, comment.createdAt),
+        body: comment.body,
+      }))
+    ),
+    comments.length,
+    totalCount,
+    "discussion comments"
+  );
+}
+
+function formatReviewSummaries(
+  reviews: NonNullable<RunPrefetchContext["github"]>["reviews"] | undefined,
+  totalCount?: number
+): string[] {
+  if (!reviews || reviews.length === 0) {
+    return [];
+  }
+  return withTruncationNotice(
+    formatEntryList(
+      reviews.map((review) => ({
+        header: formatCommentHeader(
+          review.state?.toUpperCase(),
+          review.authorLogin ? `@${review.authorLogin}` : undefined,
+          review.createdAt
+        ),
+        body: review.body,
+      }))
+    ),
+    reviews.length,
+    totalCount,
+    "review summaries"
+  );
+}
+
+function formatInlineReviewComments(
+  comments: NonNullable<RunPrefetchContext["github"]>["reviewComments"] | undefined,
+  totalCount?: number
+): string[] {
+  if (!comments || comments.length === 0) {
+    return [];
+  }
+  return withTruncationNotice(
+    formatEntryList(
+      comments.map((comment) => {
+        const locationParts = [comment.path];
+        if (comment.line !== undefined) {
+          locationParts.push(String(comment.line));
+        }
+        if (comment.side) {
+          locationParts.push(`(${comment.side})`);
+        }
+        return {
+          header: formatCommentHeader(
+            comment.authorLogin ? `@${comment.authorLogin}` : undefined,
+            comment.createdAt,
+            locationParts.join(":")
+          ),
+          body: comment.body,
+        };
+      })
+    ),
+    comments.length,
+    totalCount,
+    "inline review comments"
+  );
+}
+
+function formatCiSnapshot(ci: NonNullable<RunPrefetchContext["github"]>["ci"] | undefined): string[] {
+  if (!ci) {
+    return [];
+  }
+
+  const lines = [
+    `- Head SHA: ${ci.headSha ?? "unknown"}`,
+    `- Conclusion: ${ci.conclusion}`,
+  ];
+
+  if (ci.failedRuns && ci.failedRuns.length > 0) {
+    lines.push("- Failed runs:");
+    for (const failedRun of ci.failedRuns) {
+      lines.push(`  - ${failedRun.name} (#${String(failedRun.id)}): ${failedRun.conclusion ?? failedRun.status}`);
+      if (failedRun.detailsUrl) {
+        lines.push(`    Details: ${failedRun.detailsUrl}`);
+      }
+      if (failedRun.startedAt) {
+        lines.push(`    Started: ${failedRun.startedAt}`);
+      }
+      if (failedRun.completedAt) {
+        lines.push(`    Completed: ${failedRun.completedAt}`);
+      }
+    }
+  }
+
+  if (ci.failedAnnotations && ci.failedAnnotations.length > 0) {
+    lines.push(...withTruncationNotice([], ci.failedAnnotations.length, ci.failedAnnotationsTotalCount, "failed annotations"));
+    lines.push("- Failed annotations:");
+    for (const annotation of ci.failedAnnotations) {
+      lines.push(
+        `  - ${annotation.checkRunName}: ${annotation.path}:${String(annotation.line)} [${annotation.level}] ${annotation.message}`
+      );
+    }
+  }
+
+  return lines;
+}
+
+function formatJiraComments(
+  comments: NonNullable<RunPrefetchContext["jira"]>["comments"] | undefined,
+  totalCount?: number
+): string[] {
+  if (!comments || comments.length === 0) {
+    return [];
+  }
+  return withTruncationNotice(
+    formatEntryList(
+      comments.map((comment) => ({
+        header: formatCommentHeader(comment.authorDisplayName, comment.createdAt),
+        body: comment.body,
+      }))
+    ),
+    comments.length,
+    totalCount,
+    "Jira comments"
+  );
+}
+
+function formatEntryList(entries: Array<{ header: string; body: string }>): string[] {
+  const lines: string[] = [];
+  entries.forEach((entry, index) => {
+    if (index > 0) {
+      lines.push("");
+    }
+    lines.push(entry.header, ...indentLines(entry.body));
+  });
+  return lines;
+}
+
+function withTruncationNotice(lines: string[], visibleCount: number, totalCount: number | undefined, noun: string): string[] {
+  if (!totalCount || totalCount <= visibleCount) {
+    return lines;
+  }
+
+  return [
+    `Showing ${String(visibleCount)} of ${String(totalCount)} ${noun}.`,
+    "",
+    ...lines,
+  ];
+}
+
+function formatCommentHeader(primary?: string, secondary?: string, tertiary?: string): string {
+  const parts: string[] = [];
+  if (primary) {
+    parts.push(primary);
+  }
+  if (secondary) {
+    parts.push(secondary);
+  }
+  if (tertiary) {
+    parts.push(tertiary);
+  }
+  return `- ${parts.length > 0 ? parts.join(" • ") : "Comment"}`;
+}
+
+function indentLines(body: string): string[] {
+  return body.split("\n").map(line => `  ${line}`);
 }
 
 // ── Dynamic AGENTS.md builder ──

@@ -111,7 +111,6 @@ interface GraphQLReviewThreadCommentPage {
       body?: string | null;
       path?: string | null;
       line?: number | null;
-      side?: string | null;
       url?: string | null;
     } | null> | null;
     pageInfo?: {
@@ -221,12 +220,13 @@ export class GitHubService {
     return { url: response.data.html_url, number: response.data.number };
   }
 
-  async getPullRequest(repoSlug: string, prNumber: number): Promise<PullRequestDetails> {
+  async getPullRequest(repoSlug: string, prNumber: number, signal?: AbortSignal): Promise<PullRequestDetails> {
     const { owner, repo } = parseRepoSlug(repoSlug);
     const response = await this.octokit.pulls.get({
       owner,
       repo,
-      pull_number: prNumber
+      pull_number: prNumber,
+      ...(signal ? { request: { signal } } : {})
     });
 
     return {
@@ -244,7 +244,8 @@ export class GitHubService {
 
   async listPullRequestDiscussionComments(
     repoSlug: string,
-    prNumber: number
+    prNumber: number,
+    signal?: AbortSignal,
   ): Promise<PullRequestDiscussionComment[]> {
     const { owner, repo } = parseRepoSlug(repoSlug);
     const comments = await this.paginateRest(page =>
@@ -253,8 +254,10 @@ export class GitHubService {
         repo,
         issue_number: prNumber,
         per_page: 100,
-        page
-      })
+        page,
+        ...(signal ? { request: { signal } } : {})
+      }),
+      signal
     );
 
     return comments
@@ -268,7 +271,7 @@ export class GitHubService {
       .sort(sortByCreatedAt);
   }
 
-  async listPullRequestReviews(repoSlug: string, prNumber: number): Promise<PullRequestReview[]> {
+  async listPullRequestReviews(repoSlug: string, prNumber: number, signal?: AbortSignal): Promise<PullRequestReview[]> {
     const { owner, repo } = parseRepoSlug(repoSlug);
     const reviews = await this.paginateRest(page =>
       this.octokit.pulls.listReviews({
@@ -276,8 +279,10 @@ export class GitHubService {
         repo,
         pull_number: prNumber,
         per_page: 100,
-        page
-      })
+        page,
+        ...(signal ? { request: { signal } } : {})
+      }),
+      signal
     );
 
     return reviews
@@ -294,7 +299,8 @@ export class GitHubService {
 
   async listUnresolvedReviewComments(
     repoSlug: string,
-    prNumber: number
+    prNumber: number,
+    signal?: AbortSignal,
   ): Promise<PullRequestReviewComment[]> {
     const { owner, repo } = parseRepoSlug(repoSlug);
     const unresolvedComments: PullRequestReviewComment[] = [];
@@ -325,7 +331,6 @@ export class GitHubService {
                     body
                     path
                     line
-                    side
                     url
                   }
                 }
@@ -334,7 +339,7 @@ export class GitHubService {
           }
         }
       }
-    `, { owner, repo, number: prNumber, after: threadAfter });
+    `, { owner, repo, number: prNumber, after: threadAfter }, signal);
 
       const threadsConnection = response.repository?.pullRequest?.reviewThreads;
       for (const thread of threadsConnection?.nodes ?? []) {
@@ -362,14 +367,13 @@ export class GitHubService {
                       body
                       path
                       line
-                      side
                       url
                     }
                   }
                 }
               }
             }
-          `, { threadId: thread.id, after: commentAfter });
+          `, { threadId: thread.id, after: commentAfter }, signal);
           commentPage = commentResponse.node?.comments ?? null;
           collectReviewThreadComments(commentPage, unresolvedComments);
           if (!commentPage?.pageInfo?.hasNextPage) {
@@ -390,10 +394,11 @@ export class GitHubService {
 
   async getPullRequestCiSnapshot(
     repoSlug: string,
-    headSha: string
+    headSha: string,
+    signal?: AbortSignal,
   ): Promise<PullRequestCiSnapshot> {
     const { owner, repo } = parseRepoSlug(repoSlug);
-    const checkRuns = await this.listCheckRuns(owner, repo, headSha);
+    const checkRuns = await this.listCheckRuns(owner, repo, headSha, signal);
     if (checkRuns.length === 0) {
       return { headSha, conclusion: "no_ci" };
     }
@@ -408,7 +413,7 @@ export class GitHubService {
     if (failedRuns.length > 0) {
       const failedAnnotations: PullRequestCiSnapshot["failedAnnotations"] = [];
       for (const run of failedRuns) {
-        const annotations = await this.getCheckAnnotations(owner, repo, run.id);
+        const annotations = await this.getCheckAnnotations(owner, repo, run.id, signal);
         for (const annotation of annotations) {
           failedAnnotations.push({
             checkRunName: run.name,
@@ -470,15 +475,17 @@ export class GitHubService {
     return this.createPullRequest(params);
   }
 
-  async listCheckRuns(owner: string, repo: string, ref: string): Promise<CICheckRun[]> {
+  async listCheckRuns(owner: string, repo: string, ref: string, signal?: AbortSignal): Promise<CICheckRun[]> {
     const checkRuns = await this.paginateRest(page =>
       this.octokit.checks.listForRef({
         owner,
         repo,
         ref,
         per_page: 100,
-        page
-      }).then(response => ({ data: response.data.check_runs }))
+        page,
+        ...(signal ? { request: { signal } } : {})
+      }).then(response => ({ data: response.data.check_runs })),
+      signal
     );
     return checkRuns.map(cr => ({
       id: cr.id,
@@ -491,15 +498,17 @@ export class GitHubService {
     }));
   }
 
-  async getCheckAnnotations(owner: string, repo: string, checkRunId: number): Promise<CICheckAnnotation[]> {
+  async getCheckAnnotations(owner: string, repo: string, checkRunId: number, signal?: AbortSignal): Promise<CICheckAnnotation[]> {
     const annotations = await this.paginateRest(page =>
       this.octokit.checks.listAnnotations({
         owner,
         repo,
         check_run_id: checkRunId,
         per_page: 100,
-        page
-      })
+        page,
+        ...(signal ? { request: { signal } } : {})
+      }),
+      signal
     );
     return annotations.map(a => ({
       path: a.path,
@@ -518,10 +527,13 @@ export class GitHubService {
     return typeof response.data === "string" ? response.data : String(response.data);
   }
 
-  private async graphql<T>(query: string, variables: Record<string, unknown>): Promise<T> {
+  private async graphql<T>(query: string, variables: Record<string, unknown>, signal?: AbortSignal): Promise<T> {
     return (this.octokit as unknown as {
       graphql: <U>(query: string, variables?: Record<string, unknown>) => Promise<U>;
-    }).graphql<T>(query, variables);
+    }).graphql<T>(query, {
+      ...variables,
+      ...(signal ? { request: { signal } } : {}),
+    });
   }
 
   async listDeployments(
@@ -776,11 +788,15 @@ export class GitHubService {
     }));
   }
 
-  private async paginateRest<T>(fetchPage: (page: number) => Promise<{ data: T[] }>): Promise<T[]> {
+  private async paginateRest<T>(
+    fetchPage: (page: number) => Promise<{ data: T[] }>,
+    signal?: AbortSignal,
+  ): Promise<T[]> {
     const items: T[] = [];
     let page = 1;
 
     while (true) {
+      signal?.throwIfAborted?.();
       const response = await fetchPage(page);
       items.push(...response.data);
       if (response.data.length < 100) {
@@ -821,7 +837,6 @@ function collectReviewThreadComments(
       body: comment.body ?? "",
       path: comment.path ?? undefined,
       line: comment.line ?? undefined,
-      side: comment.side ?? undefined,
       url: comment.url ?? undefined,
       threadResolved: false
     });

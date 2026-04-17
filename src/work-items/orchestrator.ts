@@ -10,6 +10,7 @@ import type { WorkItemRecord } from "./types.js";
 
 const AUTO_REVIEW_REQUESTED_BY = "work-item:auto-review";
 const ACTIVE_AUTO_REVIEW_RUN_STATUSES = new Set(["queued", "running", "validating", "pushing", "awaiting_ci", "ci_fixing"]);
+const PREFETCH_FAILURE_PATTERN = /prefetch/i;
 
 export interface WorkItemOrchestratorDeps {
   config?: {
@@ -83,6 +84,7 @@ export class WorkItemOrchestrator {
         threadTs: current.homeThreadTs,
         runtime,
         workItemId: current.id,
+        autoReviewSourceSubstate: current.substate,
         pipelineHint: "pipeline",
       }, "gooseherd", current.githubPrHeadBranch);
       launchedRunId = queuedRun.id;
@@ -132,6 +134,42 @@ export class WorkItemOrchestrator {
       flagsToAdd: ["self_review_done"],
     });
   }
+
+  async handlePrefetchFailure(runId: string): Promise<WorkItemRecord | undefined> {
+    const run = await this.runs.getRun(runId);
+    if (!isLatestRollbackCandidate(run)) {
+      return undefined;
+    }
+
+    let rolledBack: WorkItemRecord | undefined;
+    await this.db.transaction(async (tx) => {
+      const txDb = tx as unknown as Database;
+      const txRuns = new RunStore(txDb);
+      const txWorkItems = new WorkItemStore(txDb);
+
+      await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${run.workItemId!}))`);
+
+      const latestRun = await txRuns.getRun(runId);
+      if (!isLatestRollbackCandidate(latestRun)) {
+        return;
+      }
+
+      const latestRuns = await txRuns.listRunsForWorkItem(latestRun.workItemId!);
+      const latestAutoReview = latestRuns.find((candidate) => candidate.requestedBy === AUTO_REVIEW_REQUESTED_BY);
+      if (!latestAutoReview || latestAutoReview.id !== latestRun.id) {
+        return;
+      }
+
+      rolledBack = await txWorkItems.rollbackAutoReviewCollectingContext({
+        workItemId: latestRun.workItemId!,
+        expectedState: "auto_review",
+        expectedSubstate: "collecting_context",
+        targetSubstate: latestRun.autoReviewSourceSubstate!,
+      });
+    });
+
+    return rolledBack;
+  }
 }
 
 export async function reconcileWorkItem(
@@ -151,6 +189,14 @@ export async function writebackWorkItem(
   deps?: WorkItemOrchestratorDeps,
 ): Promise<WorkItemRecord | undefined> {
   return new WorkItemOrchestrator(db, deps).writebackWorkItem(runId);
+}
+
+export async function handlePrefetchFailure(
+  db: Database,
+  runId: string,
+  deps?: WorkItemOrchestratorDeps,
+): Promise<WorkItemRecord | undefined> {
+  return new WorkItemOrchestrator(db, deps).handlePrefetchFailure(runId);
 }
 
 function shouldAutoLaunchAutoReview(workItem: WorkItemRecord): boolean {
@@ -213,4 +259,31 @@ function isSuccessfulAutoReviewCheckpoint(run: { status: string; requestedBy: st
     return false;
   }
   return run.status === "awaiting_ci" || run.status === "completed";
+}
+
+function isLatestRollbackCandidate(run: {
+  status: string;
+  requestedBy: string;
+  error?: string;
+  workItemId?: string;
+  autoReviewSourceSubstate?: string;
+} | undefined): run is {
+  status: string;
+  requestedBy: string;
+  error: string;
+  workItemId: string;
+  autoReviewSourceSubstate: string;
+} {
+  if (!run) {
+    return false;
+  }
+  return (
+    run.status === "failed" &&
+    run.requestedBy === AUTO_REVIEW_REQUESTED_BY &&
+    typeof run.error === "string" &&
+    PREFETCH_FAILURE_PATTERN.test(run.error) &&
+    typeof run.workItemId === "string" &&
+    typeof run.autoReviewSourceSubstate === "string" &&
+    run.autoReviewSourceSubstate.length > 0
+  );
 }

@@ -137,6 +137,7 @@ test("orchestrator promotes auto_review pr_adopted work items into collecting_co
   assert.equal(runRows[0]?.parentBranchName, "feature/hbl-404");
   assert.equal(runRows[0]?.runtime, "kubernetes");
   assert.equal(runRows[0]?.pipelineHint, "pipeline");
+  assert.equal(runRows[0]?.autoReviewSourceSubstate, "pr_adopted");
 
   const events = await db.select().from(workItemEvents).where(eq(workItemEvents.workItemId, workItem.id));
   assert.ok(events.some((event) => event.eventType === "run.auto_launched"));
@@ -153,6 +154,7 @@ test("orchestrator auto-launches one linked run for auto_review items applying r
   assert.equal(runRows.length, 1);
   assert.equal(runRows[0]?.workItemId, workItem.id);
   assert.equal(runRows[0]?.status, "queued");
+  assert.equal(runRows[0]?.autoReviewSourceSubstate, "applying_review_feedback");
 });
 
 test("orchestrator writeback marks self_review_done when auto-review run reaches awaiting_ci", async (t) => {
@@ -273,4 +275,88 @@ test("orchestrator writeback ignores unrelated linked successful runs", async (t
   const afterCompleted = await (new WorkItemService(db)).getWorkItem(workItem.id);
   assert.equal(afterCompleted?.substate, "applying_review_feedback");
   assert.ok(!afterCompleted?.flags.includes("self_review_done"));
+});
+
+test("orchestrator rolls collecting_context back to the source substate for the latest failed auto-review launch", async (t) => {
+  const { db, cleanup, workItem, runStore } = await createAutoReviewFixture();
+  t.after(cleanup);
+  const { reconcileWorkItem, handlePrefetchFailure } = await import("../src/work-items/orchestrator.js");
+
+  await reconcileWorkItem(db, workItem.id);
+
+  const [launchedRun] = await runStore.listRunsForWorkItem(workItem.id);
+  assert.equal(launchedRun?.autoReviewSourceSubstate, "pr_adopted");
+  await runStore.updateRun(launchedRun!.id, {
+    status: "failed",
+    phase: "failed",
+    error: "GitHub prefetch failed for work item test",
+  });
+
+  const rolledBack = await handlePrefetchFailure(db, launchedRun!.id);
+  assert.equal(rolledBack?.state, "auto_review");
+  assert.equal(rolledBack?.substate, "pr_adopted");
+
+  const updated = await (new WorkItemService(db)).getWorkItem(workItem.id);
+  assert.equal(updated?.substate, "pr_adopted");
+});
+
+test("orchestrator does not overwrite newer work-item state during prefetch rollback", async (t) => {
+  const { db, cleanup, workItem, runStore } = await createAutoReviewFixture();
+  t.after(cleanup);
+  const { reconcileWorkItem, handlePrefetchFailure } = await import("../src/work-items/orchestrator.js");
+
+  await reconcileWorkItem(db, workItem.id);
+
+  const [launchedRun] = await runStore.listRunsForWorkItem(workItem.id);
+  await runStore.updateRun(launchedRun!.id, {
+    status: "failed",
+    phase: "failed",
+    error: "Jira prefetch failed for work item test",
+  });
+  await (new WorkItemStore(db)).updateState(workItem.id, {
+    state: "auto_review",
+    substate: "waiting_ci",
+  });
+
+  const rolledBack = await handlePrefetchFailure(db, launchedRun!.id);
+  assert.equal(rolledBack, undefined);
+
+  const updated = await (new WorkItemService(db)).getWorkItem(workItem.id);
+  assert.equal(updated?.substate, "waiting_ci");
+});
+
+test("orchestrator does not roll back superseded auto-review launches", async (t) => {
+  const { db, cleanup, workItem, runStore } = await createAutoReviewFixture();
+  t.after(cleanup);
+  const { reconcileWorkItem, handlePrefetchFailure } = await import("../src/work-items/orchestrator.js");
+
+  await reconcileWorkItem(db, workItem.id);
+  const [firstRun] = await runStore.listRunsForWorkItem(workItem.id);
+  await runStore.updateRun(firstRun!.id, {
+    status: "failed",
+    phase: "failed",
+    error: "GitHub prefetch failed for work item test",
+  });
+
+  await runStore.createRun(
+    {
+      repoSlug: workItem.repo,
+      task: `Auto-review retry for ${workItem.title}`,
+      baseBranch: "main",
+      requestedBy: "work-item:auto-review",
+      channelId: workItem.homeChannelId,
+      threadTs: workItem.homeThreadTs,
+      runtime: "local",
+      workItemId: workItem.id,
+      autoReviewSourceSubstate: "pr_adopted",
+    },
+    "gooseherd",
+    workItem.githubPrHeadBranch,
+  );
+
+  const rolledBack = await handlePrefetchFailure(db, firstRun!.id);
+  assert.equal(rolledBack, undefined);
+
+  const updated = await (new WorkItemService(db)).getWorkItem(workItem.id);
+  assert.equal(updated?.substate, "collecting_context");
 });

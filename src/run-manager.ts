@@ -12,6 +12,8 @@ import type { ExecutionResult, NewRunInput, RunRecord } from "./types.js";
 import type { PipelineStore } from "./pipeline/pipeline-store.js";
 import type { LearningStore } from "./observer/learning-store.js";
 import { getRuntimeBackend, type RuntimeRegistry } from "./runtime/backend.js";
+import type { RunContextPrefetcher } from "./runtime/run-context-prefetcher.js";
+import type { RunPrefetchContext } from "./runtime/run-context-types.js";
 
 const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
@@ -51,6 +53,10 @@ const ERROR_PATTERNS: Array<{ test: RegExp; result: ClassifiedError }> = [
     result: { category: "pr", friendly: "Failed to create pull request", suggestion: "Check that your GitHub credentials (GITHUB_TOKEN or GitHub App) have permission to create PRs on this repo." }
   },
 ];
+
+const NOOP_RUN_CONTEXT_PREFETCHER: Pick<RunContextPrefetcher, "prefetch"> = {
+  prefetch: async (): Promise<RunPrefetchContext | undefined> => undefined,
+};
 
 
 export function classifyError(message: string): ClassifiedError {
@@ -159,6 +165,7 @@ export class RunManager {
   private readonly statusChangeCallbacks: RunStatusChangeCallback[] = [];
   /** AbortControllers for in-progress runs — enables cancellation. */
   private readonly runAbortControllers = new Map<string, AbortController>();
+  private readonly runContextPrefetcher: Pick<RunContextPrefetcher, "prefetch">;
 
   constructor(
     private readonly config: AppConfig,
@@ -167,8 +174,10 @@ export class RunManager {
     private readonly slackClient: WebClient | undefined,
     private readonly hooks?: RunLifecycleHooks,
     private readonly pipelineStore?: PipelineStore,
-    private readonly learningStore?: LearningStore
+    private readonly learningStore?: LearningStore,
+    runContextPrefetcher?: Pick<RunContextPrefetcher, "prefetch">
   ) {
+    this.runContextPrefetcher = runContextPrefetcher ?? NOOP_RUN_CONTEXT_PREFETCHER;
     this.queue = new PQueue({ concurrency: config.runnerConcurrency });
 
     if (learningStore) {
@@ -224,6 +233,64 @@ export class RunManager {
     return "slack";
   }
 
+  private async raceWithAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+    if (signal.aborted) {
+      throw new Error("Run cancelled");
+    }
+
+    let abortHandler: (() => void) | undefined;
+    try {
+      return await Promise.race([
+        promise,
+        new Promise<T>((_, reject) => {
+          abortHandler = () => reject(new Error("Run cancelled"));
+          signal.addEventListener("abort", abortHandler!, { once: true });
+        }),
+      ]);
+    } finally {
+      if (abortHandler) {
+        signal.removeEventListener("abort", abortHandler);
+      }
+    }
+  }
+
+  private async refreshRunForDispatch(
+    runId: string,
+    run: RunRecord,
+    signal: AbortSignal,
+  ): Promise<RunRecord> {
+    const latest = await this.store.getRun(runId) ?? run;
+    const hasMatchingPrefetchContext =
+      latest.prefetchContext?.workItem.id === latest.workItemId;
+    const hasStaleLaunchContext =
+      latest.prefetchContext !== undefined ||
+      latest.autoReviewSourceSubstate !== undefined;
+
+    if (!latest.workItemId) {
+      if (!hasStaleLaunchContext) {
+        return latest;
+      }
+      return await this.store.updateRun(runId, {
+        prefetchContext: undefined,
+        autoReviewSourceSubstate: undefined,
+      });
+    }
+
+    if (hasMatchingPrefetchContext) {
+      return latest;
+    }
+
+    const prefetchContext = await this.raceWithAbort(this.runContextPrefetcher.prefetch(latest, signal), signal);
+    if (!prefetchContext) {
+      if (latest.prefetchContext === undefined) {
+        return latest;
+      }
+      return await this.store.updateRun(runId, { prefetchContext: undefined });
+    }
+
+    return await this.store.updateRun(runId, { prefetchContext });
+  }
+
   /**
    * Resolve a pipeline hint to a file path.
    * Checks the PipelineStore first (for custom pipelines), falls back to disk.
@@ -275,18 +342,17 @@ export class RunManager {
       }
       return false;
     }
-    if (run.runtime === "kubernetes") {
-      await this.store.updateRun(runId, {
-        status: "cancel_requested",
-        phase: "cancel_requested",
-      });
-      return true;
-    }
     await this.store.updateRun(runId, {
       status: "cancel_requested",
       phase: "cancel_requested",
     });
-    controller.abort();
+    const shouldAbortLocally =
+      run.runtime !== "kubernetes" ||
+      run.phase === "queued" ||
+      run.phase === "cloning";
+    if (shouldAbortLocally) {
+      controller.abort();
+    }
     return true;
   }
 
@@ -561,6 +627,8 @@ export class RunManager {
         logsPath: path.resolve(this.config.workRoot, stableRunId, "run.log"),
         error: undefined
       });
+      const abortController = new AbortController();
+      this.runAbortControllers.set(stableRunId, abortController);
 
       // Throttled detail callback for progress updates (max once per 5s)
       let lastDetailTime = 0;
@@ -581,6 +649,8 @@ export class RunManager {
       }, Math.max(5, this.config.slackProgressHeartbeatSeconds) * 1000);
       heartbeat.unref?.();
 
+      run = await this.refreshRunForDispatch(stableRunId, run, abortController.signal);
+
       const phaseCallback = async (phase: string): Promise<void> => {
         currentPhase = phase;
         const nextStatus = mapPhaseToRunStatus(phase);
@@ -592,8 +662,7 @@ export class RunManager {
       };
 
       const pipelineFile = await this.resolvePipeline(run.pipelineHint, run.id);
-      const abortController = new AbortController();
-      this.runAbortControllers.set(stableRunId, abortController);
+      run = await this.refreshRunForDispatch(stableRunId, run, abortController.signal);
       const backend = this.getBackend(run.runtime);
       const result = await backend.execute(run, {
         onPhase: phaseCallback,
@@ -642,7 +711,7 @@ export class RunManager {
       this.runAbortControllers.delete(stableRunId);
       const message = error instanceof Error ? error.message : "Unknown error";
       const latest = await this.store.getRun(stableRunId) ?? run;
-      const cancelled = latest.runtime === "kubernetes" && latest.status === "cancel_requested";
+      const cancelled = latest.status === "cancel_requested";
       const terminalRun = await this.store.updateRun(stableRunId, {
         status: cancelled ? "cancelled" : "failed",
         phase: cancelled ? "cancelled" : "failed",

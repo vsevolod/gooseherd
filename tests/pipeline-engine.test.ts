@@ -145,6 +145,77 @@ test("PipelineEngine: instantiates correctly", async (t) => {
   assert.ok(engine instanceof PipelineEngine);
 });
 
+test("PipelineEngine: seeds ContextBag with run prefetch context", async (t) => {
+  const tmpDir = await mkdtemp(path.join(os.tmpdir(), "pe-prefetch-"));
+  const workDir = path.join(tmpDir, "work");
+  await mkdir(workDir, { recursive: true });
+  const pipelinePath = path.join(tmpDir, "pipeline.yml");
+  await writeFile(
+    pipelinePath,
+    [
+      "version: 1",
+      "name: test-pipeline",
+      "nodes:",
+      "  - id: classify_task",
+      "    type: deterministic",
+      "    action: classify_task"
+    ].join("\n"),
+    "utf8"
+  );
+  t.after(async () => { await rm(tmpDir, { recursive: true, force: true }); });
+
+  const prefetchContext: NonNullable<RunRecord["prefetchContext"]> = {
+    meta: {
+      fetchedAt: new Date("2026-04-17T00:00:00.000Z").toISOString(),
+      sources: ["jira"],
+    },
+    workItem: {
+      id: "work-item-1",
+      title: "Work item",
+      workflow: "feature_delivery",
+    },
+    jira: {
+      issue: {
+        key: "HUB-1",
+        description: "issue description",
+      },
+      comments: [],
+    },
+  };
+  const run = makeRun({
+    id: "test-run-prefetch",
+    prefetchContext,
+  });
+  const config = makeConfig({ workRoot: workDir, dryRun: true });
+  const engine = new PipelineEngine(config);
+  let observedPrefetchContext: RunRecord["prefetchContext"] | undefined;
+
+  (engine as unknown as {
+    executePipeline: (
+      pipeline: unknown,
+      ctx: ContextBag,
+      deps: unknown,
+      startIndex: number,
+      eventLogger?: unknown,
+      skipNodeIds?: Set<string>,
+      enableNodeIds?: Set<string>,
+      abortSignal?: AbortSignal,
+      sandboxRef?: { handle?: unknown }
+    ) => Promise<NodeResult & { steps: never[]; warnings: never[] }>;
+  }).executePipeline = async (_pipeline, ctx) => {
+    observedPrefetchContext = ctx.get<RunRecord["prefetchContext"]>("prefetchContext");
+    return {
+      outcome: "success",
+      steps: [],
+      warnings: [],
+    };
+  };
+
+  await engine.execute(run, async () => undefined, pipelinePath);
+
+  assert.deepEqual(observedPrefetchContext, prefetchContext);
+});
+
 test("PipelineEngine: unified pipeline is the single pipeline file", () => {
   const resolved = "pipelines/pipeline.yml";
   assert.equal(resolved, "pipelines/pipeline.yml");

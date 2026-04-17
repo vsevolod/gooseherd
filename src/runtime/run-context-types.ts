@@ -15,6 +15,9 @@ export interface RunPrefetchContext {
     githubPrNumber?: number;
   };
   github?: {
+    discussionCommentsTotalCount?: number;
+    reviewsTotalCount?: number;
+    reviewCommentsTotalCount?: number;
     pr: {
       number: number;
       url: string;
@@ -71,9 +74,11 @@ export interface RunPrefetchContext {
         message: string;
         level: string;
       }>;
+      failedAnnotationsTotalCount?: number;
     };
   };
   jira?: {
+    commentsTotalCount?: number;
     issue: {
       key: string;
       url?: string;

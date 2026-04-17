@@ -259,7 +259,6 @@ test("GitHubService: unresolved review comments keep only unresolved threads", a
                       body: "Please rename this",
                       path: "src/app.ts",
                       line: 42,
-                      side: "RIGHT",
                       url: "https://github.com/org/repo/pull/1#discussion_r1"
                     }
                   ]
@@ -281,7 +280,6 @@ test("GitHubService: unresolved review comments keep only unresolved threads", a
                       body: "Resolved feedback",
                       path: "src/app.ts",
                       line: 99,
-                      side: "RIGHT",
                       url: "https://github.com/org/repo/pull/1#discussion_r2"
                     }
                   ]
@@ -304,7 +302,6 @@ test("GitHubService: unresolved review comments keep only unresolved threads", a
       body: "Please rename this",
       path: "src/app.ts",
       line: 42,
-      side: "RIGHT",
       url: "https://github.com/org/repo/pull/1#discussion_r1",
       threadResolved: false
     }
@@ -554,7 +551,6 @@ test("GitHubService: unresolved review comments paginate threads and thread comm
                     body: "Second comment on thread 1",
                     path: "src/app.ts",
                     line: 43,
-                    side: "RIGHT",
                     url: "https://github.com/org/repo/pull/1#discussion_r2"
                   }
                 ]
@@ -602,7 +598,6 @@ test("GitHubService: unresolved review comments paginate threads and thread comm
                           body: "Thread 2 comment",
                           path: "src/app.ts",
                           line: 99,
-                          side: "RIGHT",
                           url: "https://github.com/org/repo/pull/1#discussion_r3"
                         }
                       ]
@@ -640,7 +635,6 @@ test("GitHubService: unresolved review comments paginate threads and thread comm
                         body: "First comment on thread 1",
                         path: "src/app.ts",
                         line: 42,
-                        side: "RIGHT",
                         url: "https://github.com/org/repo/pull/1#discussion_r1"
                       }
                     ]
@@ -662,7 +656,6 @@ test("GitHubService: unresolved review comments paginate threads and thread comm
                         body: "Resolved comment",
                         path: "src/app.ts",
                         line: 123,
-                        side: "RIGHT",
                         url: "https://github.com/org/repo/pull/1#discussion_r4"
                       }
                     ]
@@ -691,7 +684,6 @@ test("GitHubService: unresolved review comments paginate threads and thread comm
       body: "First comment on thread 1",
       path: "src/app.ts",
       line: 42,
-      side: "RIGHT",
       url: "https://github.com/org/repo/pull/1#discussion_r1",
       threadResolved: false
     },
@@ -702,7 +694,6 @@ test("GitHubService: unresolved review comments paginate threads and thread comm
       body: "Second comment on thread 1",
       path: "src/app.ts",
       line: 43,
-      side: "RIGHT",
       url: "https://github.com/org/repo/pull/1#discussion_r2",
       threadResolved: false
     },
@@ -713,7 +704,6 @@ test("GitHubService: unresolved review comments paginate threads and thread comm
       body: "Thread 2 comment",
       path: "src/app.ts",
       line: 99,
-      side: "RIGHT",
       url: "https://github.com/org/repo/pull/1#discussion_r3",
       threadResolved: false
     }

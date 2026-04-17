@@ -61,12 +61,22 @@ export class KubernetesExecutionBackend implements RunExecutionBackend<"kubernet
     const manifestPath = path.join(runDir, "kubernetes-job.yaml");
     const logsPath = path.join(runDir, "run.log");
 
-    const payload = await this.deps.runStore.getRun(run.id) ?? run;
+    const persistedRun = await this.deps.runStore.getRun(run.id);
+    const payload = persistedRun
+      ? {
+          ...persistedRun,
+          ...run,
+          prefetchContext: run.prefetchContext,
+          autoReviewSourceSubstate: run.autoReviewSourceSubstate,
+        }
+      : run;
     await this.deps.controlPlaneStore.createRunEnvelope({
       runId: run.id,
       payloadRef: `payload/${run.id}`,
       payloadJson: {
         run: payload,
+        prefetch: payload.prefetchContext,
+        autoReviewSourceSubstate: payload.autoReviewSourceSubstate,
         ...(this.deps.runnerConfigSource ? { runnerConfig: buildRunnerConfigPayload(this.deps.runnerConfigSource) } : {}),
       },
       runtime: "kubernetes",

@@ -24,13 +24,11 @@ export function buildAutoReviewTask(input: AutoReviewTaskInput): string {
 
   lines.push("");
   lines.push("Required workflow:");
-  lines.push("1. Collect current PR/work-item context before changing code.");
-  lines.push("2. Inspect CI and identify failing jobs or other active signals that matter for the self-review.");
-  lines.push("3. Review actionable PR comments from other reviewers or the author when they are relevant to the current diff.");
-  lines.push("4. Perform a self-review of the current diff and branch state.");
-  lines.push("5. Apply the minimal fixes needed to address concrete problems you find.");
-  lines.push("6. Validate and push when there are code changes.");
-  lines.push("7. Do not merge the PR.");
+  lines.push("1. Review actionable PR comments from other reviewers or the author when they are relevant to the current diff.");
+  lines.push("2. Perform a self-review of the current diff and branch state.");
+  lines.push("3. Apply the minimal fixes needed to address concrete problems you find.");
+  lines.push("4. Validate and push when there are code changes.");
+  lines.push("5. Do not merge the PR.");
 
   return lines.join("\n");
 }

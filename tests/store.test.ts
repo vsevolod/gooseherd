@@ -114,6 +114,52 @@ test("RunStore persists prefetchContext and autoReviewSourceSubstate", async (t)
   assert.equal(loaded?.prefetchContext?.jira?.issue.key, "HBL-1");
 });
 
+test("RunStore can clear persisted work-item launch context fields", async (t) => {
+  const { store, cleanup } = await createStore();
+  t.after(cleanup);
+
+  const created = await store.createRun(
+    {
+      repoSlug: "owner/repo",
+      task: "clear prefetch context",
+      baseBranch: "main",
+      requestedBy: "U123",
+      channelId: "C123",
+      threadTs: "123.456",
+      runtime: "local",
+      workItemId: "11111111-1111-1111-1111-111111111111",
+      autoReviewSourceSubstate: "pr_adopted",
+      prefetchContext: {
+        meta: {
+          fetchedAt: new Date().toISOString(),
+          sources: ["jira"],
+        },
+        workItem: {
+          id: "11111111-1111-1111-1111-111111111111",
+          title: "Prefetch test",
+          workflow: "feature_delivery",
+        },
+      },
+    },
+    "gooseherd"
+  );
+
+  const cleared = await store.updateRun(created.id, {
+    workItemId: undefined,
+    prefetchContext: undefined,
+    autoReviewSourceSubstate: undefined,
+  });
+
+  assert.equal(cleared.workItemId, undefined);
+  assert.equal(cleared.prefetchContext, undefined);
+  assert.equal(cleared.autoReviewSourceSubstate, undefined);
+
+  const loaded = await store.getRun(created.id);
+  assert.equal(loaded?.workItemId, undefined);
+  assert.equal(loaded?.prefetchContext, undefined);
+  assert.equal(loaded?.autoReviewSourceSubstate, undefined);
+});
+
 test("listRuns returns newest first and feedback is saved", async (t) => {
   const { store, cleanup } = await createStore();
   t.after(cleanup);

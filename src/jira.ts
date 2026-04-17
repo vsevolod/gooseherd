@@ -59,8 +59,8 @@ export class JiraClient {
     });
   }
 
-  async getIssue(issueKey: string): Promise<JiraIssueDetails> {
-    const issue = await this.fetchIssue(issueKey);
+  async getIssue(issueKey: string, signal?: AbortSignal): Promise<JiraIssueDetails> {
+    const issue = await this.fetchIssue(issueKey, signal);
     const fields = issue.fields ?? {};
     return {
       key: issue.key ?? issueKey,
@@ -71,13 +71,13 @@ export class JiraClient {
     };
   }
 
-  async getComments(issueKey: string): Promise<JiraComment[]> {
+  async getComments(issueKey: string, signal?: AbortSignal): Promise<JiraComment[]> {
     const comments: JiraComment[] = [];
     let startAt = 0;
     let total: number | undefined;
 
     while (true) {
-      const response = await this.fetchComments(issueKey, startAt);
+      const response = await this.fetchComments(issueKey, startAt, signal);
       const pageComments = response.comments ?? [];
       comments.push(
         ...pageComments
@@ -124,7 +124,7 @@ export class JiraClient {
     return `Basic ${Buffer.from(`${this.config.jiraUser}:${this.config.jiraApiToken}`).toString("base64")}`;
   }
 
-  private async fetchIssue(issueKey: string): Promise<JiraIssueResponse> {
+  private async fetchIssue(issueKey: string, signal?: AbortSignal): Promise<JiraIssueResponse> {
     const response = await fetch(
       `${this.baseUrl}/rest/api/3/issue/${encodeURIComponent(issueKey)}?fields=summary,status,description`,
       {
@@ -132,7 +132,7 @@ export class JiraClient {
           Accept: "application/json",
           Authorization: this.authHeader
         },
-        signal: AbortSignal.timeout(this.config.jiraRequestTimeoutMs)
+        signal: buildAbortSignal(this.config.jiraRequestTimeoutMs, signal)
       }
     );
 
@@ -146,7 +146,7 @@ export class JiraClient {
     return response.json() as Promise<JiraIssueResponse>;
   }
 
-  private async fetchComments(issueKey: string, startAt: number): Promise<JiraCommentsResponse> {
+  private async fetchComments(issueKey: string, startAt: number, signal?: AbortSignal): Promise<JiraCommentsResponse> {
     const response = await fetch(
       `${this.baseUrl}/rest/api/3/issue/${encodeURIComponent(issueKey)}/comment?startAt=${startAt}&maxResults=100`,
       {
@@ -154,7 +154,7 @@ export class JiraClient {
           Accept: "application/json",
           Authorization: this.authHeader
         },
-        signal: AbortSignal.timeout(this.config.jiraRequestTimeoutMs)
+        signal: buildAbortSignal(this.config.jiraRequestTimeoutMs, signal)
       }
     );
 
@@ -167,6 +167,11 @@ export class JiraClient {
 
     return response.json() as Promise<JiraCommentsResponse>;
   }
+}
+
+function buildAbortSignal(timeoutMs: number, signal?: AbortSignal): AbortSignal {
+  const timeoutSignal = AbortSignal.timeout(timeoutMs);
+  return signal ? AbortSignal.any([timeoutSignal, signal]) : timeoutSignal;
 }
 
 function normalizeJiraText(value: unknown): string {

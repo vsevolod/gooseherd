@@ -29,6 +29,10 @@ export class RuntimeReconciler {
       return;
     }
 
+    if (run?.status === "cancelled" && fact !== "running" && !completion) {
+      return;
+    }
+
     if (completion?.payload.status === "success" && fact !== "succeeded" && fact !== "running") {
       await this.runStore.updateRun(runId, {
         status: "failed",

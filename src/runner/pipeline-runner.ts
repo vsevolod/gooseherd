@@ -7,6 +7,7 @@ import type {
 import { RunnerControlPlaneClient } from "./control-plane-client.js";
 import { sleep } from "../utils/sleep.js";
 import { isRecord } from "../utils/type-guards.js";
+import type { RunPrefetchContext } from "../runtime/run-context-types.js";
 
 export type RunnerPipelineExecutor = (
   run: RunRecord,
@@ -42,6 +43,7 @@ function readInteger(record: Record<string, unknown>, key: string): number | und
 export function deriveRunRecordFromPayload(payload: RunEnvelope): RunRecord {
   const maybeRootRun = isRecord(payload.payloadJson.run) ? payload.payloadJson.run : undefined;
   const source = maybeRootRun ?? payload.payloadJson;
+  const prefetchContext = readPrefetchContext(source, payload.payloadJson);
   const runIdShort = payload.runId.slice(0, 8);
 
   return {
@@ -68,7 +70,31 @@ export function deriveRunRecordFromPayload(payload: RunEnvelope): RunRecord {
     skipNodes: readStringArray(source, "skipNodes"),
     enableNodes: readStringArray(source, "enableNodes"),
     teamId: readString(source, "teamId"),
+    prefetchContext,
+    autoReviewSourceSubstate: readString(source, "autoReviewSourceSubstate") ?? readString(payload.payloadJson, "autoReviewSourceSubstate"),
   };
+}
+
+function readPrefetchContext(
+  source: Record<string, unknown>,
+  payloadJson: Record<string, unknown>,
+): RunPrefetchContext | undefined {
+  const runPrefetchContext = source.prefetchContext;
+  if (isRecord(runPrefetchContext)) {
+    return runPrefetchContext as unknown as RunPrefetchContext;
+  }
+
+  const topLevelPrefetch = payloadJson.prefetch;
+  if (isRecord(topLevelPrefetch)) {
+    return topLevelPrefetch as unknown as RunPrefetchContext;
+  }
+
+  const topLevelPrefetchContext = payloadJson.prefetchContext;
+  if (isRecord(topLevelPrefetchContext)) {
+    return topLevelPrefetchContext as unknown as RunPrefetchContext;
+  }
+
+  return undefined;
 }
 
 function readCancellationPollMs(): number {

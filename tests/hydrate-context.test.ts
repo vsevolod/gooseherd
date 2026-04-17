@@ -6,6 +6,7 @@ import path from "node:path";
 import test from "node:test";
 import { getExpectedOutput, buildRepoSummary, buildAgentsMd, hydrateContextNode } from "../src/pipeline/nodes/hydrate-context.js";
 import { ContextBag } from "../src/pipeline/context-bag.js";
+import type { RunPrefetchContext } from "../src/runtime/run-context-types.js";
 import type { NodeDeps } from "../src/pipeline/types.js";
 
 // ── getExpectedOutput ──
@@ -188,6 +189,116 @@ function makeMockDeps(overrides: Partial<NodeDeps> = {}): NodeDeps {
   };
 }
 
+function makePrefetchContext(overrides: Partial<RunPrefetchContext> = {}): RunPrefetchContext {
+  return {
+    meta: {
+      fetchedAt: "2026-04-17T00:00:00.000Z",
+      sources: ["github_pr", "github_ci", "jira"],
+    },
+    workItem: {
+      id: "work-item-123",
+      title: "Prefetched work item",
+      workflow: "feature_delivery",
+      state: "collecting_context",
+      jiraIssueKey: "HBL-99",
+      githubPrUrl: "https://github.com/owner/repo/pull/42",
+      githubPrNumber: 42,
+    },
+    github: {
+      discussionCommentsTotalCount: 15,
+      reviewsTotalCount: 14,
+      reviewCommentsTotalCount: 13,
+      pr: {
+        number: 42,
+        url: "https://github.com/owner/repo/pull/42",
+        title: "Improve prefetch rendering",
+        body: "PR body line 1\nPR body line 2 [truncated]",
+        state: "open",
+        baseRef: "main",
+        headRef: "feature/prefetch",
+        headSha: "abc123",
+        authorLogin: "alice",
+      },
+      discussionComments: [
+        {
+          id: "disc-1",
+          authorLogin: "bob",
+          createdAt: "2026-04-17T00:01:00.000Z",
+          body: "Please update the prompt ordering.",
+          url: "https://github.com/owner/repo/pull/42#issuecomment-1",
+        },
+      ],
+      reviews: [
+        {
+          id: "rev-1",
+          authorLogin: "carol",
+          createdAt: "2026-04-17T00:02:00.000Z",
+          state: "CHANGES_REQUESTED",
+          body: "Need a clearer separation between sections.",
+          url: "https://github.com/owner/repo/pull/42#pullrequestreview-1",
+        },
+      ],
+      reviewComments: [
+        {
+          id: "inline-1",
+          authorLogin: "dave",
+          createdAt: "2026-04-17T00:03:00.000Z",
+          body: "Consider renaming this helper.",
+          path: "src/pipeline/nodes/hydrate-context.ts",
+          line: 123,
+          side: "RIGHT",
+          url: "https://github.com/owner/repo/pull/42#discussion_r1",
+          threadResolved: false,
+        },
+      ],
+      ci: {
+        headSha: "abc123",
+        conclusion: "failure",
+        failedRuns: [
+          {
+            id: 7,
+            name: "test",
+            status: "completed",
+            conclusion: "failure",
+            detailsUrl: "https://github.com/owner/repo/actions/runs/7",
+            startedAt: "2026-04-17T00:10:00.000Z",
+            completedAt: "2026-04-17T00:12:00.000Z",
+          },
+        ],
+        failedAnnotations: [
+          {
+            checkRunName: "test",
+            path: "src/pipeline/nodes/hydrate-context.ts",
+            line: 123,
+            message: "Expected ordering to include prefetched sections.",
+            level: "failure",
+          },
+        ],
+        failedAnnotationsTotalCount: 55,
+      },
+    },
+    jira: {
+      commentsTotalCount: 16,
+      issue: {
+        key: "HBL-99",
+        url: "https://jira.example/browse/HBL-99",
+        summary: "Improve prefetch rendering",
+        status: "In Progress",
+        description: "Jira description line 1\nJira description line 2 [truncated]",
+      },
+      comments: [
+        {
+          id: "jira-1",
+          authorDisplayName: "Eve",
+          createdAt: "2026-04-17T00:04:00.000Z",
+          body: "Please keep the snapshot compact.",
+        },
+      ],
+    },
+    ...overrides,
+  };
+}
+
 test("hydrateContextNode: writes prompt file with taskType from context", async (t) => {
   const dir = await makeTempRepo();
   const repoDir = path.join(dir, "repo");
@@ -264,6 +375,124 @@ test("hydrateContextNode: prompt includes instructions section", async (t) => {
   assert.ok(content.includes("Run ID: run-123"), "Should contain run ID");
   assert.ok(content.includes("Repository: owner/repo"), "Should contain repo slug");
   assert.ok(content.includes("Keep changes minimal"), "Should include instructions");
+});
+
+test("hydrateContextNode: renders prefetched context sections ahead of instructions", async (t) => {
+  const dir = await makeTempRepo();
+  const repoDir = path.join(dir, "repo");
+  await mkdir(repoDir, { recursive: true });
+  const promptFile = path.join(dir, "task.md");
+  const logFile = path.join(dir, "test.log");
+  await writeFile(logFile, "", "utf8");
+  t.after(async () => { await rm(dir, { recursive: true, force: true }); });
+
+  const ctx = new ContextBag({
+    repoDir,
+    promptFile,
+    prefetchContext: makePrefetchContext(),
+  });
+  const deps = makeMockDeps({ logFile });
+
+  await hydrateContextNode({ id: "hydrate", type: "deterministic", action: "hydrate_context" }, ctx, deps);
+
+  const content = await readFile(promptFile, "utf8");
+  const headings = [
+    "## Prefetched Context",
+    "### Work Item Context",
+    "### PR Description",
+    "### PR Discussion Comments",
+    "### PR Review Summaries",
+    "### PR Unresolved Inline Review Comments",
+    "### CI Snapshot",
+    "### Jira Description",
+    "### Jira Comments",
+    "## Instructions",
+  ];
+  const positions = headings.map((heading) => content.indexOf(heading));
+
+  for (let index = 0; index < headings.length; index += 1) {
+    assert.notEqual(positions[index], -1, `Should include ${headings[index]}`);
+    if (index > 0) {
+      assert.ok(
+        positions[index - 1] < positions[index],
+        `${headings[index - 1]} should appear before ${headings[index]}`
+      );
+    }
+  }
+
+  assert.ok(content.includes("PR body line 2 [truncated]"), "Should preserve stored truncation note");
+  assert.ok(content.includes("Jira description line 2 [truncated]"), "Should preserve Jira truncation note");
+  assert.ok(content.includes("Showing 1 of 15 discussion comments."), "Should note truncated PR discussion comments");
+  assert.ok(content.includes("Showing 1 of 14 review summaries."), "Should note truncated review summaries");
+  assert.ok(content.includes("Showing 1 of 13 inline review comments."), "Should note truncated inline comments");
+  assert.ok(content.includes("Showing 1 of 55 failed annotations."), "Should note truncated CI annotations");
+  assert.ok(content.includes("Showing 1 of 16 Jira comments."), "Should note truncated Jira comments");
+  assert.ok(content.includes("@bob"), "Should include PR discussion author");
+  assert.ok(content.includes("CHANGES_REQUESTED"), "Should include review summary state");
+  assert.ok(content.includes("src/pipeline/nodes/hydrate-context.ts:123"), "Should include inline comment location");
+  assert.ok(content.includes("Expected ordering to include prefetched sections."), "Should include CI annotations");
+  assert.ok(content.includes("Eve"), "Should include Jira comment author");
+});
+
+test("hydrateContextNode: falls back to run prefetch context and omits empty prefetched sections", async (t) => {
+  const dir = await makeTempRepo();
+  const repoDir = path.join(dir, "repo");
+  await mkdir(repoDir, { recursive: true });
+  const promptFile = path.join(dir, "task.md");
+  const logFile = path.join(dir, "test.log");
+  await writeFile(logFile, "", "utf8");
+  t.after(async () => { await rm(dir, { recursive: true, force: true }); });
+
+  const runPrefetchContext: RunPrefetchContext = {
+    meta: {
+      fetchedAt: "2026-04-17T00:00:00.000Z",
+      sources: ["github_pr", "jira"],
+    },
+    workItem: {
+      id: "work-item-456",
+      title: "Fallback prefetch",
+      workflow: "feature_delivery",
+      githubPrUrl: "https://github.com/owner/repo/pull/99",
+      githubPrNumber: 99,
+    },
+    github: {
+      pr: {
+        number: 99,
+        url: "https://github.com/owner/repo/pull/99",
+        title: "Fallback rendering",
+        body: "Fallback PR description",
+        state: "open",
+      },
+      discussionComments: [],
+      reviews: [],
+      reviewComments: [],
+      ci: {
+        conclusion: "success",
+        headSha: "fff999",
+      },
+    },
+    jira: {
+      issue: {
+        key: "HBL-100",
+        description: "Fallback Jira description",
+      },
+      comments: [],
+    },
+  };
+  const ctx = new ContextBag({ repoDir, promptFile });
+  const deps = makeMockDeps({ logFile, run: { ...makeMockDeps().run, prefetchContext: runPrefetchContext } });
+
+  await hydrateContextNode({ id: "hydrate", type: "deterministic", action: "hydrate_context" }, ctx, deps);
+
+  const content = await readFile(promptFile, "utf8");
+  assert.ok(content.includes("## Prefetched Context"), "Should include prefetched context block");
+  assert.ok(content.includes("### PR Description"), "Should include PR description");
+  assert.ok(content.includes("### CI Snapshot"), "Should include CI snapshot");
+  assert.ok(content.includes("### Jira Description"), "Should include Jira description");
+  assert.ok(!content.includes("### PR Discussion Comments"), "Should omit empty discussion comments");
+  assert.ok(!content.includes("### PR Review Summaries"), "Should omit empty review summaries");
+  assert.ok(!content.includes("### PR Unresolved Inline Review Comments"), "Should omit empty inline review comments");
+  assert.ok(!content.includes("### Jira Comments"), "Should omit empty Jira comments");
 });
 
 test("hydrateContextNode: follow-up run includes parent context", async (t) => {

@@ -243,6 +243,8 @@ export class RunStore {
     >
   ): Promise<RunRecord> {
     const dbUpdate: Record<string, unknown> = {};
+    const has = <K extends keyof typeof update>(key: K): boolean =>
+      Object.prototype.hasOwnProperty.call(update, key);
 
     if (update.status !== undefined) dbUpdate.status = update.status;
     if (update.phase !== undefined) dbUpdate.phase = update.phase;
@@ -262,9 +264,9 @@ export class RunStore {
     if (update.feedbackNote !== undefined) dbUpdate.feedbackNote = update.feedbackNote;
     if (update.tokenUsage !== undefined) dbUpdate.tokenUsage = update.tokenUsage;
     if (update.title !== undefined) dbUpdate.title = update.title;
-    if (update.workItemId !== undefined) dbUpdate.workItemId = update.workItemId;
-    if (update.prefetchContext !== undefined) dbUpdate.prefetchContext = update.prefetchContext;
-    if (update.autoReviewSourceSubstate !== undefined) dbUpdate.autoReviewSourceSubstate = update.autoReviewSourceSubstate;
+    if (has("workItemId")) dbUpdate.workItemId = update.workItemId ?? null;
+    if (has("prefetchContext")) dbUpdate.prefetchContext = update.prefetchContext ?? null;
+    if (has("autoReviewSourceSubstate")) dbUpdate.autoReviewSourceSubstate = update.autoReviewSourceSubstate ?? null;
 
     await this.db.update(runs).set(dbUpdate).where(eq(runs.id, id));
     const result = await this.getRun(id);

@@ -77,6 +77,14 @@ export class WorkItemStore {
     return rows[0] ? rowToRecord(rows[0]) : undefined;
   }
 
+  async requireWorkItem(id: string): Promise<WorkItemRecord> {
+    const workItem = await this.getWorkItem(id);
+    if (!workItem) {
+      throw new Error(`WorkItem not found: ${id}`);
+    }
+    return workItem;
+  }
+
   async listWorkItems(): Promise<WorkItemRecord[]> {
     const rows = await this.db.select().from(workItems).orderBy(desc(workItems.createdAt));
     return rows.map(rowToRecord);
@@ -199,6 +207,29 @@ export class WorkItemStore {
     const updated = await this.getWorkItem(id);
     if (!updated) throw new Error(`WorkItem not found after update: ${id}`);
     return updated;
+  }
+
+  async rollbackAutoReviewCollectingContext(input: {
+    workItemId: string;
+    expectedState: "auto_review";
+    expectedSubstate: "collecting_context";
+    targetSubstate: string;
+  }): Promise<WorkItemRecord | undefined> {
+    const rows = await this.db
+      .update(workItems)
+      .set({
+        state: "auto_review",
+        substate: input.targetSubstate,
+        updatedAt: new Date(),
+      })
+      .where(and(
+        eq(workItems.id, input.workItemId),
+        eq(workItems.state, input.expectedState),
+        eq(workItems.substate, input.expectedSubstate),
+      ))
+      .returning();
+
+    return rows[0] ? rowToRecord(rows[0]) : undefined;
   }
 
   async addFlags(id: string, flagsToAdd: string[]): Promise<WorkItemRecord> {
