@@ -2609,6 +2609,132 @@ export function dashboardHtml(config: AppConfig): string {
       return task.slice(0, maxLen).trimEnd() + '\u2026';
     }
 
+    function normalizeArtifactPath(value) {
+      var normalized = String(value || '').split(String.fromCharCode(92)).join('/');
+      while (normalized.startsWith('./')) {
+        normalized = normalized.slice(2);
+      }
+      return normalized;
+    }
+
+    function hasInternalArtifact(run, artifactPath) {
+      if (!run || !Array.isArray(run.internalArtifacts)) return false;
+      var normalizedTarget = normalizeArtifactPath(artifactPath);
+      return run.internalArtifacts.some(function(entry) {
+        return normalizeArtifactPath(entry) === normalizedTarget;
+      });
+    }
+
+    async function renderAutoReviewSummary(run, mountNode) {
+      if (!run || !mountNode || !hasInternalArtifact(run, 'auto-review-summary.json')) {
+        if (mountNode) {
+          mountNode.style.display = 'none';
+          mountNode.innerHTML = '';
+        }
+        return;
+      }
+
+      mountNode.style.display = '';
+      mountNode.innerHTML = '';
+      mountNode.style.marginTop = '12px';
+      mountNode.style.padding = '12px';
+      mountNode.style.border = '1px solid var(--border)';
+      mountNode.style.borderRadius = '12px';
+      mountNode.style.background = 'var(--panel)';
+
+      var header = document.createElement('div');
+      header.style.display = 'flex';
+      header.style.alignItems = 'center';
+      header.style.justifyContent = 'space-between';
+      header.style.gap = '12px';
+
+      var title = document.createElement('div');
+      title.style.fontWeight = '600';
+      title.textContent = 'Auto-review summary';
+      header.appendChild(title);
+
+      var rawLink = document.createElement('a');
+      rawLink.href = '/api/runs/' + encodeURIComponent(run.id) + '/artifacts/auto-review-summary.json';
+      rawLink.target = '_blank';
+      rawLink.rel = 'noreferrer noopener';
+      rawLink.textContent = 'Open JSON';
+      rawLink.style.color = 'var(--ring)';
+      rawLink.style.textDecoration = 'none';
+      header.appendChild(rawLink);
+
+      mountNode.appendChild(header);
+
+      var body = document.createElement('div');
+      body.style.marginTop = '10px';
+      body.style.color = 'var(--text-muted)';
+      body.textContent = 'Loading auto-review summary…';
+      mountNode.appendChild(body);
+
+      try {
+        var summary = await fetchJson('/api/runs/' + encodeURIComponent(run.id) + '/artifacts/auto-review-summary.json');
+        if (state.selectedId !== run.id) {
+          return;
+        }
+
+        var selectedFindings = Array.isArray(summary.selectedFindings) ? summary.selectedFindings : [];
+        var ignoredFindings = Array.isArray(summary.ignoredFindings) ? summary.ignoredFindings : [];
+        var rationale = typeof summary.rationale === 'string' ? summary.rationale : '';
+
+        body.innerHTML = '';
+
+        if (rationale) {
+          var rationaleNode = document.createElement('div');
+          rationaleNode.style.marginBottom = '10px';
+          rationaleNode.style.color = 'var(--text)';
+          rationaleNode.textContent = rationale;
+          body.appendChild(rationaleNode);
+        }
+
+        function appendFindingGroup(label, items) {
+          var group = document.createElement('div');
+          group.style.marginTop = body.childNodes.length > 0 ? '10px' : '0';
+
+          var labelNode = document.createElement('div');
+          labelNode.style.fontSize = '12px';
+          labelNode.style.fontWeight = '600';
+          labelNode.style.letterSpacing = '0.04em';
+          labelNode.style.textTransform = 'uppercase';
+          labelNode.style.color = 'var(--text-dim)';
+          labelNode.textContent = label;
+          group.appendChild(labelNode);
+
+          if (!items || items.length === 0) {
+            var emptyNode = document.createElement('div');
+            emptyNode.style.marginTop = '4px';
+            emptyNode.textContent = 'None';
+            group.appendChild(emptyNode);
+            body.appendChild(group);
+            return;
+          }
+
+          var list = document.createElement('ul');
+          list.style.margin = '6px 0 0 18px';
+          list.style.padding = '0';
+          for (var i = 0; i < items.length; i++) {
+            var item = document.createElement('li');
+            item.style.marginBottom = '4px';
+            item.textContent = String(items[i]);
+            list.appendChild(item);
+          }
+          group.appendChild(list);
+          body.appendChild(group);
+        }
+
+        appendFindingGroup('Selected findings', selectedFindings);
+        appendFindingGroup('Ignored findings', ignoredFindings);
+      } catch (_error) {
+        if (state.selectedId !== run.id) {
+          return;
+        }
+        body.textContent = 'Auto-review summary artifact is unavailable.';
+      }
+    }
+
     function renderSummary(run) {
       if (!run) {
         el.summary.className = 'summary-empty';
@@ -2755,6 +2881,11 @@ export function dashboardHtml(config: AppConfig): string {
         error.textContent = run.error;
         el.summary.appendChild(error);
       }
+
+      var autoReviewSummaryMount = document.createElement('div');
+      autoReviewSummaryMount.style.display = 'none';
+      el.summary.appendChild(autoReviewSummaryMount);
+      renderAutoReviewSummary(run, autoReviewSummaryMount);
     }
 
     var consoleFilter = 'all';

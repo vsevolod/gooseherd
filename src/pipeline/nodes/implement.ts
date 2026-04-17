@@ -4,7 +4,8 @@ import type { NodeConfig, NodeResult, NodeDeps } from "../types.js";
 import type { ContextBag } from "../context-bag.js";
 import { appendLog, runShellCapture } from "../shell.js";
 import { buildAgentCommand } from "../agent-command.js";
-import { filterInternalGeneratedFiles, isInternalGeneratedFile } from "../internal-generated-files.js";
+import { filterInternalGeneratedFiles, isInternalGeneratedFile, mergeInternalArtifacts } from "../internal-generated-files.js";
+import { logInfo, logWarn } from "../../logger.js";
 
 export interface AgentAnalysis {
   verdict: "clean" | "suspect" | "empty" | "context_conflict";
@@ -30,9 +31,46 @@ export interface AutoReviewGroundingMetrics {
   ignoredFindingOverlapCount: number;
 }
 
+export interface AutoReviewNoopClassification {
+  allowed: boolean;
+  reason?: string;
+}
+
+export type AutoReviewSentinelExtractionMethod =
+  | "plain_text"
+  | "pi_jsonl_message_update"
+  | "pi_jsonl_message_end"
+  | "pi_jsonl_turn_end"
+  | "pi_jsonl_agent_end"
+  | "none";
+
+interface AutoReviewSentinelMatch {
+  text: string;
+  method: Exclude<AutoReviewSentinelExtractionMethod, "none">;
+}
+
+interface AutoReviewSummaryParseResult {
+  found: boolean;
+  summary?: AutoReviewSummaryArtifact;
+  parseError?: "missing_json" | "invalid_json";
+}
+
+export interface AutoReviewOutputInspection {
+  summaryFound: boolean;
+  summaryExtractionMethod: AutoReviewSentinelExtractionMethod;
+  contextConflictFound: boolean;
+  contextConflictExtractionMethod: AutoReviewSentinelExtractionMethod;
+  preview?: string;
+}
+
 const AUTO_REVIEW_REQUESTED_BY = "work-item:auto-review";
 const AUTO_REVIEW_SUMMARY_ARTIFACT = "auto-review-summary.json";
-const AUTO_REVIEW_SUMMARY_PATTERN = /^\s*GOOSEHERD_REVIEW_SUMMARY:\s*(\{.+\})\s*$/m;
+const AUTO_REVIEW_SUMMARY_PATTERN = /^\s*GOOSEHERD_REVIEW_SUMMARY:/m;
+const AUTO_REVIEW_SUMMARY_PREFIX = "GOOSEHERD_REVIEW_SUMMARY:";
+const AGENT_STDOUT_ARTIFACT = "agent-stdout.log";
+const AGENT_STDERR_ARTIFACT = "agent-stderr.log";
+const AUTO_REVIEW_OUTPUT_PREVIEW_MAX_LINES = 10;
+const AUTO_REVIEW_OUTPUT_PREVIEW_MAX_CHARS = 600;
 
 /**
  * Implement node: run the coding agent.
@@ -72,6 +110,13 @@ export async function implementNode(
   );
 
   const combinedOutput = `${result.stdout}\n${result.stderr}`;
+  const outputInspection = inspectAutoReviewOutput(combinedOutput);
+  const rawAgentOutputArtifacts = runDir
+    ? await persistAgentOutputArtifacts(runDir, result.stdout, result.stderr)
+    : undefined;
+  if (rawAgentOutputArtifacts?.length) {
+    await appendLog(logFile, `[implement] wrote raw agent output artifacts: ${rawAgentOutputArtifacts.join(", ")}\n`);
+  }
 
   if (result.code !== 0) {
     const autoReviewSummaryArtifact = runDir
@@ -94,9 +139,28 @@ export async function implementNode(
       logFile,
       `[implement] failure classification: timeoutDetected=${String(timeoutDetected)}\n`
     );
+    emitAutoReviewDebugDiagnostics(run.requestedBy, config.autoReviewDebugLogMode, "failure", {
+      runId: run.id,
+      exitCode: result.code,
+      stdoutBytes: byteLength(result.stdout),
+      stderrBytes: byteLength(result.stderr),
+      summaryFound: outputInspection.summaryFound,
+      summaryExtractionMethod: outputInspection.summaryExtractionMethod,
+      contextConflictFound: outputInspection.contextConflictFound,
+      contextConflictExtractionMethod: outputInspection.contextConflictExtractionMethod,
+      preview: outputInspection.preview,
+      timeoutDetected,
+      analysisVerdict: "agent_exit_nonzero",
+      filesChangedCount: 0,
+    });
 
+    const internalArtifacts = mergeInternalArtifacts(
+      rawAgentOutputArtifacts,
+      autoReviewSummaryArtifact ? [autoReviewSummaryArtifact.path] : undefined,
+    );
     return {
       outcome: "failure",
+      outputs: internalArtifacts ? { internalArtifacts } : undefined,
       error: timeoutDetected
         ? `Agent timed out after ${String(config.agentTimeoutSeconds)}s`
         : `Agent exited with code ${String(result.code)}`,
@@ -114,16 +178,89 @@ export async function implementNode(
   }
 
   if (analysis.verdict === "context_conflict") {
+    emitAutoReviewDebugDiagnostics(run.requestedBy, config.autoReviewDebugLogMode, "failure", {
+      runId: run.id,
+      exitCode: result.code,
+      stdoutBytes: byteLength(result.stdout),
+      stderrBytes: byteLength(result.stderr),
+      summaryFound: outputInspection.summaryFound,
+      summaryExtractionMethod: outputInspection.summaryExtractionMethod,
+      contextConflictFound: outputInspection.contextConflictFound,
+      contextConflictExtractionMethod: outputInspection.contextConflictExtractionMethod,
+      preview: outputInspection.preview,
+      analysisVerdict: analysis.verdict,
+      filesChangedCount: analysis.filesChanged.length,
+    });
+    const internalArtifacts = mergeInternalArtifacts(
+      rawAgentOutputArtifacts,
+      autoReviewSummaryArtifact ? [autoReviewSummaryArtifact.path] : undefined,
+    );
     return {
       outcome: "failure",
+      outputs: internalArtifacts ? { internalArtifacts } : undefined,
       error: `Agent reported context conflict: ${analysis.contextConflictReason ?? "unknown reason"}`,
       rawOutput: (result.stdout + result.stderr).slice(-2000)
     };
   }
 
   if (analysis.verdict === "empty") {
+    if (isAutoReviewRun(run.requestedBy)) {
+      const noop = classifyAutoReviewNoop(run.requestedBy, combinedOutput);
+      emitAutoReviewDebugDiagnostics(
+        run.requestedBy,
+        config.autoReviewDebugLogMode,
+        noop.allowed ? "success" : "failure",
+        {
+          runId: run.id,
+          exitCode: result.code,
+          stdoutBytes: byteLength(result.stdout),
+          stderrBytes: byteLength(result.stderr),
+          summaryFound: outputInspection.summaryFound,
+          summaryExtractionMethod: outputInspection.summaryExtractionMethod,
+          contextConflictFound: outputInspection.contextConflictFound,
+          contextConflictExtractionMethod: outputInspection.contextConflictExtractionMethod,
+          preview: outputInspection.preview,
+          analysisVerdict: analysis.verdict,
+          filesChangedCount: analysis.filesChanged.length,
+          noopAllowed: noop.allowed,
+        }
+      );
+      if (noop.allowed) {
+        return {
+          outcome: "success",
+          outputs: {
+            agentAnalysis: analysis,
+            autoReviewNoop: true,
+            internalArtifacts: mergeInternalArtifacts(
+              rawAgentOutputArtifacts,
+              autoReviewSummaryArtifact ? [autoReviewSummaryArtifact.path] : undefined
+            ),
+            ...(autoReviewSummaryArtifact
+              ? {
+                  autoReviewSummary: autoReviewSummaryArtifact.summary,
+                  autoReviewSummaryPath: autoReviewSummaryArtifact.path,
+                  autoReviewGroundingMetrics: autoReviewSummaryArtifact.summary.groundingMetrics,
+                }
+              : {}),
+          }
+        };
+      }
+      const internalArtifacts = mergeInternalArtifacts(
+        rawAgentOutputArtifacts,
+        autoReviewSummaryArtifact ? [autoReviewSummaryArtifact.path] : undefined,
+      );
+      return {
+        outcome: "failure",
+        outputs: internalArtifacts ? { internalArtifacts } : undefined,
+        error: noop.reason ?? `Agent exited 0 but made no meaningful changes. Signals: ${analysis.signals.join("; ") || "none"}`,
+        rawOutput: (result.stdout + result.stderr).slice(-2000)
+      };
+    }
+
+    const internalArtifacts = mergeInternalArtifacts(rawAgentOutputArtifacts);
     return {
       outcome: "failure",
+      outputs: internalArtifacts ? { internalArtifacts } : undefined,
       error: `Agent exited 0 but made no meaningful changes. Signals: ${analysis.signals.join("; ") || "none"}`,
       rawOutput: (result.stdout + result.stderr).slice(-2000)
     };
@@ -131,11 +268,28 @@ export async function implementNode(
 
   // Extract cost/token data from pi-agent JSONL output (agent_end event)
   const agentCost = extractPiAgentCost(result.stdout);
+  emitAutoReviewDebugDiagnostics(run.requestedBy, config.autoReviewDebugLogMode, "success", {
+    runId: run.id,
+    exitCode: result.code,
+    stdoutBytes: byteLength(result.stdout),
+    stderrBytes: byteLength(result.stderr),
+    summaryFound: outputInspection.summaryFound,
+    summaryExtractionMethod: outputInspection.summaryExtractionMethod,
+    contextConflictFound: outputInspection.contextConflictFound,
+    contextConflictExtractionMethod: outputInspection.contextConflictExtractionMethod,
+    preview: outputInspection.preview,
+    analysisVerdict: analysis.verdict,
+    filesChangedCount: analysis.filesChanged.length,
+  });
 
   return {
     outcome: "success",
     outputs: {
       agentAnalysis: analysis,
+      internalArtifacts: mergeInternalArtifacts(
+        rawAgentOutputArtifacts,
+        autoReviewSummaryArtifact ? [autoReviewSummaryArtifact.path] : undefined
+      ),
       ...(agentCost ? { agentCost } : {}),
       ...(autoReviewSummaryArtifact
         ? {
@@ -315,20 +469,12 @@ export function extractPiAgentCost(stdout: string): AgentCost | null {
 }
 
 export function extractAutoReviewSummary(output: string): AutoReviewSummaryArtifact | undefined {
-  const summaryJson = output.match(AUTO_REVIEW_SUMMARY_PATTERN)?.[1]?.trim();
-  if (summaryJson) {
-    try {
-      const parsed = JSON.parse(summaryJson) as Record<string, unknown>;
-      return {
-        selectedFindings: normalizeSummaryItems(parsed["selectedFindings"]),
-        ignoredFindings: normalizeSummaryItems(parsed["ignoredFindings"]),
-        rationale: typeof parsed["rationale"] === "string" && parsed["rationale"].trim()
-          ? parsed["rationale"].trim()
-          : "Agent emitted GOOSEHERD_REVIEW_SUMMARY without a rationale.",
-      };
-    } catch {
-      // fall through to conflict or missing-summary fallback
-    }
+  const parseResult = extractAutoReviewSummaryParseResult(output);
+  if (parseResult.summary) {
+    return parseResult.summary;
+  }
+  if (parseResult.found) {
+    return undefined;
   }
 
   const contextConflictReason = extractContextConflictReason(output);
@@ -343,6 +489,41 @@ export function extractAutoReviewSummary(output: string): AutoReviewSummaryArtif
   return undefined;
 }
 
+export function classifyAutoReviewNoop(
+  requestedBy: string | undefined,
+  output: string,
+): AutoReviewNoopClassification {
+  if (!isAutoReviewRun(requestedBy)) {
+    return { allowed: false };
+  }
+
+  const parseResult = extractAutoReviewSummaryParseResult(output);
+  if (!parseResult.found) {
+    return {
+      allowed: false,
+      reason: "Agent made no changes and did not emit GOOSEHERD_REVIEW_SUMMARY.",
+    };
+  }
+
+  if (!parseResult.summary) {
+    return {
+      allowed: false,
+      reason: "Agent emitted GOOSEHERD_REVIEW_SUMMARY but the JSON payload could not be parsed.",
+    };
+  }
+
+  const summary = parseResult.summary;
+
+  if (summary.selectedFindings.length > 0) {
+    return {
+      allowed: false,
+      reason: "Agent reported actionable findings but made no code changes.",
+    };
+  }
+
+  return { allowed: true };
+}
+
 export async function persistAutoReviewSummaryArtifact(
   requestedBy: string | undefined,
   runDir: string,
@@ -353,11 +534,19 @@ export async function persistAutoReviewSummaryArtifact(
     return undefined;
   }
 
-  const baseSummary = extractAutoReviewSummary(output) ?? {
-    selectedFindings: [],
-    ignoredFindings: [],
-    rationale: "Agent did not emit GOOSEHERD_REVIEW_SUMMARY.",
-  };
+  const parseResult = extractAutoReviewSummaryParseResult(output);
+  const baseSummary = extractAutoReviewSummary(output)
+    ?? (parseResult.found
+      ? {
+          selectedFindings: [],
+          ignoredFindings: [],
+          rationale: "Agent emitted GOOSEHERD_REVIEW_SUMMARY but the JSON payload could not be parsed.",
+        }
+      : {
+          selectedFindings: [],
+          ignoredFindings: [],
+          rationale: "Agent did not emit GOOSEHERD_REVIEW_SUMMARY.",
+        });
   const summary: AutoReviewSummaryArtifact = {
     ...baseSummary,
     groundingMetrics: buildAutoReviewGroundingMetrics(baseSummary, changedFiles),
@@ -375,9 +564,313 @@ export async function persistAutoReviewSummaryArtifact(
   };
 }
 
+async function persistAgentOutputArtifacts(
+  runDir: string,
+  stdout: string,
+  stderr: string,
+): Promise<string[]> {
+  await writeFile(path.join(runDir, AGENT_STDOUT_ARTIFACT), stdout, "utf8");
+  await writeFile(path.join(runDir, AGENT_STDERR_ARTIFACT), stderr, "utf8");
+  return [AGENT_STDOUT_ARTIFACT, AGENT_STDERR_ARTIFACT];
+}
+
 function extractContextConflictReason(output: string): string | undefined {
-  const reason = output.match(CONTEXT_CONFLICT_PATTERN)?.[1]?.trim();
+  const reason = extractContextConflictMatch(output)?.text.match(CONTEXT_CONFLICT_PATTERN)?.[1]?.trim();
   return reason ? reason : undefined;
+}
+
+export function inspectAutoReviewOutput(output: string): AutoReviewOutputInspection {
+  const summaryMatch = extractSummaryMatch(output);
+  const contextConflictMatch = extractContextConflictMatch(output);
+  const preview = summaryMatch?.text
+    ?? contextConflictMatch?.text
+    ?? extractOutputTailPreview(output);
+  return {
+    summaryFound: Boolean(summaryMatch),
+    summaryExtractionMethod: summaryMatch?.method ?? "none",
+    contextConflictFound: Boolean(contextConflictMatch),
+    contextConflictExtractionMethod: contextConflictMatch?.method ?? "none",
+    preview: truncatePreview(preview, AUTO_REVIEW_OUTPUT_PREVIEW_MAX_CHARS),
+  };
+}
+
+function extractSummaryMatch(output: string): AutoReviewSentinelMatch | undefined {
+  return extractSentinelMatch(output, AUTO_REVIEW_SUMMARY_PATTERN, AUTO_REVIEW_SUMMARY_PREFIX);
+}
+
+function extractContextConflictMatch(output: string): AutoReviewSentinelMatch | undefined {
+  return extractSentinelMatch(output, CONTEXT_CONFLICT_PATTERN, "GOOSEHERD_CONTEXT_CONFLICT:");
+}
+
+function extractSentinelMatch(
+  output: string,
+  directPattern: RegExp,
+  prefix: string,
+): AutoReviewSentinelMatch | undefined {
+  const directMatch = directPattern.exec(output);
+  if (directMatch?.index !== undefined) {
+    const directText = findSentinelText(output.slice(directMatch.index), prefix) ?? directMatch[0].trim();
+    return { text: directText, method: "plain_text" };
+  }
+
+  return findPiJsonlAssistantText(output, prefix);
+}
+
+function findPiJsonlAssistantText(output: string, prefix: string): AutoReviewSentinelMatch | undefined {
+  for (const line of output.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("{")) {
+      continue;
+    }
+
+    try {
+      const event = JSON.parse(trimmed) as Record<string, unknown>;
+      const eventType = event["type"];
+
+      if (eventType === "message_update") {
+        const assistantMessageEvent = event["assistantMessageEvent"];
+        for (const content of extractAssistantUpdateTexts(assistantMessageEvent)) {
+          const sentinelText = findSentinelText(content, prefix);
+          if (sentinelText) {
+            return { text: sentinelText, method: "pi_jsonl_message_update" };
+          }
+        }
+      }
+
+      if (eventType === "message_end" || eventType === "turn_end") {
+        const message = event["message"];
+        for (const text of extractAssistantMessageTexts(message)) {
+          const sentinelText = findSentinelText(text, prefix);
+          if (sentinelText) {
+            return { text: sentinelText, method: eventType === "turn_end" ? "pi_jsonl_turn_end" : "pi_jsonl_message_end" };
+          }
+        }
+      }
+
+      if (eventType === "agent_end") {
+        const messages = event["messages"];
+        if (Array.isArray(messages)) {
+          for (const message of messages) {
+            for (const text of extractAssistantMessageTexts(message)) {
+              const sentinelText = findSentinelText(text, prefix);
+              if (sentinelText) {
+                return { text: sentinelText, method: "pi_jsonl_agent_end" };
+              }
+            }
+          }
+        }
+      }
+    } catch {
+      continue;
+    }
+  }
+
+  return undefined;
+}
+
+function truncatePreview(value: string | undefined, maxChars = 300): string | undefined {
+  if (!value) {
+    return undefined;
+  }
+  return value.length > maxChars ? `${value.slice(0, maxChars - 3)}...` : value;
+}
+
+function extractOutputTailPreview(output: string, maxLines = AUTO_REVIEW_OUTPUT_PREVIEW_MAX_LINES): string | undefined {
+  const lines = output
+    .split(/\r?\n/)
+    .map((line) => line.replace(/\s+$/, ""));
+  while (lines.length > 0 && lines[lines.length - 1] === "") {
+    lines.pop();
+  }
+  if (lines.length === 0) {
+    return undefined;
+  }
+  const preview = lines.slice(-maxLines).join("\n");
+  return preview.trim() ? preview : undefined;
+}
+
+function byteLength(value: string): number {
+  return Buffer.byteLength(value, "utf8");
+}
+
+function shouldEmitAutoReviewDebugDiagnostics(
+  requestedBy: string | undefined,
+  mode: string | undefined,
+  outcome: "success" | "failure",
+): boolean {
+  if (!isAutoReviewRun(requestedBy)) {
+    return false;
+  }
+  if (mode === "off") {
+    return false;
+  }
+  if (mode === "always") {
+    return true;
+  }
+  return outcome === "failure";
+}
+
+function emitAutoReviewDebugDiagnostics(
+  requestedBy: string | undefined,
+  mode: string | undefined,
+  outcome: "success" | "failure",
+  details: Record<string, unknown>,
+): void {
+  if (!shouldEmitAutoReviewDebugDiagnostics(requestedBy, mode, outcome)) {
+    return;
+  }
+  if (outcome === "failure") {
+    logWarn("Auto-review debug diagnostics", details);
+    return;
+  }
+  logInfo("Auto-review debug diagnostics", details);
+}
+
+function extractAssistantUpdateTexts(value: unknown): string[] {
+  if (!value || typeof value !== "object") {
+    return [];
+  }
+
+  const event = value as Record<string, unknown>;
+  if (event["type"] === "text_end") {
+    const content = event["content"];
+    return typeof content === "string" && content.trim() ? [content.trim()] : [];
+  }
+
+  if (event["type"] === "text_delta") {
+    const partial = event["partial"];
+    return extractAssistantMessageTexts(partial);
+  }
+
+  return [];
+}
+
+function findSentinelText(value: string, prefix: string): string | undefined {
+  const startIndex = value.indexOf(prefix);
+  if (startIndex < 0) {
+    return undefined;
+  }
+
+  const suffix = value.slice(startIndex);
+  const summaryJson = prefix === AUTO_REVIEW_SUMMARY_PREFIX
+    ? extractJsonObjectAfterPrefix(suffix, prefix)
+    : undefined;
+  if (summaryJson) {
+    return `${prefix} ${summaryJson}`;
+  }
+
+  for (const line of suffix.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (trimmed.startsWith(prefix)) {
+      return trimmed;
+    }
+  }
+  return undefined;
+}
+
+function extractAutoReviewSummaryParseResult(output: string): AutoReviewSummaryParseResult {
+  const summaryMatch = extractSummaryMatch(output);
+  if (!summaryMatch) {
+    return { found: false };
+  }
+
+  const summaryJson = extractJsonObjectAfterPrefix(summaryMatch.text, AUTO_REVIEW_SUMMARY_PREFIX);
+  if (!summaryJson) {
+    return { found: true, parseError: "missing_json" };
+  }
+
+  try {
+    const parsed = JSON.parse(summaryJson) as Record<string, unknown>;
+    return {
+      found: true,
+      summary: {
+        selectedFindings: normalizeSummaryItems(parsed["selectedFindings"]),
+        ignoredFindings: normalizeSummaryItems(parsed["ignoredFindings"]),
+        rationale: typeof parsed["rationale"] === "string" && parsed["rationale"].trim()
+          ? parsed["rationale"].trim()
+          : "Agent emitted GOOSEHERD_REVIEW_SUMMARY without a rationale.",
+      },
+    };
+  } catch {
+    return { found: true, parseError: "invalid_json" };
+  }
+}
+
+function extractJsonObjectAfterPrefix(value: string, prefix: string): string | undefined {
+  const prefixIndex = value.indexOf(prefix);
+  if (prefixIndex < 0) {
+    return undefined;
+  }
+
+  let cursor = prefixIndex + prefix.length;
+  while (cursor < value.length && /\s/.test(value[cursor] ?? "")) {
+    cursor += 1;
+  }
+  if (value[cursor] !== "{") {
+    return undefined;
+  }
+
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+
+  for (let index = cursor; index < value.length; index += 1) {
+    const char = value[index] ?? "";
+
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === "\\") {
+        escaped = true;
+      } else if (char === "\"") {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (char === "\"") {
+      inString = true;
+      continue;
+    }
+
+    if (char === "{") {
+      depth += 1;
+      continue;
+    }
+
+    if (char === "}") {
+      depth -= 1;
+      if (depth === 0) {
+        return value.slice(cursor, index + 1);
+      }
+    }
+  }
+
+  return undefined;
+}
+
+function extractAssistantMessageTexts(value: unknown): string[] {
+  if (!value || typeof value !== "object") {
+    return [];
+  }
+
+  const message = value as Record<string, unknown>;
+  if (message["role"] !== "assistant") {
+    return [];
+  }
+
+  const content = message["content"];
+  if (!Array.isArray(content)) {
+    return [];
+  }
+
+  return content
+    .filter((block): block is Record<string, unknown> => Boolean(block) && typeof block === "object")
+    .filter((block) => block["type"] === "text")
+    .map((block) => block["text"])
+    .filter((text): text is string => typeof text === "string")
+    .map((text) => text.trim())
+    .filter(Boolean);
 }
 
 function normalizeSummaryItems(value: unknown): string[] {

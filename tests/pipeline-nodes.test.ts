@@ -9,6 +9,7 @@ import os from "node:os";
 import path from "node:path";
 import { ContextBag } from "../src/pipeline/context-bag.js";
 import { localTestNode } from "../src/pipeline/nodes/local-test.js";
+import { lightweightChecksNode } from "../src/pipeline/nodes/lightweight-checks.js";
 import { rubySyntaxGateNode } from "../src/pipeline/nodes/ruby-syntax-gate.js";
 import { notifyNode } from "../src/pipeline/nodes/notify.js";
 import type { NodeConfig, NodeDeps } from "../src/pipeline/types.js";
@@ -181,7 +182,53 @@ describe("rubySyntaxGateNode", () => {
   });
 });
 
-describe("pipeline-loader accepts ruby_syntax_gate", () => {
+describe("lightweightChecksNode", () => {
+  test("returns success when changed JavaScript files pass syntax check", async (t) => {
+    const { repoDir, logFile, cleanup } = await makeGitRepo("lightweight-js-pass-");
+    t.after(cleanup);
+
+    await writeFile(path.join(repoDir, "worker.js"), "export function call() { return 1; }\n", "utf8");
+
+    const ctx = new ContextBag({ repoDir });
+    const deps = makeDeps({ logFile });
+
+    const result = await lightweightChecksNode(makeNodeConfig("lightweight_checks"), ctx, deps);
+    assert.equal(result.outcome, "success");
+  });
+
+  test("returns failure with rawOutput when a changed JavaScript file has invalid syntax", async (t) => {
+    const { repoDir, logFile, cleanup } = await makeGitRepo("lightweight-js-fail-");
+    t.after(cleanup);
+
+    await writeFile(path.join(repoDir, "broken.js"), "const foo = ;\n", "utf8");
+
+    const ctx = new ContextBag({ repoDir });
+    const deps = makeDeps({ logFile });
+
+    const result = await lightweightChecksNode(makeNodeConfig("lightweight_checks"), ctx, deps);
+    assert.equal(result.outcome, "failure");
+    assert.match(result.error ?? "", /JavaScript syntax check failed/i);
+    assert.ok(result.rawOutput?.includes("broken.js"));
+  });
+});
+
+describe("pipeline-loader accepts lightweight_checks and ruby_syntax_gate", () => {
+  test("lightweight_checks is a valid registered action", async () => {
+    const { loadPipelineFromString } = await import("../src/pipeline/pipeline-loader.js");
+
+    const pipeline = loadPipelineFromString(`
+version: 1
+name: "lightweight-checks-test"
+nodes:
+  - id: checks
+    type: deterministic
+    action: lightweight_checks
+`);
+
+    assert.equal(pipeline.nodes.length, 1);
+    assert.equal(pipeline.nodes[0].action, "lightweight_checks");
+  });
+
   test("ruby_syntax_gate is a valid registered action", async () => {
     const { loadPipelineFromString } = await import("../src/pipeline/pipeline-loader.js");
 

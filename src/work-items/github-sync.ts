@@ -54,7 +54,7 @@ export interface GitHubWorkItemSyncOptions {
   resetQaReviewOnNewCommits?: boolean;
   reconcileWorkItem?: (workItemId: string, reason: string) => Promise<void> | void;
   resolveDeliveryContext: (input: {
-    jiraIssueKey: string;
+    jiraIssueKey?: string;
     repo?: string;
     prNumber?: number;
     prTitle?: string;
@@ -81,15 +81,20 @@ export function parseGitHubWorkItemWebhookPayload(
   if (eventType === "pull_request") {
     const pullRequest = payload["pull_request"] as Record<string, unknown> | undefined;
     if (!pullRequest) return undefined;
+    const action = payload["action"] as string | undefined;
     const labels = Array.isArray(pullRequest["labels"])
       ? (pullRequest["labels"] as Array<Record<string, unknown>>)
           .map((label) => label["name"])
           .filter((name): name is string => typeof name === "string")
       : [];
+    const webhookLabel = (payload["label"] as Record<string, unknown> | undefined)?.["name"];
+    if (action === "labeled" && typeof webhookLabel === "string" && !labels.includes(webhookLabel)) {
+      labels.push(webhookLabel);
+    }
 
     return {
       eventType: "pull_request",
-      action: payload["action"] as string | undefined,
+      action,
       repo,
       prNumber: payload["number"] as number | undefined,
       prTitle: pullRequest["title"] as string | undefined,
@@ -209,66 +214,64 @@ export class GitHubWorkItemSync {
     }
 
     const jiraIssueKey = parseJiraIssueKey(payload.prBody);
-    if (!jiraIssueKey) {
-      return undefined;
-    }
-
-    const adoptionCandidates = await this.workItems.listFeatureDeliveryAdoptionCandidatesByJiraIssueKey(jiraIssueKey);
-    if (adoptionCandidates.length === 1) {
-      const existingByJira = adoptionCandidates[0]!;
-      await this.events.append({
-        workItemId: existingByJira.id,
-        eventType: "github.label_observed",
-        actorUserId: existingByJira.createdByUserId,
-        payload: {
-          action: payload.action,
-          prNumber,
-          labels: payload.labels ?? [],
-        },
-      });
-      await this.workItems.linkPullRequest(existingByJira.id, {
-        repo: payload.repo,
-        githubPrNumber: prNumber,
-        githubPrUrl: payload.prUrl,
-        githubPrBaseBranch: payload.baseBranch,
-        githubPrHeadBranch: payload.headBranch,
-      });
-      const updated = await this.workItems.updateState(existingByJira.id, {
-        state: "auto_review",
-        substate: "pr_adopted",
-        flagsToAdd: ["pr_opened"],
-      });
-      await this.events.append({
-        workItemId: updated.id,
-        eventType: "github.pr_adopted_existing",
-        actorUserId: updated.createdByUserId,
-        payload: {
-          repo: payload.repo,
-          prNumber,
-          jiraIssueKey,
-          labels: payload.labels ?? [],
-        },
-      });
-      await this.reconcileIfConfigured(updated.id, "github.pr_adopted");
-      return updated;
-    }
-
-    if (adoptionCandidates.length > 1) {
-      for (const candidate of adoptionCandidates) {
+    if (jiraIssueKey) {
+      const adoptionCandidates = await this.workItems.listFeatureDeliveryAdoptionCandidatesByJiraIssueKey(jiraIssueKey);
+      if (adoptionCandidates.length === 1) {
+        const existingByJira = adoptionCandidates[0]!;
         await this.events.append({
-          workItemId: candidate.id,
-          eventType: "github.pr_adoption_ambiguous",
-          actorUserId: candidate.createdByUserId,
+          workItemId: existingByJira.id,
+          eventType: "github.label_observed",
+          actorUserId: existingByJira.createdByUserId,
           payload: {
             action: payload.action,
+            prNumber,
+            labels: payload.labels ?? [],
+          },
+        });
+        await this.workItems.linkPullRequest(existingByJira.id, {
+          repo: payload.repo,
+          githubPrNumber: prNumber,
+          githubPrUrl: payload.prUrl,
+          githubPrBaseBranch: payload.baseBranch,
+          githubPrHeadBranch: payload.headBranch,
+        });
+        const updated = await this.workItems.updateState(existingByJira.id, {
+          state: "auto_review",
+          substate: "pr_adopted",
+          flagsToAdd: ["pr_opened"],
+        });
+        await this.events.append({
+          workItemId: updated.id,
+          eventType: "github.pr_adopted_existing",
+          actorUserId: updated.createdByUserId,
+          payload: {
             repo: payload.repo,
             prNumber,
             jiraIssueKey,
-            candidateCount: adoptionCandidates.length,
+            labels: payload.labels ?? [],
           },
         });
+        await this.reconcileIfConfigured(updated.id, "github.pr_adopted");
+        return updated;
       }
-      return undefined;
+
+      if (adoptionCandidates.length > 1) {
+        for (const candidate of adoptionCandidates) {
+          await this.events.append({
+            workItemId: candidate.id,
+            eventType: "github.pr_adoption_ambiguous",
+            actorUserId: candidate.createdByUserId,
+            payload: {
+              action: payload.action,
+              repo: payload.repo,
+              prNumber,
+              jiraIssueKey,
+              candidateCount: adoptionCandidates.length,
+            },
+          });
+        }
+        return undefined;
+      }
     }
 
     const context = await this.resolveDeliveryContext({
@@ -284,25 +287,45 @@ export class GitHubWorkItemSync {
       return undefined;
     }
 
-    const adopted = await this.workItemService.createDeliveryFromJira({
-      title: payload.prTitle ?? jiraIssueKey,
-      summary: payload.prBody,
-      ownerTeamId: context.ownerTeamId,
-      homeChannelId: context.homeChannelId,
-      homeThreadTs: context.homeThreadTs,
-      originChannelId: context.originChannelId,
-      originThreadTs: context.originThreadTs,
-      jiraIssueKey,
-      repo: payload.repo,
-      createdByUserId: context.createdByUserId,
-      githubPrNumber: prNumber,
-      githubPrUrl: payload.prUrl,
-      githubPrBaseBranch: payload.baseBranch,
-      githubPrHeadBranch: payload.headBranch,
-      initialState: "auto_review",
-      initialSubstate: "pr_adopted",
-      flags: ["pr_opened"],
-    });
+    const title = payload.prTitle ?? jiraIssueKey ?? `PR #${String(prNumber)}`;
+    const adopted = jiraIssueKey
+      ? await this.workItemService.createDeliveryFromJira({
+          title,
+          summary: payload.prBody,
+          ownerTeamId: context.ownerTeamId,
+          homeChannelId: context.homeChannelId,
+          homeThreadTs: context.homeThreadTs,
+          originChannelId: context.originChannelId,
+          originThreadTs: context.originThreadTs,
+          jiraIssueKey,
+          repo: payload.repo,
+          createdByUserId: context.createdByUserId,
+          githubPrNumber: prNumber,
+          githubPrUrl: payload.prUrl,
+          githubPrBaseBranch: payload.baseBranch,
+          githubPrHeadBranch: payload.headBranch,
+          initialState: "auto_review",
+          initialSubstate: "pr_adopted",
+          flags: ["pr_opened"],
+        })
+      : await this.workItemService.createDeliveryFromPullRequest({
+          title,
+          summary: payload.prBody,
+          ownerTeamId: context.ownerTeamId,
+          homeChannelId: context.homeChannelId,
+          homeThreadTs: context.homeThreadTs,
+          originChannelId: context.originChannelId,
+          originThreadTs: context.originThreadTs,
+          repo: payload.repo,
+          createdByUserId: context.createdByUserId,
+          githubPrNumber: prNumber,
+          githubPrUrl: payload.prUrl,
+          githubPrBaseBranch: payload.baseBranch,
+          githubPrHeadBranch: payload.headBranch,
+          initialState: "auto_review",
+          initialSubstate: "pr_adopted",
+          flags: ["pr_opened"],
+        });
 
     await this.events.append({
       workItemId: adopted.id,

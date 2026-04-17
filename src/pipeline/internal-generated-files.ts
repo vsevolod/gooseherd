@@ -19,3 +19,19 @@ export function listInternalGeneratedFiles(files: string[]): string[] {
 export function buildGitAddPathspecs(): string[] {
   return [".", ...[...INTERNAL_GENERATED_FILES].map((file) => `:(exclude)${file}`)];
 }
+
+export function mergeInternalArtifacts(...artifactLists: Array<string[] | undefined>): string[] | undefined {
+  const merged = new Set<string>();
+
+  for (const artifacts of artifactLists) {
+    if (!artifacts) continue;
+    for (const artifact of artifacts) {
+      const normalized = normalizeRelativePath(artifact);
+      if (normalized) {
+        merged.add(normalized);
+      }
+    }
+  }
+
+  return merged.size > 0 ? [...merged] : undefined;
+}

@@ -13,7 +13,6 @@ import { setSandboxManager } from "./pipeline/shell.js";
 import { preflightSandboxRuntime } from "./runtime/runtime-mode.js";
 import { DockerExecutionBackend } from "./runtime/docker-backend.js";
 import { LocalExecutionBackend } from "./runtime/local-backend.js";
-import { KubernetesExecutionBackend } from "./runtime/kubernetes-backend.js";
 import { getRuntimeBackend, type RuntimeRegistry } from "./runtime/backend.js";
 import { ControlPlaneStore } from "./runtime/control-plane-store.js";
 import { FileArtifactStore } from "./runtime/file-artifact-store.js";
@@ -108,21 +107,24 @@ async function main(): Promise<void> {
     config.dashboardPublicUrl ?? `http://${config.dashboardHost}:${String(config.dashboardPort)}`,
     controlPlaneStore,
   );
+  const kubernetesBackend = config.sandboxRuntime === "kubernetes"
+    ? new (await import("./runtime/kubernetes-backend.js")).KubernetesExecutionBackend({
+        controlPlaneStore,
+        artifactStore,
+        runStore: store,
+        workRoot: config.workRoot,
+        runnerImage: process.env.KUBERNETES_RUNNER_IMAGE?.trim() || "gooseherd/k8s-runner:dev",
+        internalBaseUrl: process.env.KUBERNETES_INTERNAL_BASE_URL?.trim() || `http://host.minikube.internal:${String(config.dashboardPort)}`,
+        dryRun: config.dryRun,
+        runnerEnvSecretName: resolveKubernetesRunnerEnvSecretName(),
+        runnerEnvConfigMapName: resolveKubernetesRunnerEnvConfigMapName(),
+        namespace: process.env.KUBERNETES_NAMESPACE?.trim() || "default",
+      })
+    : undefined;
   const runtimeRegistry: RuntimeRegistry = {
     local: new LocalExecutionBackend(pipelineEngine),
     docker: new DockerExecutionBackend(pipelineEngine),
-    kubernetes: new KubernetesExecutionBackend({
-      controlPlaneStore,
-      artifactStore,
-      runStore: store,
-      workRoot: config.workRoot,
-      runnerImage: process.env.KUBERNETES_RUNNER_IMAGE?.trim() || "gooseherd/k8s-runner:dev",
-      internalBaseUrl: process.env.KUBERNETES_INTERNAL_BASE_URL?.trim() || `http://host.minikube.internal:${String(config.dashboardPort)}`,
-      dryRun: config.dryRun,
-      runnerEnvSecretName: resolveKubernetesRunnerEnvSecretName(),
-      runnerEnvConfigMapName: resolveKubernetesRunnerEnvConfigMapName(),
-      namespace: process.env.KUBERNETES_NAMESPACE?.trim() || "default",
-    })
+    kubernetes: kubernetesBackend,
   };
 
   await store.updateRun(run.id, {

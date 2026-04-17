@@ -147,6 +147,26 @@ test("control-plane store stamps token first use and rejects expired tokens", as
   await cleanup();
 });
 
+test("control-plane store updates uploaded artifact to complete", async () => {
+  const { db, cleanup } = await createTestDb();
+  const store = new ControlPlaneStore(db);
+  const runId = "3f1ce7c7-c7cf-4bd6-8b8e-2a5d77e62f41";
+  await insertRun(db, runId);
+
+  await store.upsertArtifact(runId, "run.log", "raw_run_log", {
+    storage: "file",
+    path: "/tmp/run.log",
+  });
+
+  await (store as unknown as { markArtifactUploaded: (runId: string, artifactKey: string, metadata: Record<string, unknown>) => Promise<void> })
+    .markArtifactUploaded(runId, "run.log", { storage: "file", path: "/tmp/run.log", sizeBytes: 12 });
+
+  const artifactRows = await db.select().from(runArtifacts).where(eq(runArtifacts.runId, runId));
+  assert.equal(artifactRows[0]?.status, "complete");
+  assert.equal((artifactRows[0]?.metadata as { sizeBytes?: number })?.sizeBytes, 12);
+  await cleanup();
+});
+
 test("control-plane store deduplicates events by eventId within a run", async () => {
   const { db, cleanup } = await createTestDb();
   const store = new ControlPlaneStore(db);
@@ -259,6 +279,52 @@ test("reconciler finalizes completed when completion exists and runtime reports 
   assert.deepEqual(updated?.changedFiles, ["a.ts"]);
   assert.deepEqual(updated?.internalArtifacts, ["AGENTS.md"]);
   assert.equal(updated?.title, "Complete run");
+  await cleanup();
+});
+
+test("reconciler preserves internal artifacts on failed completions", async () => {
+  const { db, cleanup } = await createTestDb();
+  const controlPlaneStore = new ControlPlaneStore(db);
+  const runStore = new RunStore(db);
+  await runStore.init();
+
+  const run = await runStore.createRun(
+    {
+      repoSlug: "owner/repo",
+      task: "reconcile failed-with-artifacts",
+      baseBranch: "main",
+      requestedBy: "U1",
+      channelId: "C1",
+      threadTs: "1",
+      runtime: "kubernetes",
+    },
+    "gooseherd",
+  );
+
+  await controlPlaneStore.recordCompletion(run.id, {
+    idempotencyKey: "completion-failed-1",
+    status: "failed",
+    artifactState: "failed",
+    reason: "summary parse failed",
+    internalArtifacts: ["agent-stdout.log", "auto-review-summary.json"],
+  });
+
+  const reconciler = new RuntimeReconciler(
+    controlPlaneStore,
+    {
+      getTerminalFact: async () => "failed" as const,
+    },
+    runStore,
+  );
+
+  await reconciler.reconcileRun(run.id);
+  const updated = await runStore.getRun(run.id);
+
+  assert.equal(updated?.status, "failed");
+  assert.equal(updated?.phase, "failed");
+  assert.equal(updated?.error, "summary parse failed");
+  assert.deepEqual(updated?.internalArtifacts, ["agent-stdout.log", "auto-review-summary.json"]);
+
   await cleanup();
 });
 

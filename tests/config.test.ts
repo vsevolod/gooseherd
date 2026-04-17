@@ -260,6 +260,27 @@ test("Jira read access envs are exposed through config", () => {
   }
 });
 
+test("AUTO_REVIEW_DEBUG_LOG_MODE defaults to failures and respects env override", () => {
+  const originalEnv = process.env;
+  try {
+    process.env = {
+      ...originalEnv,
+      AUTO_REVIEW_DEBUG_LOG_MODE: undefined,
+    };
+    const defaults = loadConfig();
+    assert.equal(defaults.autoReviewDebugLogMode, "failures");
+
+    process.env = {
+      ...originalEnv,
+      AUTO_REVIEW_DEBUG_LOG_MODE: "always",
+    };
+    const overridden = loadConfig();
+    assert.equal(overridden.autoReviewDebugLogMode, "always");
+  } finally {
+    process.env = originalEnv;
+  }
+});
+
 test("Jira read access defaults stay unset without env vars", () => {
   const originalEnv = process.env;
   try {

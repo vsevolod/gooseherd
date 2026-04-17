@@ -380,6 +380,84 @@ export class WorkItemService {
     initialSubstate?: string;
     flags?: string[];
   }): Promise<WorkItemRecord> {
+    return this.createFeatureDelivery({
+      title: input.title,
+      summary: input.summary,
+      ownerTeamId: input.ownerTeamId,
+      homeChannelId: input.homeChannelId,
+      homeThreadTs: input.homeThreadTs,
+      originChannelId: input.originChannelId,
+      originThreadTs: input.originThreadTs,
+      jiraIssueKey: input.jiraIssueKey,
+      repo: input.repo,
+      createdByUserId: input.createdByUserId,
+      githubPrNumber: input.githubPrNumber,
+      githubPrUrl: input.githubPrUrl,
+      githubPrBaseBranch: input.githubPrBaseBranch,
+      githubPrHeadBranch: input.githubPrHeadBranch,
+      initialState: input.initialState,
+      initialSubstate: input.initialSubstate,
+      flags: input.flags,
+    });
+  }
+
+  async createDeliveryFromPullRequest(input: {
+    title: string;
+    summary?: string;
+    ownerTeamId: string;
+    homeChannelId: string;
+    homeThreadTs: string;
+    originChannelId?: string;
+    originThreadTs?: string;
+    createdByUserId: string;
+    repo?: string;
+    githubPrNumber?: number;
+    githubPrUrl?: string;
+    githubPrBaseBranch?: string;
+    githubPrHeadBranch?: string;
+    initialState?: Extract<WorkItemRecord["state"], "backlog" | "auto_review">;
+    initialSubstate?: string;
+    flags?: string[];
+  }): Promise<WorkItemRecord> {
+    return this.createFeatureDelivery({
+      title: input.title,
+      summary: input.summary,
+      ownerTeamId: input.ownerTeamId,
+      homeChannelId: input.homeChannelId,
+      homeThreadTs: input.homeThreadTs,
+      originChannelId: input.originChannelId,
+      originThreadTs: input.originThreadTs,
+      repo: input.repo,
+      createdByUserId: input.createdByUserId,
+      githubPrNumber: input.githubPrNumber,
+      githubPrUrl: input.githubPrUrl,
+      githubPrBaseBranch: input.githubPrBaseBranch,
+      githubPrHeadBranch: input.githubPrHeadBranch,
+      initialState: input.initialState,
+      initialSubstate: input.initialSubstate,
+      flags: input.flags,
+    });
+  }
+
+  private async createFeatureDelivery(input: {
+    title: string;
+    summary?: string;
+    ownerTeamId: string;
+    homeChannelId: string;
+    homeThreadTs: string;
+    originChannelId?: string;
+    originThreadTs?: string;
+    jiraIssueKey?: string;
+    createdByUserId: string;
+    repo?: string;
+    githubPrNumber?: number;
+    githubPrUrl?: string;
+    githubPrBaseBranch?: string;
+    githubPrHeadBranch?: string;
+    initialState?: Extract<WorkItemRecord["state"], "backlog" | "auto_review">;
+    initialSubstate?: string;
+    flags?: string[];
+  }): Promise<WorkItemRecord> {
     const delivery = await this.workItems.createWorkItem({
       workflow: "feature_delivery",
       state: input.initialState ?? "backlog",

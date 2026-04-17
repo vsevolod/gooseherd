@@ -331,3 +331,38 @@ test("runner client gets artifact upload targets", async () => {
     await server.close();
   }
 });
+
+test("runner client uploads binary artifact bodies", async () => {
+  let requestBody = Buffer.alloc(0);
+  const server = await startServer(async (req, res) => {
+    assert.equal(req.method, "POST");
+    assert.equal(req.url, "/internal/runs/run-upload/artifacts/run.log");
+    assert.equal(req.headers.authorization, "Bearer secret");
+    assert.equal(req.headers["content-type"], "text/plain");
+
+    const chunks: Buffer[] = [];
+    for await (const chunk of req) {
+      chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
+    }
+    requestBody = Buffer.concat(chunks);
+    jsonResponse(res, 202, { accepted: true });
+  });
+
+  const client = new RunnerControlPlaneClient({
+    baseUrl: server.baseUrl,
+    runId: "run-upload",
+    token: "secret",
+  });
+
+  try {
+    await client.uploadArtifact(
+      "/internal/runs/run-upload/artifacts/run.log",
+      Buffer.from("artifact-body\n", "utf8"),
+      "text/plain",
+      { maxAttempts: 1 },
+    );
+    assert.equal(requestBody.toString("utf8"), "artifact-body\n");
+  } finally {
+    await server.close();
+  }
+});

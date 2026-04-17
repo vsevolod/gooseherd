@@ -113,6 +113,13 @@
       "when": 1779407200000,
       "tag": "0015_run_prefetch_context",
       "breakpoints": true
+    },
+    {
+      "idx": 16,
+      "version": "7",
+      "when": 1779489600000,
+      "tag": "0016_run_internal_artifacts",
+      "breakpoints": true
     }
   ]
 }

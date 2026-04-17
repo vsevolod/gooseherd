@@ -32,6 +32,14 @@ interface ArtifactTargetsResponse {
   targets: Record<string, ArtifactTarget>;
 }
 
+function toArtifactUploadBody(body: Buffer | Uint8Array | string, contentType: string): string | Blob {
+  if (typeof body === "string") {
+    return body;
+  }
+  const binaryBody = Uint8Array.from(body);
+  return new Blob([binaryBody], { type: contentType });
+}
+
 function isRetryableStatus(status: number): boolean {
   return status === 408 || status >= 500;
 }
@@ -126,6 +134,62 @@ export class RunnerControlPlaneClient {
     return this.request<ArtifactTargetsResponse>("GET", "artifacts", undefined, opts?.maxAttempts, (res, suffix) =>
       parseValidatedSuccessBody(res, suffix, isArtifactTargetsResponse),
     );
+  }
+
+  async uploadArtifact(
+    uploadUrl: string,
+    body: Buffer | Uint8Array | string,
+    contentType = "application/octet-stream",
+    opts?: RetryOptions,
+  ): Promise<void> {
+    const maxAttempts = Math.max(1, opts?.maxAttempts ?? DEFAULT_MAX_ATTEMPTS);
+    const resolvedUrl = new URL(uploadUrl, this.cfg.baseUrl).toString();
+    const timeoutMs = Math.max(1, this.cfg.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS);
+    const requestBody = toArtifactUploadBody(body, contentType);
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      let response: Response;
+      const abortController = new AbortController();
+      const timeoutHandle = setTimeout(() => abortController.abort(), timeoutMs);
+
+      try {
+        response = await fetch(resolvedUrl, {
+          method: "POST",
+          signal: abortController.signal,
+          headers: {
+            authorization: `Bearer ${this.cfg.token}`,
+            "content-type": contentType,
+          },
+          body: requestBody,
+        });
+      } catch (error) {
+        clearTimeout(timeoutHandle);
+        if (attempt === maxAttempts) {
+          const message = error instanceof Error ? error.message : String(error);
+          throw new Error(`retry budget exhausted for artifact upload: ${message}`);
+        }
+        await sleep(nextRetryDelayMs(attempt));
+        continue;
+      } finally {
+        clearTimeout(timeoutHandle);
+      }
+
+      if (response.ok) {
+        return;
+      }
+
+      if (isTerminalStatus(response.status)) {
+        throw new Error(`terminal status ${response.status} for artifact upload`);
+      }
+
+      if (!isRetryableStatus(response.status) || attempt === maxAttempts) {
+        throw new Error(`retry budget exhausted for artifact upload: status ${response.status}`);
+      }
+
+      await sleep(nextRetryDelayMs(attempt));
+    }
+
+    throw new Error("retry budget exhausted for artifact upload");
   }
 
   private async request<T>(

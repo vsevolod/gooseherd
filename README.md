@@ -159,6 +159,8 @@ AGENT_COMMAND_TEMPLATE='cd {{repo_dir}} && claude -p "$(cat {{prompt_file}})" --
 AGENT_COMMAND_TEMPLATE='cd {{repo_dir}} && cursor-agent "$(cat {{prompt_file}})" --no-interactive'
 ```
 
+For auto-review forensic logging, set `AUTO_REVIEW_DEBUG_LOG_MODE=off|failures|always`. The default is `failures`, which adds compact diagnostics to the persisted runner log only when an auto-review run fails.
+
 ## Dashboard
 
 Built-in run inspector at `http://localhost:8787`:

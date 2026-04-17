@@ -37,12 +37,10 @@ import { AgentProfileStore } from "./db/agent-profile-store.js";
 import { DockerExecutionBackend } from "./runtime/docker-backend.js";
 import { LocalExecutionBackend } from "./runtime/local-backend.js";
 import type { RuntimeRegistry } from "./runtime/backend.js";
-import { KubernetesExecutionBackend } from "./runtime/kubernetes-backend.js";
 import { ControlPlaneStore } from "./runtime/control-plane-store.js";
 import { FileArtifactStore } from "./runtime/file-artifact-store.js";
 import type { ArtifactStore } from "./runtime/artifact-store.js";
 import { RuntimeReconciler } from "./runtime/reconciler.js";
-import { KubernetesRuntimeFactsReader } from "./runtime/kubernetes/runtime-facts.js";
 import { recoverRunsAfterRestart } from "./runtime/startup-recovery.js";
 import { WorkItemStore } from "./work-items/store.js";
 import { RunContextPrefetcher } from "./runtime/run-context-prefetcher.js";
@@ -316,7 +314,7 @@ async function createServices(config: AppConfig, db: Database): Promise<Services
       return workItemContextResolver.resolveDeliveryContext({
         createdByUserId: actor.id,
         ownerTeamId,
-        title: prTitle ?? jiraIssueKey,
+        title: prTitle ?? jiraIssueKey ?? (typeof prNumber === "number" ? `PR #${String(prNumber)}` : "Delivery work item"),
         createHomeThread,
       });
     },
@@ -332,12 +330,12 @@ async function createServices(config: AppConfig, db: Database): Promise<Services
     }),
   });
   const runtimeFactsReader = config.sandboxRuntime === "kubernetes"
-    ? new KubernetesRuntimeFactsReader({
-      namespace: resolveKubernetesNamespace(),
-    })
+    ? new (await import("./runtime/kubernetes/runtime-facts.js")).KubernetesRuntimeFactsReader({
+        namespace: resolveKubernetesNamespace(),
+      })
     : {
-      getTerminalFact: async () => "running" as const,
-    };
+        getTerminalFact: async () => "running" as const,
+      };
   const runtimeReconciler = new RuntimeReconciler(
     controlPlaneStore,
     runtimeFactsReader,
@@ -350,19 +348,19 @@ async function createServices(config: AppConfig, db: Database): Promise<Services
     controlPlaneStore,
   );
   const kubernetesBackend = config.sandboxRuntime === "kubernetes"
-    ? new KubernetesExecutionBackend({
-      controlPlaneStore,
-      artifactStore: runnerArtifactStore,
-      runStore: store,
-      workRoot: config.workRoot,
-      runnerImage: resolveKubernetesRunnerImage(),
-      internalBaseUrl: resolveKubernetesInternalBaseUrl(config),
-      dryRun: config.dryRun,
-      runnerEnvSecretName: resolveKubernetesRunnerEnvSecretName(),
-      runnerEnvConfigMapName: resolveKubernetesRunnerEnvConfigMapName(),
-      namespace: resolveKubernetesNamespace(),
-      runnerConfigSource: config,
-    })
+    ? new (await import("./runtime/kubernetes-backend.js")).KubernetesExecutionBackend({
+        controlPlaneStore,
+        artifactStore: runnerArtifactStore,
+        runStore: store,
+        workRoot: config.workRoot,
+        runnerImage: resolveKubernetesRunnerImage(),
+        internalBaseUrl: resolveKubernetesInternalBaseUrl(config),
+        dryRun: config.dryRun,
+        runnerEnvSecretName: resolveKubernetesRunnerEnvSecretName(),
+        runnerEnvConfigMapName: resolveKubernetesRunnerEnvConfigMapName(),
+        namespace: resolveKubernetesNamespace(),
+        runnerConfigSource: config,
+      })
     : undefined;
   const runtimeRegistry: RuntimeRegistry = {
     local: new LocalExecutionBackend(pipelineEngine),

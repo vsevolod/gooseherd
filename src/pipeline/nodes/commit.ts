@@ -1,7 +1,8 @@
 import type { NodeConfig, NodeResult, NodeDeps } from "../types.js";
 import type { ContextBag } from "../context-bag.js";
-import { runShellCapture } from "../shell.js";
+import { appendLog, runShellCapture } from "../shell.js";
 import { commitCaptureAndPush } from "../git-ops.js";
+import { mergeInternalArtifacts } from "../internal-generated-files.js";
 
 /**
  * Commit node: assert changes, git add + commit, capture SHA + changed files.
@@ -16,6 +17,16 @@ export async function commitNode(
   const logFile = deps.logFile;
   const repoDir = ctx.getRequired<string>("repoDir");
   const isFollowUp = ctx.get<boolean>("isFollowUp") ?? false;
+  const autoReviewNoop = ctx.get<boolean>("autoReviewNoop") ?? false;
+  const existingInternalArtifacts = ctx.get<string[]>("internalArtifacts");
+
+  if (autoReviewNoop) {
+    await appendLog(logFile, "\n[commit] skipped (auto-review no-op)\n");
+    return {
+      outcome: "success",
+      outputs: { skippedCommit: true }
+    };
+  }
 
   // Assert changes exist (tracked modifications + untracked new files)
   const statusResult = await runShellCapture("git status --porcelain", { cwd: repoDir, logFile });
@@ -34,6 +45,10 @@ export async function commitNode(
 
   return {
     outcome: "success",
-    outputs: { commitSha, changedFiles, internalArtifacts }
+    outputs: {
+      commitSha,
+      changedFiles,
+      internalArtifacts: mergeInternalArtifacts(existingInternalArtifacts, internalArtifacts)
+    }
   };
 }

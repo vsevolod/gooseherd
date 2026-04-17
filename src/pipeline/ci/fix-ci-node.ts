@@ -6,6 +6,7 @@ import { runShell, runShellCapture, appendLog } from "../shell.js";
 import { buildAgentCommand } from "../agent-command.js";
 import { commitCaptureAndPush } from "../git-ops.js";
 import { buildCIFixPrompt, type CIAnnotation } from "./ci-monitor.js";
+import { mergeInternalArtifacts } from "../internal-generated-files.js";
 
 /**
  * CI Fix node: "fat" agent node that fixes CI failures, commits, and pushes.
@@ -34,6 +35,7 @@ export async function fixCiNode(
   const annotations = ctx.get<CIAnnotation[]>("ciAnnotations") ?? [];
   const logTail = ctx.get<string>("ciLogTail") ?? "";
   const changedFiles = ctx.get<string[]>("changedFiles") ?? [];
+  const existingInternalArtifacts = ctx.get<string[]>("internalArtifacts");
 
   const fixPrompt = (annotations.length > 0 || logTail)
     ? buildCIFixPrompt(annotations, logTail, changedFiles)
@@ -71,6 +73,10 @@ export async function fixCiNode(
 
   return {
     outcome: "success",
-    outputs: { commitSha: newSha, changedFiles: newChangedFiles, internalArtifacts }
+    outputs: {
+      commitSha: newSha,
+      changedFiles: newChangedFiles,
+      internalArtifacts: mergeInternalArtifacts(existingInternalArtifacts, internalArtifacts)
+    }
   };
 }

@@ -133,7 +133,7 @@ async function createGitHubPrFirstFixture() {
   const contextResolver = new WorkItemContextResolver(testDb.db);
 
   const resolveDeliveryContext = async (input: {
-    jiraIssueKey: string;
+    jiraIssueKey?: string;
     repo?: string;
     prNumber?: number;
     prTitle?: string;
@@ -232,6 +232,52 @@ test("parseGitHubWorkItemWebhookPayload extracts author login from PR payload", 
   assert.equal(parsed?.headBranch, "feature/pr-author-login");
 });
 
+test("parseGitHubWorkItemWebhookPayload includes top-level label for labeled pull_request events", () => {
+  const parsed = parseGitHubWorkItemWebhookPayload(
+    { "x-github-event": "pull_request" },
+    {
+      action: "labeled",
+      number: 83,
+      label: { name: "ai:assist" },
+      repository: { full_name: "hubstaff/gooseherd" },
+      pull_request: {
+        title: "Adopt from labeled webhook",
+        body: "Refs HBL-583",
+        html_url: "https://github.com/hubstaff/gooseherd/pull/83",
+        base: { ref: "main" },
+        head: { ref: "feature/adopt-from-label" },
+        labels: [],
+        user: { login: "github-author" },
+      },
+    },
+  );
+
+  assert.deepEqual(parsed?.labels, ["ai:assist"]);
+});
+
+test("parseGitHubWorkItemWebhookPayload does not re-add the removed top-level label for unlabeled pull_request events", () => {
+  const parsed = parseGitHubWorkItemWebhookPayload(
+    { "x-github-event": "pull_request" },
+    {
+      action: "unlabeled",
+      number: 84,
+      label: { name: "ai:assist" },
+      repository: { full_name: "hubstaff/gooseherd" },
+      pull_request: {
+        title: "Unlabel should not adopt",
+        body: "Refs HBL-584",
+        html_url: "https://github.com/hubstaff/gooseherd/pull/84",
+        base: { ref: "main" },
+        head: { ref: "feature/unlabel" },
+        labels: [],
+        user: { login: "github-author" },
+      },
+    },
+  );
+
+  assert.deepEqual(parsed?.labels, []);
+});
+
 test("github sync adopts labeled PR into delivery work item", async (t) => {
   const { cleanup, sync, db } = await createGitHubSyncFixture();
   t.after(cleanup);
@@ -264,6 +310,45 @@ test("github sync adopts labeled PR into delivery work item", async (t) => {
   assert.ok(events.some((event) => event.eventType === "github.pr_adopted"));
 });
 
+test("github sync adopts labeled PR when ai:assist is only in the top-level webhook label", async (t) => {
+  const { cleanup, sync, db } = await createGitHubSyncFixture();
+  t.after(cleanup);
+
+  const parsed = parseGitHubWorkItemWebhookPayload(
+    { "x-github-event": "pull_request" },
+    {
+      action: "labeled",
+      number: 84,
+      label: { name: "ai:assist" },
+      repository: { full_name: "hubstaff/gooseherd" },
+      pull_request: {
+        title: "Adopt from webhook label",
+        body: "Implements workflow support",
+        html_url: "https://github.com/hubstaff/gooseherd/pull/84",
+        base: { ref: "main" },
+        head: { ref: "feature/adopt-webhook-label" },
+        labels: [],
+        user: { login: "github-author" },
+      },
+    },
+  );
+
+  assert.ok(parsed);
+  const adopted = await sync.handleWebhookPayload(parsed);
+
+  assert.ok(adopted);
+  assert.equal(adopted?.workflow, "feature_delivery");
+  assert.equal(adopted?.state, "auto_review");
+  assert.equal(adopted?.substate, "pr_adopted");
+  assert.equal(adopted?.repo, "hubstaff/gooseherd");
+  assert.equal(adopted?.githubPrNumber, 84);
+  assert.ok(adopted?.flags.includes("pr_opened"));
+
+  const events = await db.select().from(workItemEvents).where(eq(workItemEvents.workItemId, adopted!.id));
+  assert.ok(events.some((event) => event.eventType === "github.label_observed"));
+  assert.ok(events.some((event) => event.eventType === "github.pr_adopted"));
+});
+
 test("github sync ignores unrelated label", async (t) => {
   const { cleanup, sync } = await createGitHubSyncFixture();
   t.after(cleanup);
@@ -283,8 +368,37 @@ test("github sync ignores unrelated label", async (t) => {
   assert.equal(adopted, undefined);
 });
 
-test("github sync ignores labeled PRs without a Jira issue key", async (t) => {
+test("github sync does not adopt a PR when ai:assist was removed", async (t) => {
   const { cleanup, sync } = await createGitHubSyncFixture();
+  t.after(cleanup);
+
+  const parsed = parseGitHubWorkItemWebhookPayload(
+    { "x-github-event": "pull_request" },
+    {
+      action: "unlabeled",
+      number: 7800,
+      label: { name: "ai:assist" },
+      repository: { full_name: "hubstaff/gooseherd" },
+      pull_request: {
+        title: "Removed assist label",
+        body: "Refs HBL-7800",
+        html_url: "https://github.com/hubstaff/gooseherd/pull/7800",
+        base: { ref: "main" },
+        head: { ref: "feature/removed-assist-label" },
+        labels: [],
+        user: { login: "github-author" },
+      },
+    },
+  );
+
+  assert.ok(parsed);
+  const adopted = await sync.handleWebhookPayload(parsed);
+
+  assert.equal(adopted, undefined);
+});
+
+test("github sync creates a delivery for labeled PRs without a Jira issue key", async (t) => {
+  const { cleanup, sync, db } = await createGitHubSyncFixture();
   t.after(cleanup);
 
   const adopted = await sync.handleWebhookPayload({
@@ -300,7 +414,19 @@ test("github sync ignores labeled PRs without a Jira issue key", async (t) => {
     authorLogin: "github-author",
   });
 
-  assert.equal(adopted, undefined);
+  assert.ok(adopted);
+  assert.equal(adopted?.workflow, "feature_delivery");
+  assert.equal(adopted?.state, "auto_review");
+  assert.equal(adopted?.substate, "pr_adopted");
+  assert.equal(adopted?.jiraIssueKey, undefined);
+  assert.equal(adopted?.repo, "hubstaff/gooseherd");
+  assert.equal(adopted?.githubPrNumber, 780);
+  assert.equal(adopted?.title, "No Jira issue");
+  assert.ok(adopted?.flags.includes("pr_opened"));
+
+  const events = await db.select().from(workItemEvents).where(eq(workItemEvents.workItemId, adopted!.id));
+  assert.ok(events.some((event) => event.eventType === "github.label_observed"));
+  assert.ok(events.some((event) => event.eventType === "github.pr_adopted"));
 });
 
 test("github sync links labeled PR to existing delivery item with same jira key", async (t) => {
@@ -768,6 +894,22 @@ test("github sync routes engineering review outcomes back into delivery flow", a
 
   assert.equal(approved?.id, approvedItem.id);
   assert.equal(approved?.state, "qa_preparation");
+});
+
+test("github sync ignores review callbacks for pull requests without a linked work item", async (t) => {
+  const { cleanup, sync } = await createGitHubSyncFixture();
+  t.after(cleanup);
+
+  const ignored = await sync.handleWebhookPayload({
+    eventType: "pull_request_review",
+    action: "submitted",
+    repo: "hubstaff/gooseherd",
+    prNumber: 4242,
+    state: "changes_requested",
+    reviewer: "reviewer-a",
+  });
+
+  assert.equal(ignored, undefined);
 });
 
 test("github sync keeps changes_requested mutation when reconcile callback throws", async (t) => {

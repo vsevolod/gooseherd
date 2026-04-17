@@ -6,7 +6,7 @@ import { runShell, runShellCapture, appendLog, sleep } from "../shell.js";
 import { buildAgentCommand } from "../agent-command.js";
 import { commitCaptureAndPush } from "../git-ops.js";
 import { isNonCodeFixFailure, type BrowserVerifyFailureCode } from "../quality-gates/browser-verify-routing.js";
-import { filterInternalGeneratedFiles } from "../internal-generated-files.js";
+import { filterInternalGeneratedFiles, mergeInternalArtifacts } from "../internal-generated-files.js";
 
 /**
  * Fix Browser node: "fat" agent node that fixes browser verification failures.
@@ -26,6 +26,7 @@ export async function fixBrowserNode(
   const repoDir = ctx.getRequired<string>("repoDir");
   const run = deps.run;
   const attempt = ctx.get<number>("loopAttempt") ?? 1;
+  const existingInternalArtifacts = ctx.get<string[]>("internalArtifacts");
 
   await deps.onPhase("ci_fixing");
   await appendLog(logFile, `\n[browser:fix] starting browser fix attempt ${String(attempt)}\n`);
@@ -118,7 +119,11 @@ export async function fixBrowserNode(
 
   return {
     outcome: "success",
-    outputs: { commitSha: newSha, changedFiles: newChangedFiles, internalArtifacts }
+    outputs: {
+      commitSha: newSha,
+      changedFiles: newChangedFiles,
+      internalArtifacts: mergeInternalArtifacts(existingInternalArtifacts, internalArtifacts)
+    }
   };
 }
 

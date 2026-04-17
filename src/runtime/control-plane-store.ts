@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
-import { desc, eq, sql } from "drizzle-orm";
+import { and, desc, eq, sql } from "drizzle-orm";
 import type { Database } from "../db/index.js";
 import { runArtifacts, runCompletions, runEvents, runPayloads, runTokens, runs } from "../db/schema.js";
 import { safeTokenCompare } from "../dashboard/auth.js";
@@ -219,6 +219,57 @@ export class ControlPlaneStore {
           updatedAt: now,
         },
       });
+  }
+
+  async getArtifact(runId: string, artifactKey: string): Promise<{
+    artifactKey: string;
+    artifactClass: string;
+    status: string;
+    metadata: Record<string, unknown>;
+  } | null> {
+    const rows = await this.db
+      .select({
+        artifactKey: runArtifacts.artifactKey,
+        artifactClass: runArtifacts.artifactClass,
+        status: runArtifacts.status,
+        metadata: runArtifacts.metadata,
+      })
+      .from(runArtifacts)
+      .where(and(eq(runArtifacts.runId, runId), eq(runArtifacts.artifactKey, artifactKey)))
+      .limit(1);
+    const row = rows[0];
+    if (!row) {
+      return null;
+    }
+    return {
+      artifactKey: row.artifactKey,
+      artifactClass: row.artifactClass,
+      status: row.status,
+      metadata: row.metadata as Record<string, unknown>,
+    };
+  }
+
+  async markArtifactUploaded(
+    runId: string,
+    artifactKey: string,
+    metadata: Record<string, unknown>,
+  ): Promise<void> {
+    const existing = await this.getArtifact(runId, artifactKey);
+    if (!existing) {
+      throw new Error(`Artifact ${artifactKey} not found for run ${runId}`);
+    }
+
+    await this.db
+      .update(runArtifacts)
+      .set({
+        status: "complete",
+        metadata: asJsonRecord({
+          ...existing.metadata,
+          ...metadata,
+        }),
+        updatedAt: new Date(),
+      })
+      .where(and(eq(runArtifacts.runId, runId), eq(runArtifacts.artifactKey, artifactKey)));
   }
 
   async getPayload(runId: string): Promise<RunEnvelope | null> {

@@ -62,9 +62,9 @@ nodes:
       max_rounds: 2
       until: "local_test.exit_code == 0"
 
-  - id: ruby_syntax_gate
+  - id: lightweight_checks
     type: deterministic
-    action: ruby_syntax_gate
+    action: lightweight_checks
     on_failure:
       action: loop
       agent_node: fix_validation

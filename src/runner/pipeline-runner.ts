@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { readFile } from "node:fs/promises";
+import path from "node:path";
 import type { ExecutionResult, RunRecord } from "../types.js";
 import type {
   RunEnvelope,
@@ -22,6 +24,87 @@ export type RunnerEventEmitter = (
 ) => Promise<void>;
 
 const DEFAULT_CANCELLATION_POLL_MS = 5_000;
+const DEBUG_ARTIFACT_UPLOAD_SPECS = [
+  { artifactKey: "agent-stdout.log", contentType: "text/plain" },
+  { artifactKey: "agent-stderr.log", contentType: "text/plain" },
+  { artifactKey: "auto-review-summary.json", contentType: "application/json" },
+] as const;
+
+function resolveDefaultRunLogPath(runId: string): string {
+  return path.resolve(process.env.WORK_ROOT ?? ".work", runId, "run.log");
+}
+
+function resolveRunDir(runId: string): string {
+  return path.resolve(process.env.WORK_ROOT ?? ".work", runId);
+}
+
+function mergeArtifactKeys(...artifactLists: Array<string[] | undefined>): string[] | undefined {
+  const merged = new Set<string>();
+  for (const artifacts of artifactLists) {
+    if (!artifacts) continue;
+    for (const artifact of artifacts) {
+      const normalized = artifact.replace(/\\/g, "/").replace(/^\.\//, "").trim();
+      if (normalized) {
+        merged.add(normalized);
+      }
+    }
+  }
+  return merged.size > 0 ? [...merged] : undefined;
+}
+
+async function maybeUploadArtifacts(
+  client: Pick<RunnerControlPlaneClient, "getArtifacts" | "uploadArtifact">,
+  runId: string,
+  logsPath: string,
+  emit: RunnerEventEmitter,
+): Promise<string[] | undefined> {
+  const uploadSpecs = [
+    { artifactKey: "run.log", localPath: logsPath, contentType: "text/plain" },
+    ...DEBUG_ARTIFACT_UPLOAD_SPECS.map((artifact) => ({
+      artifactKey: artifact.artifactKey,
+      localPath: path.join(resolveRunDir(runId), artifact.artifactKey),
+      contentType: artifact.contentType,
+    })),
+  ];
+
+  let artifactTargets: Awaited<ReturnType<Pick<RunnerControlPlaneClient, "getArtifacts">["getArtifacts"]>>["targets"];
+  try {
+    artifactTargets = (await client.getArtifacts({ maxAttempts: 1 })).targets;
+  } catch {
+    return undefined;
+  }
+
+  const uploadedInternalArtifacts: string[] = [];
+  for (const spec of uploadSpecs) {
+    let body: Buffer;
+    try {
+      body = await readFile(spec.localPath);
+    } catch {
+      continue;
+    }
+
+    const target = spec.artifactKey === "run.log"
+      ? artifactTargets.log ?? artifactTargets["run.log"] ?? Object.values(artifactTargets).find((candidate) => candidate.class === "raw_run_log")
+      : artifactTargets[spec.artifactKey];
+    if (!target?.uploadUrl) {
+      continue;
+    }
+
+    try {
+      await client.uploadArtifact(target.uploadUrl, body, spec.contentType, { maxAttempts: 1 });
+      if (spec.artifactKey !== "run.log") {
+        uploadedInternalArtifacts.push(spec.artifactKey);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      await emit("run.warning", {
+        reason: `Artifact upload failed for ${spec.artifactKey}: ${message}`,
+      });
+    }
+  }
+
+  return uploadedInternalArtifacts.length > 0 ? uploadedInternalArtifacts : undefined;
+}
 
 function readString(record: Record<string, unknown>, key: string): string | undefined {
   const value = record[key];
@@ -155,6 +238,7 @@ export async function runPipelineRunner(
     const result = await executePipeline(run, payload, emit, abortController.signal);
     stopPolling = true;
     await pollingPromise;
+    const uploadedInternalArtifacts = await maybeUploadArtifacts(client, run.id, result.logsPath, emit);
     await emit("run.completion_attempted", { status: "success" });
     await client.complete({
       idempotencyKey: randomUUID(),
@@ -162,7 +246,7 @@ export async function runPipelineRunner(
       artifactState: "complete",
       commitSha: result.commitSha,
       changedFiles: result.changedFiles,
-      internalArtifacts: result.internalArtifacts,
+      internalArtifacts: mergeArtifactKeys(result.internalArtifacts, uploadedInternalArtifacts),
       prUrl: result.prUrl,
       tokenUsage: result.tokenUsage,
       title: result.title,
@@ -171,6 +255,7 @@ export async function runPipelineRunner(
     stopPolling = true;
     await pollingPromise.catch(() => {});
     const reason = error instanceof Error ? error.message : String(error);
+    const uploadedInternalArtifacts = await maybeUploadArtifacts(client, run.id, resolveDefaultRunLogPath(run.id), emit);
     await emit("run.warning", { reason });
     await emit("run.completion_attempted", {
       status: "failed",
@@ -182,6 +267,7 @@ export async function runPipelineRunner(
       status: "failed",
       artifactState: "failed",
       reason,
+      internalArtifacts: uploadedInternalArtifacts,
     });
     throw error;
   }

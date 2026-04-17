@@ -323,6 +323,7 @@ DEFAULT_TEAM_SLACK_CHANNEL_NAME=#general
 | `AGENT_COMMAND_TEMPLATE` | Yes | `bash scripts/dummy-agent.sh {{repo_dir}} {{prompt_file}} {{run_id}}` | Must be replaced with your real agent command for production use. |
 | `AGENT_FOLLOW_UP_TEMPLATE` | No | unset | Optional follow-up command template. |
 | `AGENT_TIMEOUT_SECONDS` | No | `600` | Max agent runtime per attempt. |
+| `AUTO_REVIEW_DEBUG_LOG_MODE` | No | `failures` | Auto-review runner diagnostics in persisted pod logs. Allowed values: `off`, `failures`, `always`. |
 | `VALIDATION_COMMAND` | No | empty | Optional repo validation command. |
 | `LINT_FIX_COMMAND` | No | empty | Optional auto-fix lint command. |
 | `LOCAL_TEST_COMMAND` | No | empty | Optional test command. |
@@ -527,6 +528,7 @@ DATA_DIR=/app/data
 DRY_RUN=false
 PIPELINE_FILE=pipelines/pipeline.yml
 AGENT_COMMAND_TEMPLATE
+AUTO_REVIEW_DEBUG_LOG_MODE=failures
 SANDBOX_RUNTIME=kubernetes
 KUBERNETES_RUNNER_IMAGE
 KUBERNETES_INTERNAL_BASE_URL

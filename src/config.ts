@@ -1,6 +1,8 @@
 import { z } from "zod";
 import { resolveSandboxRuntime, type SandboxRuntime } from "./runtime/runtime-mode.js";
 
+export type AutoReviewDebugLogMode = "off" | "failures" | "always";
+
 const envSchema = z.object({
   APP_NAME: z.string().optional(),
 
@@ -45,6 +47,7 @@ const envSchema = z.object({
   VALIDATION_COMMAND: z.string().optional(),
   LINT_FIX_COMMAND: z.string().optional(),
   LOCAL_TEST_COMMAND: z.string().optional(),
+  AUTO_REVIEW_DEBUG_LOG_MODE: z.string().optional(),
   MAX_VALIDATION_ROUNDS: z.string().optional(),
   AGENT_TIMEOUT_SECONDS: z.string().optional(),
   SLACK_PROGRESS_HEARTBEAT_SECONDS: z.string().optional(),
@@ -186,6 +189,14 @@ function parseInteger(value: string | undefined, fallback: number): number {
   return parsed;
 }
 
+function parseAutoReviewDebugLogMode(value?: string): AutoReviewDebugLogMode {
+  const normalized = value?.trim().toLowerCase();
+  if (normalized === "off" || normalized === "always") {
+    return normalized;
+  }
+  return "failures";
+}
+
 export interface AppConfig {
   appName: string;
   appSlug: string;
@@ -232,6 +243,7 @@ export interface AppConfig {
   validationCommand: string;
   lintFixCommand: string;
   localTestCommand: string;
+  autoReviewDebugLogMode?: AutoReviewDebugLogMode;
   maxValidationRounds: number;
   agentTimeoutSeconds: number;
   slackProgressHeartbeatSeconds: number;
@@ -501,6 +513,7 @@ export function loadConfig(): AppConfig {
     validationCommand: parsed.VALIDATION_COMMAND ?? "",
     lintFixCommand: parsed.LINT_FIX_COMMAND?.trim() || "",
     localTestCommand: parsed.LOCAL_TEST_COMMAND?.trim() || "",
+    autoReviewDebugLogMode: parseAutoReviewDebugLogMode(parsed.AUTO_REVIEW_DEBUG_LOG_MODE),
     maxValidationRounds: parseInteger(parsed.MAX_VALIDATION_ROUNDS, 2),
     agentTimeoutSeconds: parseInteger(parsed.AGENT_TIMEOUT_SECONDS, 600),
     slackProgressHeartbeatSeconds: parseInteger(parsed.SLACK_PROGRESS_HEARTBEAT_SECONDS, 20),

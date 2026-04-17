@@ -64,6 +64,7 @@ export class RuntimeReconciler {
         phase: "failed",
         finishedAt: new Date().toISOString(),
         error: completion.payload.reason ?? "runtime reported failed completion",
+        internalArtifacts: completion.payload.internalArtifacts,
       });
       return;
     }
