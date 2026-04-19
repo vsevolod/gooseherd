@@ -31,6 +31,10 @@ export function buildAutoReviewTask(input: AutoReviewTaskInput): string {
   lines.push("5. Validate and push when there are code changes.");
   lines.push("6. Do not merge the PR.");
   lines.push('7. Before exiting, print exactly one line that starts with GOOSEHERD_REVIEW_SUMMARY: followed by compact JSON: {"selectedFindings":["..."],"ignoredFindings":["..."],"rationale":"..."}');
+  lines.push("8. selectedFindings must list only actionable remaining problems, risks, or review findings that still apply to the current diff.");
+  lines.push("9. ignoredFindings must list only reviewed hints or comments you intentionally ignored because they are stale, irrelevant, already fixed, or out of scope.");
+  lines.push("10. If there are no issues, both arrays should be empty.");
+  lines.push("11. Do not use selectedFindings or ignoredFindings as a changelog, test summary, or positive summary of the PR. Put that in rationale instead.");
 
   return lines.join("\n");
 }

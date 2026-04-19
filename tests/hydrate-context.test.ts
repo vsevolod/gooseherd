@@ -520,6 +520,10 @@ test("hydrateContextNode: auto-review runs require structured review summary out
   assert.ok(content.includes("selectedFindings"), "Should document the summary JSON shape");
   assert.ok(content.includes("ignoredFindings"), "Should document the ignored findings field");
   assert.ok(content.includes("rationale"), "Should document the rationale field");
+  assert.match(content, /selectedFindings .* only .*actionable/i, "Should define selectedFindings as actionable problems only");
+  assert.match(content, /ignoredFindings .* stale.*irrelevant/i, "Should define ignoredFindings as reviewed but discarded hints");
+  assert.match(content, /if there are no issues, both arrays should be empty/i, "Should require empty arrays when no issues remain");
+  assert.match(content, /do not use .* changelog|do not use .* summary of the pr/i, "Should forbid using the arrays as a changelog");
 });
 
 test("hydrateContextNode: falls back to run prefetch context and omits empty prefetched sections", async (t) => {

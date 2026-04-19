@@ -19,6 +19,77 @@ test("main wires failed terminal runs into auto-review prefetch rollback handlin
 
   assert.match(
     source,
-    /runManager\.onRunTerminal\(\(runId,\s*status\)\s*=>\s*\{\s*if \(status !== "failed"\) \{\s*return;\s*\}\s*s(?:vc)?\.workItemOrchestrator\.handlePrefetchFailure\(runId\)/s,
+    /runManager\.onRunTerminal\(\(runId,\s*status\)\s*=>\s*\{\s*if \(status !== "failed"\) \{\s*return;\s*\}\s*workItemOrchestrator\.handlePrefetchFailure\(runId\)/s,
   );
+});
+
+test("phase 0 startup wiring uses dynamic imports for optional modules", async () => {
+  const indexPath = path.resolve(import.meta.dirname, "../src/index.ts");
+  const source = await readFile(indexPath, "utf8");
+
+  assert.doesNotMatch(source, /import \{ ObserverDaemon \} from "\.\/observer\/index\.js";/);
+  assert.doesNotMatch(source, /import \{ SessionManager, createLLMPlanGoal, createLLMEvaluateProgress \} from "\.\/sessions\/session-manager\.js";/);
+  assert.doesNotMatch(source, /import \{ EvalStore \} from "\.\/eval\/eval-store\.js";/);
+  assert.doesNotMatch(source, /import \{ WorkItemStore \} from "\.\/work-items\/store\.js";/);
+  assert.doesNotMatch(source, /import \{ WorkItemService \} from "\.\/work-items\/service\.js";/);
+
+  assert.match(source, /await import\("\.\/observer\/index\.js"\)/);
+  assert.match(source, /await import\("\.\/sessions\/session-manager\.js"\)/);
+  assert.match(source, /await import\("\.\/eval\/eval-store\.js"\)/);
+  assert.match(source, /import\("\.\/work-items\/store\.js"\)/);
+  assert.match(source, /import\("\.\/work-items\/service\.js"\)/);
+});
+
+test("phase 0 startup wiring gates work item bootstrapping and prefetch behind feature flags", async () => {
+  const indexPath = path.resolve(import.meta.dirname, "../src/index.ts");
+  const source = await readFile(indexPath, "utf8");
+
+  assert.match(source, /isFeatureEnabled\(config,\s*"workItems"\)|isFeatureEnabled\(config,\s*'workItems'\)/);
+  assert.match(source, /const runContextPrefetcher = workItemsEnabled\s*\?\s*new RunContextPrefetcher/s);
+  assert.match(source, /if \(workItemsEnabled\)\s*\{\s*const \{ ensureDefaultTeam \} = await import\("\.\/work-items\/default-team-bootstrap\.js"\);\s*await ensureDefaultTeam\(db,\s*config\);/s);
+  assert.match(source, /startDashboardServer\([\s\S]*workItemsEnabled\s*\?\s*.*dashboardWorkItemsSource.*:\s*undefined/s);
+  assert.match(source, /startSlackApp\([\s\S]*workItemsEnabled\s*\?\s*\{\s*recordReviewOutcome:/s);
+});
+
+test("phase 0 startup wiring only loads learning store when observer is enabled", async () => {
+  const indexPath = path.resolve(import.meta.dirname, "../src/index.ts");
+  const source = await readFile(indexPath, "utf8");
+
+  assert.match(source, /const observerEnabled = isFeatureEnabled\(config,\s*"observer"\)|const observerEnabled = isFeatureEnabled\(config,\s*'observer'\)/);
+  assert.match(source, /const learningStore = observerEnabled\s*\?\s*new \(await import\("\.\/observer\/learning-store\.js"\)\)\.LearningStore\(db\)\s*:\s*undefined;/s);
+});
+
+test("startup keeps late-optional integrations out of core value imports", async () => {
+  const indexPath = path.resolve(import.meta.dirname, "../src/index.ts");
+  const source = await readFile(indexPath, "utf8");
+
+  assert.doesNotMatch(source, /import \{ RunSupervisor \} from "\.\/supervisor\/run-supervisor\.js";/);
+  assert.match(source, /await import\("\.\/supervisor\/run-supervisor\.js"\)/);
+
+  assert.doesNotMatch(source, /import \{ JiraClient \} from "\.\/jira\.js";/);
+  assert.match(source, /await import\("\.\/jira\.js"\)/);
+
+  assert.doesNotMatch(source, /import \{ callLLMForJSON/);
+  assert.match(source, /await import\("\.\/llm\/caller\.js"\)/);
+
+  assert.doesNotMatch(source, /import \{ UserDirectoryService \} from "\.\/user-directory\/service\.js";/);
+  assert.match(source, /import\("\.\/user-directory\/service\.js"\)/);
+
+  assert.doesNotMatch(source, /const \{ WebClient \} = await import\("@slack\/web-api"\);\s*const webClient = config\.slackBotToken \? new WebClient/s);
+  assert.match(source, /const webClient = config\.slackBotToken\s*\? new \(await import\("@slack\/web-api"\)\)\.WebClient/s);
+});
+
+test("main delegates startup phases into helper boundaries", async () => {
+  const indexPath = path.resolve(import.meta.dirname, "../src/index.ts");
+  const source = await readFile(indexPath, "utf8");
+
+  assert.match(source, /async function applyActiveAgentProfile\(/);
+  assert.match(source, /function wireWorkItemLifecycleHandlers\(/);
+  assert.match(source, /async function startBackgroundServices\(/);
+  assert.match(source, /async function startInteractiveServices\(/);
+
+  assert.match(source, /await applyActiveAgentProfile\(config,\s*svc\.agentProfileStore\)/);
+  assert.match(source, /wireWorkItemLifecycleHandlers\(svc\.runManager,\s*svc\.workItemOrchestrator\)/);
+  assert.match(source, /await startBackgroundServices\(config,\s*db,\s*svc\)/);
+  assert.match(source, /await startInteractiveServices\(config,\s*db,\s*svc,\s*setupStore,\s*workItemsEnabled\)/);
 });

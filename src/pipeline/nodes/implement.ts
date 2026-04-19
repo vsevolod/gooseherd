@@ -617,6 +617,8 @@ function extractSentinelMatch(
 }
 
 function findPiJsonlAssistantText(output: string, prefix: string): AutoReviewSentinelMatch | undefined {
+  let fallbackMatch: AutoReviewSentinelMatch | undefined;
+
   for (const line of output.split("\n")) {
     const trimmed = line.trim();
     if (!trimmed.startsWith("{")) {
@@ -632,6 +634,10 @@ function findPiJsonlAssistantText(output: string, prefix: string): AutoReviewSen
         for (const content of extractAssistantUpdateTexts(assistantMessageEvent)) {
           const sentinelText = findSentinelText(content, prefix);
           if (sentinelText) {
+            if (prefix === AUTO_REVIEW_SUMMARY_PREFIX && !extractJsonObjectAfterPrefix(sentinelText, prefix)) {
+              fallbackMatch ??= { text: sentinelText, method: "pi_jsonl_message_update" };
+              continue;
+            }
             return { text: sentinelText, method: "pi_jsonl_message_update" };
           }
         }
@@ -642,7 +648,12 @@ function findPiJsonlAssistantText(output: string, prefix: string): AutoReviewSen
         for (const text of extractAssistantMessageTexts(message)) {
           const sentinelText = findSentinelText(text, prefix);
           if (sentinelText) {
-            return { text: sentinelText, method: eventType === "turn_end" ? "pi_jsonl_turn_end" : "pi_jsonl_message_end" };
+            const method = eventType === "turn_end" ? "pi_jsonl_turn_end" : "pi_jsonl_message_end";
+            if (prefix === AUTO_REVIEW_SUMMARY_PREFIX && !extractJsonObjectAfterPrefix(sentinelText, prefix)) {
+              fallbackMatch ??= { text: sentinelText, method };
+              continue;
+            }
+            return { text: sentinelText, method };
           }
         }
       }
@@ -654,6 +665,10 @@ function findPiJsonlAssistantText(output: string, prefix: string): AutoReviewSen
             for (const text of extractAssistantMessageTexts(message)) {
               const sentinelText = findSentinelText(text, prefix);
               if (sentinelText) {
+                if (prefix === AUTO_REVIEW_SUMMARY_PREFIX && !extractJsonObjectAfterPrefix(sentinelText, prefix)) {
+                  fallbackMatch ??= { text: sentinelText, method: "pi_jsonl_agent_end" };
+                  continue;
+                }
                 return { text: sentinelText, method: "pi_jsonl_agent_end" };
               }
             }
@@ -665,7 +680,7 @@ function findPiJsonlAssistantText(output: string, prefix: string): AutoReviewSen
     }
   }
 
-  return undefined;
+  return fallbackMatch;
 }
 
 function truncatePreview(value: string | undefined, maxChars = 300): string | undefined {

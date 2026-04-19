@@ -137,3 +137,13 @@ test("dashboard HTML uses view-aware polling with reduced board and observer cad
   assert.match(html, /await loadRuns\(\);/);
   assert.match(html, /await refreshSelected\(\);/);
 });
+
+test("dashboard HTML falls back to runs mode when work item APIs are unavailable", () => {
+  const html = dashboardHtml(makeConfig());
+
+  assert.match(html, /workItemsAvailable:/);
+  assert.match(html, /error\.status === 501/);
+  assert.match(html, /Work item APIs are unavailable/);
+  assert.match(html, /state\.workItemsAvailable = false;/);
+  assert.match(html, /state\.viewMode = 'runs';/);
+});

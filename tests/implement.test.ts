@@ -184,6 +184,15 @@ const PI_JSONL_MULTILINE_NOOP_SUMMARY_DELTA = [
   "{\"type\":\"agent_end\",\"messages\":[]}",
 ].join("\n");
 
+const PI_JSONL_PARTIAL_SENTINEL_THEN_COMPLETE_SUMMARY = [
+  "{\"type\":\"session\",\"version\":3}",
+  "{\"type\":\"agent_start\"}",
+  "{\"type\":\"message_update\",\"assistantMessageEvent\":{\"type\":\"text_delta\",\"contentIndex\":0,\"delta\":\"prefix\",\"partial\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Review complete.\\nGOOSEHERD_REVIEW_SUMMARY:\"}]}}}",
+  "{\"type\":\"message_update\",\"assistantMessageEvent\":{\"type\":\"text_delta\",\"contentIndex\":0,\"delta\":\"json\",\"partial\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Review complete.\\nGOOSEHERD_REVIEW_SUMMARY:{\\\"selectedFindings\\\":[],\\\"ignoredFindings\\\":[\\\"stale comment\\\"],\\\"rationale\\\":\\\"No actionable findings in the current diff.\\\"}\"}]}}}",
+  "{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Review complete.\\nGOOSEHERD_REVIEW_SUMMARY:{\\\"selectedFindings\\\":[],\\\"ignoredFindings\\\":[\\\"stale comment\\\"],\\\"rationale\\\":\\\"No actionable findings in the current diff.\\\"}\"}]}}",
+  "{\"type\":\"agent_end\",\"messages\":[]}",
+].join("\n");
+
 const INVALID_SUMMARY_OUTPUT = [
   "Review complete.",
   "GOOSEHERD_REVIEW_SUMMARY:",
@@ -420,6 +429,15 @@ test("classifyAutoReviewNoop: allows multiline JSON summary after sentinel", () 
   const result = classifyAutoReviewNoop(
     "work-item:auto-review",
     PI_JSONL_MULTILINE_NOOP_SUMMARY_DELTA
+  );
+
+  assert.deepEqual(result, { allowed: true });
+});
+
+test("classifyAutoReviewNoop: ignores partial sentinel-only text_delta events when a later full summary exists", () => {
+  const result = classifyAutoReviewNoop(
+    "work-item:auto-review",
+    PI_JSONL_PARTIAL_SENTINEL_THEN_COMPLETE_SUMMARY
   );
 
   assert.deepEqual(result, { allowed: true });

@@ -2195,6 +2195,7 @@ export function dashboardHtml(config: AppConfig): string {
     const state = {
       runs: [],
       workItems: [],
+      workItemsAvailable: true,
       selectedWorkItemId: null,
       selectedWorkItem: null,
       selectedWorkItemReviewRequests: [],
@@ -2368,7 +2369,9 @@ export function dashboardHtml(config: AppConfig): string {
         const text = await response.text();
         var msg = 'Request failed';
         try { msg = JSON.parse(text).error || msg; } catch (_) { msg = text || msg; }
-        throw new Error(msg);
+        var error = new Error(msg);
+        error.status = response.status;
+        throw error;
       }
       return response.json();
     }
@@ -2437,6 +2440,10 @@ export function dashboardHtml(config: AppConfig): string {
     }
 
     function updateDashboardChrome() {
+      if (state.viewMode === 'board' && state.workItemsAvailable === false) {
+        state.viewMode = 'runs';
+      }
+
       var boardMode = state.viewMode === 'board';
       el.appRoot.classList.toggle('board-mode', boardMode);
       el.runsView.style.display = boardMode ? 'none' : '';
@@ -2446,10 +2453,23 @@ export function dashboardHtml(config: AppConfig): string {
       }
       if (el.viewSwitch) {
         el.viewSwitch.querySelectorAll('[data-view]').forEach(function(button) {
+          if (button.getAttribute('data-view') === 'board') {
+            button.style.display = state.workItemsAvailable === false ? 'none' : '';
+          }
           var isActive = button.getAttribute('data-view') === state.viewMode;
           button.classList.toggle('active', isActive);
         });
       }
+    }
+
+    function isWorkItemsUnavailableError(error) {
+      return Boolean(
+        error &&
+        (
+          error.status === 501 ||
+          error.message === 'Work item APIs are unavailable'
+        )
+      );
     }
 
     function shortId(id) {
@@ -3657,7 +3677,31 @@ export function dashboardHtml(config: AppConfig): string {
 
     async function loadWorkItems() {
       var workflow = state.boardWorkflow || 'feature_delivery';
-      var data = await fetchJson('/api/work-items?workflow=' + encodeURIComponent(workflow));
+      var data;
+      try {
+        data = await fetchJson('/api/work-items?workflow=' + encodeURIComponent(workflow));
+      } catch (error) {
+        if (isWorkItemsUnavailableError(error)) {
+          state.workItemsAvailable = false;
+          state.workItems = [];
+          state.selectedWorkItemId = null;
+          state.selectedWorkItem = null;
+          state.selectedWorkItemReviewRequests = [];
+          state.selectedWorkItemReviewComments = {};
+          state.selectedWorkItemRuns = [];
+          state.selectedWorkItemEvents = [];
+          if (el.boardMeta) {
+            el.boardMeta.textContent = 'Work items unavailable';
+          }
+          updateDashboardChrome();
+          renderBoard();
+          renderBoardDetail();
+          return;
+        }
+        throw error;
+      }
+
+      state.workItemsAvailable = true;
       state.workItems = Array.isArray(data.workItems) ? data.workItems : [];
       var hashTarget = currentHashTarget();
       if (hashTarget && hashTarget.type === 'workItem') {
@@ -4524,10 +4568,11 @@ export function dashboardHtml(config: AppConfig): string {
         var c = data.config || {};
         var s = data.stats || {};
         var canManageUsers = Boolean(c.permissions && c.permissions.manageUsers);
-        var sandboxRuntimeLabel = c.sandboxRuntimeLabel || c.sandboxRuntime || '';
-        var sandboxStatus = c.sandboxStatus && c.sandboxStatus.enabled === false
+        var sandboxRuntime = c.runtime && c.runtime.sandbox ? c.runtime.sandbox : null;
+        var sandboxRuntimeLabel = (sandboxRuntime && sandboxRuntime.label) || c.sandboxRuntimeLabel || c.sandboxRuntime || '';
+        var sandboxStatus = sandboxRuntime && sandboxRuntime.enabled === false
           ? ' <span class="settings-badge off">Disabled</span>'
-          : ' ' + settingsBadge(Boolean(c.sandboxStatus && c.sandboxStatus.enabled));
+          : ' ' + settingsBadge(Boolean(sandboxRuntime && sandboxRuntime.enabled));
         var usersLink = canManageUsers
           ? '<a href="/users" class="top-btn" style="padding:6px 12px;">Users</a>'
           : '';
@@ -4548,12 +4593,12 @@ export function dashboardHtml(config: AppConfig): string {
           '<span class="value settings-code" title="' + esc(c.agentCommandTemplate || '') + '">' + esc(c.agentCommandTemplate || '') + '</span></div>' +
           '</div>' +
           '<div class="settings-section"><h3>Features</h3>' +
-          '<div class="settings-row"><span class="label">Observer</span>' + settingsBadge(c.features?.observer) + '</div>' +
+          '<div class="settings-row"><span class="label">Observer</span>' + settingsBadge(c.capabilities?.observer) + '</div>' +
           '<div class="settings-row"><span class="label">Sandbox Runtime</span><span class="value compact">' + esc(sandboxRuntimeLabel) + sandboxStatus + '</span></div>' +
-          '<div class="settings-row"><span class="label">Browser Verify</span>' + settingsBadge(c.features?.browserVerify) + '</div>' +
-          '<div class="settings-row"><span class="label">Scope Judge</span>' + settingsBadge(c.features?.scopeJudge) + '</div>' +
-          '<div class="settings-row"><span class="label">CI Wait</span>' + settingsBadge(c.features?.ciWait) + '</div>' +
-          '<div class="settings-row"><span class="label">Dry Run</span>' + settingsBadge(c.features?.dryRun) + '</div>' +
+          '<div class="settings-row"><span class="label">Browser Verify</span>' + settingsBadge(c.capabilities?.browserVerify) + '</div>' +
+          '<div class="settings-row"><span class="label">Scope Judge</span>' + settingsBadge(c.capabilities?.scopeJudge) + '</div>' +
+          '<div class="settings-row"><span class="label">CI Wait</span>' + settingsBadge(c.capabilities?.ciWait) + '</div>' +
+          '<div class="settings-row"><span class="label">Dry Run</span>' + settingsBadge(c.capabilities?.dryRun) + '</div>' +
           '</div>' +
           '<div class="settings-section"><h3>Models</h3>' +
           '<div class="settings-row"><span class="label">Default</span><span class="value compact">' + esc(c.models?.default || '') + '</span></div>' +

@@ -260,6 +260,37 @@ test("Jira read access envs are exposed through config", () => {
   }
 });
 
+test("feature flags are normalized under config.features with defaults and env overrides", () => {
+  const originalEnv = process.env;
+  try {
+    process.env = {
+      ...originalEnv,
+      OBSERVER_ENABLED: undefined,
+      WORK_ITEMS_ENABLED: undefined,
+      BROWSER_VERIFY_ENABLED: "true",
+      CI_WAIT_ENABLED: undefined,
+      SUPERVISOR_ENABLED: undefined,
+      SESSIONS_ENABLED: "yes",
+      EVAL_ENABLED: undefined,
+      AUTONOMOUS_SCHEDULER_ENABLED: "1",
+    };
+
+    const config = loadConfig();
+    assert.deepEqual(config.features, {
+      observer: false,
+      workItems: false,
+      browserVerify: true,
+      ciWait: false,
+      supervisor: true,
+      sessions: true,
+      eval: false,
+      autonomousScheduler: true,
+    });
+  } finally {
+    process.env = originalEnv;
+  }
+});
+
 test("AUTO_REVIEW_DEBUG_LOG_MODE defaults to failures and respects env override", () => {
   const originalEnv = process.env;
   try {

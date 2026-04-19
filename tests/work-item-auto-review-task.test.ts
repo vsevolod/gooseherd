@@ -30,4 +30,8 @@ test("auto review task renderer includes repo, PR metadata, Jira key, and title"
   assert.match(rendered, /selectedFindings/i);
   assert.match(rendered, /ignoredFindings/i);
   assert.match(rendered, /rationale/i);
+  assert.match(rendered, /selectedFindings .* only .*actionable/i);
+  assert.match(rendered, /ignoredFindings .* stale.*irrelevant/i);
+  assert.match(rendered, /if there are no issues, both arrays should be empty/i);
+  assert.match(rendered, /do not use .* selectedFindings .* changelog|do not use .* ignoredFindings .* changelog/i);
 });

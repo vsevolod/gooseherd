@@ -736,7 +736,11 @@ function getAutoReviewSummaryInstructions(run: RunRecord): string[] {
     "Auto-review reporting requirements:",
     '- Before exiting, print exactly one line that starts with `GOOSEHERD_REVIEW_SUMMARY:` followed by compact JSON.',
     '- Use this exact JSON shape: `{"selectedFindings":["..."],"ignoredFindings":["..."],"rationale":"..."}`.',
-    "- Keep each finding short and concrete. Use empty arrays when there is nothing to list.",
+    "- selectedFindings must contain only actionable remaining problems, risks, or review findings that still apply to the current diff.",
+    "- ignoredFindings must contain only reviewed hints or comments you intentionally ignored because they are stale, irrelevant, already fixed, or out of scope.",
+    "- If there are no issues, both arrays should be empty.",
+    "- Do not use either array as a changelog, test summary, or positive summary of the PR. Put that in rationale instead.",
+    "- Keep each finding short and concrete.",
   ];
 }
 
