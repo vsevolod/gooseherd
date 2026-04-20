@@ -158,6 +158,7 @@ test("kubernetes backend launches job, waits for success, redacts manifest token
     resourceClient,
     pollIntervalMs: 1,
     waitTimeoutMs: 5_000,
+    completionWaitMs: 600,
   });
 
   try {
@@ -219,14 +220,13 @@ test("kubernetes backend launches job, waits for success, redacts manifest token
 test("kubernetes backend fails when runtime becomes terminal without completion", async () => {
   const tmpRoot = await mkdtemp(path.join(os.tmpdir(), "gooseherd-k8s-backend-fail-"));
 
+  let completionReads = 0;
   const resourceClient: Pick<KubernetesResourceClientType, "applySecret" | "applyJob" | "readJob" | "listPodsForJob" | "readJobLogs" | "deleteJob" | "deletePodsForJob" | "deleteSecret"> = {
     applySecret: async () => undefined,
     applyJob: async () => undefined,
     readJob: async () => ({ status: { conditions: [{ type: "Failed", status: "True" }] } }),
     listPodsForJob: async () => [],
-    readJobLogs: async () => {
-      throw new Error("no logs");
-    },
+    readJobLogs: async () => "[ERROR] Runner failed { error: 'retry budget exhausted for payload: fetch failed' }\n",
     deleteJob: async () => undefined,
     deletePodsForJob: async () => undefined,
     deleteSecret: async () => undefined,
@@ -236,8 +236,70 @@ test("kubernetes backend fails when runtime becomes terminal without completion"
     controlPlaneStore: {
       createRunEnvelope: async () => undefined,
       issueRunToken: async () => ({ token: "issued-token" }),
-      getLatestCompletion: async () => null,
+      getLatestCompletion: async () => {
+        completionReads += 1;
+        return null;
+      },
       revokeRunToken: async () => undefined,
+    },
+    artifactStore: {
+      allocateTargets: async () => ({ targets: {} }),
+    },
+    runStore: {
+      getRun: async () => undefined,
+    },
+    workRoot: tmpRoot,
+    runnerImage: "gooseherd/k8s-runner:dev",
+    internalBaseUrl: "http://host.minikube.internal:8787",
+    dryRun: false,
+    resourceClient,
+    pollIntervalMs: 1,
+    waitTimeoutMs: 5_000,
+    completionWaitMs: 600,
+  });
+
+  try {
+    await assert.rejects(
+      () =>
+        backend.execute(makeRun({ id: "run-k8s-backend-2" }), {
+          onPhase: async () => undefined,
+          pipelineFile: "pipelines/kubernetes-smoke.yml",
+        }),
+      /completion missing after terminal runtime state: retry budget exhausted for payload: fetch failed/,
+    );
+    assert.equal(completionReads > 1, true);
+  } finally {
+    await rm(tmpRoot, { recursive: true, force: true });
+  }
+});
+
+test("kubernetes backend waits for a late success completion after terminal runtime state", async () => {
+  const tmpRoot = await mkdtemp(path.join(os.tmpdir(), "gooseherd-k8s-backend-late-completion-"));
+
+  let completionReads = 0;
+  let revokedRunId: string | undefined;
+  const resourceClient: Pick<KubernetesResourceClientType, "applySecret" | "applyJob" | "readJob" | "listPodsForJob" | "readJobLogs" | "deleteJob" | "deletePodsForJob" | "deleteSecret"> = {
+    applySecret: async () => undefined,
+    applyJob: async () => undefined,
+    readJob: async () => ({ status: { conditions: [{ type: "Complete", status: "True" }] } }),
+    listPodsForJob: async () => [],
+    readJobLogs: async () => "runner completed\n",
+    deleteJob: async () => undefined,
+    deletePodsForJob: async () => undefined,
+    deleteSecret: async () => undefined,
+  };
+
+  const backend = new KubernetesExecutionBackend({
+    controlPlaneStore: {
+      createRunEnvelope: async () => undefined,
+      issueRunToken: async () => ({ token: "issued-token" }),
+      getLatestCompletion: async () => {
+        completionReads += 1;
+        return completionReads >= 3 ? makeCompletion() : null;
+      },
+      revokeRunToken: async (runId: string) => {
+        revokedRunId = runId;
+      },
     },
     artifactStore: {
       allocateTargets: async () => ({ targets: {} }),
@@ -255,14 +317,15 @@ test("kubernetes backend fails when runtime becomes terminal without completion"
   });
 
   try {
-    await assert.rejects(
-      () =>
-        backend.execute(makeRun({ id: "run-k8s-backend-2" }), {
-          onPhase: async () => undefined,
-          pipelineFile: "pipelines/kubernetes-smoke.yml",
-        }),
-      /completion missing after terminal runtime state/,
-    );
+    const result = await backend.execute(makeRun({ id: "run-k8s-backend-3" }), {
+      onPhase: async () => undefined,
+      pipelineFile: "pipelines/kubernetes-smoke.yml",
+    });
+
+    assert.equal(result.commitSha, "abc12345");
+    assert.deepEqual(result.changedFiles, ["src/index.ts"]);
+    assert.equal(completionReads, 3);
+    assert.equal(revokedRunId, "run-k8s-backend-3");
   } finally {
     await rm(tmpRoot, { recursive: true, force: true });
   }

@@ -33,7 +33,7 @@ export class RuntimeReconciler {
       return;
     }
 
-    if (completion?.payload.status === "success" && fact !== "succeeded" && fact !== "running") {
+    if (completion?.payload.status === "success" && fact === "failed") {
       await this.runStore.updateRun(runId, {
         status: "failed",
         phase: "failed",
@@ -43,7 +43,7 @@ export class RuntimeReconciler {
       return;
     }
 
-    if (completion?.payload.status === "success" && fact === "succeeded") {
+    if (completion?.payload.status === "success" && (fact === "succeeded" || fact === "missing")) {
       await this.runStore.updateRun(runId, {
         status: "completed",
         phase: "completed",

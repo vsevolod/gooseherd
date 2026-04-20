@@ -36,6 +36,7 @@ interface KubernetesExecutionBackendDeps {
   resourceClient?: Pick<KubernetesResourceClient, "applySecret" | "applyJob" | "readJob" | "listPodsForJob" | "readJobLogs" | "deleteJob" | "deletePodsForJob" | "deleteSecret">;
   pollIntervalMs?: number;
   waitTimeoutMs?: number;
+  completionWaitMs?: number;
 }
 
 export class KubernetesExecutionBackend implements RunExecutionBackend<"kubernetes"> {
@@ -43,12 +44,14 @@ export class KubernetesExecutionBackend implements RunExecutionBackend<"kubernet
   private readonly namespace: string;
   private readonly pollIntervalMs: number;
   private readonly waitTimeoutMs: number;
+  private readonly completionWaitMs: number;
   private resourceClientInstance: Pick<KubernetesResourceClient, "applySecret" | "applyJob" | "readJob" | "listPodsForJob" | "readJobLogs" | "deleteJob" | "deletePodsForJob" | "deleteSecret"> | undefined;
 
   constructor(private readonly deps: KubernetesExecutionBackendDeps) {
     this.namespace = deps.namespace ?? "default";
     this.pollIntervalMs = Math.max(250, deps.pollIntervalMs ?? 2_000);
     this.waitTimeoutMs = Math.max(5_000, deps.waitTimeoutMs ?? 10 * 60 * 1_000);
+    this.completionWaitMs = Math.max(this.pollIntervalMs, deps.completionWaitMs ?? 30_000);
     this.resourceClientInstance = deps.resourceClient;
   }
 
@@ -110,9 +113,9 @@ export class KubernetesExecutionBackend implements RunExecutionBackend<"kubernet
       await this.resourceClient.applySecret(secret);
       await this.resourceClient.applyJob(job);
       const runtimeFact = await this.waitForTerminalFact(jobName, ctx.abortSignal, ctx.onDetail);
-      await this.captureLogs(jobName, logsPath);
-      const completion = await this.deps.controlPlaneStore.getLatestCompletion(run.id);
-      return this.translateOutcome(run, completion, runtimeFact);
+      const completion = await this.waitForCompletion(run.id, runtimeFact, ctx.abortSignal, ctx.onDetail);
+      const runtimeLogs = await this.captureLogs(jobName, logsPath);
+      return this.translateOutcome(run, completion, runtimeFact, runtimeLogs);
     } finally {
       await this.cleanup(run.id, jobName, secretName).catch(() => {});
     }
@@ -151,12 +154,46 @@ export class KubernetesExecutionBackend implements RunExecutionBackend<"kubernet
     return readKubernetesTerminalFact(this.resourceClient, jobName, this.namespace);
   }
 
+  private async waitForCompletion(
+    runId: string,
+    runtimeFact: TerminalFact,
+    abortSignal?: AbortSignal,
+    onDetail?: (detail: string) => Promise<void>,
+  ): Promise<RunCompletionRecord | null> {
+    const initialCompletion = await this.deps.controlPlaneStore.getLatestCompletion(runId);
+    if (initialCompletion || runtimeFact === "running") {
+      return initialCompletion;
+    }
+
+    const deadline = Date.now() + this.completionWaitMs;
+    while (Date.now() < deadline) {
+      if (abortSignal?.aborted) {
+        throw new Error("Run cancelled");
+      }
+
+      await onDetail?.(`Waiting for Kubernetes completion callback for run ${runId}.`);
+      await sleep(this.pollIntervalMs);
+
+      const completion = await this.deps.controlPlaneStore.getLatestCompletion(runId);
+      if (completion) {
+        return completion;
+      }
+    }
+
+    return null;
+  }
+
   private translateOutcome(
     run: RunRecord,
     completion: RunCompletionRecord | null,
     runtimeFact: TerminalFact,
+    runtimeLogs?: string,
   ): ExecutionResult {
-    if (completion?.payload.status === "success" && runtimeFact === "succeeded") {
+    if (completion?.payload.status === "success" && runtimeFact === "failed") {
+      throw new Error("success completion contradicted by runtime state");
+    }
+
+    if (completion?.payload.status === "success" && (runtimeFact === "succeeded" || runtimeFact === "missing")) {
       return {
         branchName: run.branchName,
         logsPath: run.logsPath ?? path.resolve(this.deps.workRoot, run.id, "run.log"),
@@ -173,8 +210,8 @@ export class KubernetesExecutionBackend implements RunExecutionBackend<"kubernet
       throw new Error(completion.payload.reason ?? "Kubernetes runner reported failed completion");
     }
 
-    if (runtimeFact === "failed") {
-      throw new Error("completion missing after terminal runtime state");
+    if (runtimeFact === "succeeded" || runtimeFact === "failed") {
+      throw new Error(this.buildMissingCompletionMessage(runtimeLogs));
     }
 
     if (runtimeFact === "missing") {
@@ -191,12 +228,53 @@ export class KubernetesExecutionBackend implements RunExecutionBackend<"kubernet
     await this.deps.controlPlaneStore.revokeRunToken(runId);
   }
 
-  private async captureLogs(jobName: string, logsPath: string): Promise<void> {
+  private async captureLogs(jobName: string, logsPath: string): Promise<string | undefined> {
     try {
       const logs = await this.resourceClient.readJobLogs(jobName, this.namespace);
       await writeFile(logsPath, logs, "utf8");
+      return logs;
     } catch {
       // Leave logsPath absent when the runner never reached a readable logging state.
+      return undefined;
     }
+  }
+
+  private buildMissingCompletionMessage(runtimeLogs?: string): string {
+    const diagnostic = this.extractLogDiagnostic(runtimeLogs);
+    return diagnostic
+      ? `completion missing after terminal runtime state: ${diagnostic}`
+      : "completion missing after terminal runtime state";
+  }
+
+  private extractLogDiagnostic(runtimeLogs?: string): string | undefined {
+    if (!runtimeLogs) {
+      return undefined;
+    }
+
+    const lines = runtimeLogs
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => line !== "");
+
+    for (let index = lines.length - 1; index >= 0; index -= 1) {
+      const line = lines[index];
+      if (!line) continue;
+
+      const singleQuotedMatch = /Runner failed\s*\{\s*error:\s*'([^']+)'\s*\}/.exec(line);
+      if (singleQuotedMatch?.[1]) {
+        return singleQuotedMatch[1];
+      }
+
+      const doubleQuotedMatch = /Runner failed\s*\{\s*error:\s*"([^"]+)"\s*\}/.exec(line);
+      if (doubleQuotedMatch?.[1]) {
+        return doubleQuotedMatch[1];
+      }
+
+      if (/error|failed|retry budget exhausted/i.test(line)) {
+        return line.replace(/^\[ERROR\]\s*/, "").slice(0, 200);
+      }
+    }
+
+    return undefined;
   }
 }

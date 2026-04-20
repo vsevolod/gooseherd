@@ -24,6 +24,7 @@ export type RunnerEventEmitter = (
 ) => Promise<void>;
 
 const DEFAULT_CANCELLATION_POLL_MS = 5_000;
+const PAYLOAD_FETCH_MAX_ATTEMPTS = 8;
 const DEBUG_ARTIFACT_UPLOAD_SPECS = [
   { artifactKey: "agent-stdout.log", contentType: "text/plain" },
   { artifactKey: "agent-stderr.log", contentType: "text/plain" },
@@ -191,7 +192,7 @@ export async function runPipelineRunner(
   client: RunnerControlPlaneClient,
   executePipeline: RunnerPipelineExecutor,
 ): Promise<void> {
-  const payload = await client.getPayload();
+  const payload = await client.getPayload({ maxAttempts: PAYLOAD_FETCH_MAX_ATTEMPTS });
   const run = deriveRunRecordFromPayload(payload);
   let sequence = 0;
 

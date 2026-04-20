@@ -55,6 +55,7 @@ bash "${ROOT_DIR}/scripts/kubernetes/build-runner-image.sh" "${RUNNER_IMAGE}"
 
 kubectl apply -f "${ROOT_DIR}/kubernetes/local/namespace.yaml"
 kubectl apply -f "${ROOT_DIR}/kubernetes/local/postgres.yaml"
+kubectl apply -f "${ROOT_DIR}/kubernetes/local/gooseherd-work-pvc.yaml"
 kubectl apply -f "${ROOT_DIR}/kubernetes/local/gooseherd-rbac.yaml"
 kubectl apply -f "${ROOT_DIR}/kubernetes/local/gooseherd-service.yaml"
 

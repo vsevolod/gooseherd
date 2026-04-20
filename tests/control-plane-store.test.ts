@@ -453,3 +453,53 @@ test("reconciler fails runs when a success completion contradicts failed runtime
 
   await cleanup();
 });
+
+test("reconciler preserves success completion when kubernetes job is already missing", async () => {
+  const { db, cleanup } = await createTestDb();
+  const controlPlaneStore = new ControlPlaneStore(db);
+  const runStore = new RunStore(db);
+  await runStore.init();
+
+  const run = await runStore.createRun(
+    {
+      repoSlug: "owner/repo",
+      task: "reconcile success-after-cleanup",
+      baseBranch: "main",
+      requestedBy: "U1",
+      channelId: "C1",
+      threadTs: "1",
+      runtime: "kubernetes",
+    },
+    "gooseherd",
+  );
+
+  await controlPlaneStore.recordCompletion(run.id, {
+    idempotencyKey: "completion-success-missing-1",
+    status: "success",
+    artifactState: "complete",
+    commitSha: "abc123",
+    changedFiles: ["src/index.ts"],
+    prUrl: "https://example.com/pr/1",
+    title: "Completed before cleanup",
+  });
+
+  const reconciler = new RuntimeReconciler(
+    controlPlaneStore,
+    {
+      getTerminalFact: async () => "missing" as const,
+    },
+    runStore,
+  );
+
+  await reconciler.reconcileRun(run.id);
+  const updated = await runStore.getRun(run.id);
+
+  assert.equal(updated?.status, "completed");
+  assert.equal(updated?.phase, "completed");
+  assert.equal(updated?.commitSha, "abc123");
+  assert.deepEqual(updated?.changedFiles, ["src/index.ts"]);
+  assert.equal(updated?.prUrl, "https://example.com/pr/1");
+  assert.equal(updated?.title, "Completed before cleanup");
+
+  await cleanup();
+});

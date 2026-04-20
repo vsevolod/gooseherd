@@ -15,6 +15,9 @@ The intended flow is:
 6. bootstrap the setup wizard through a temporary local `port-forward`
 7. reach the dashboard with `kubectl port-forward`
 
+The local bundle keeps `/app/.work` on a `PersistentVolumeClaim` named `gooseherd-work`.
+That means run logs and artifacts survive normal `gooseherd` pod restarts inside the namespace.
+
 Recommended commands:
 
 ```bash
