@@ -8,7 +8,7 @@ import { WorkItemService } from "../src/work-items/service.js";
 import { WorkItemStore } from "../src/work-items/store.js";
 import { RunStore } from "../src/store.js";
 
-type AutoReviewSubstate = "pr_adopted" | "applying_review_feedback";
+type AutoReviewSubstate = "pr_adopted" | "applying_review_feedback" | "ci_failed";
 
 async function createAutoReviewFixture(substate: AutoReviewSubstate = "pr_adopted") {
   const testDb = await createTestDb();
@@ -157,6 +157,29 @@ test("orchestrator auto-launches one linked run for auto_review items applying r
   assert.equal(runRows[0]?.autoReviewSourceSubstate, "applying_review_feedback");
 });
 
+test("orchestrator launches a standalone ci-fix run for auto_review ci_failed", async (t) => {
+  const { db, cleanup, workItem } = await createAutoReviewFixture("ci_failed");
+  t.after(cleanup);
+  const { reconcileWorkItem } = await import("../src/work-items/orchestrator.js");
+
+  await reconcileWorkItem(db, workItem.id, "github.ci_failed", {
+    config: { defaultBaseBranch: "release/2026.04", sandboxRuntime: "kubernetes" },
+  });
+
+  const workItemRow = await (new WorkItemService(db)).getWorkItem(workItem.id);
+  const runRows = await (new RunStore(db)).listRunsForWorkItem(workItem.id);
+
+  assert.equal(workItemRow?.state, "auto_review");
+  assert.equal(workItemRow?.substate, "ci_failed");
+  assert.equal(runRows.length, 1);
+  assert.equal(runRows[0]?.requestedBy, "work-item:ci-fix");
+  assert.equal(runRows[0]?.pipelineHint, "ci-fix");
+  assert.equal(runRows[0]?.branchName, "feature/hbl-404");
+  assert.equal(runRows[0]?.parentBranchName, "feature/hbl-404");
+  assert.equal(runRows[0]?.autoReviewSourceSubstate, "ci_failed");
+  assert.equal(runRows[0]?.runtime, "kubernetes");
+});
+
 test("orchestrator writeback marks self_review_done when auto-review run reaches awaiting_ci", async (t) => {
   const { db, cleanup, workItem, runStore } = await createAutoReviewFixture("applying_review_feedback");
   t.after(cleanup);
@@ -207,6 +230,20 @@ test("orchestrator writeback marks self_review_done when auto-review run complet
   assert.ok(workItemRow?.flags.includes("self_review_done"));
 });
 
+test("orchestrator writeback accepts successful work-item:ci-fix checkpoints", async (t) => {
+  const { db, cleanup, workItem, runStore } = await createAutoReviewFixture("ci_failed");
+  t.after(cleanup);
+  const run = await createAwaitingCiLinkedRun(runStore, workItem.id, workItem, "work-item:ci-fix");
+  const { writebackWorkItem } = await import("../src/work-items/orchestrator.js");
+
+  await writebackWorkItem(db, run.id);
+
+  const workItemRow = await (new WorkItemService(db)).getWorkItem(workItem.id);
+  assert.equal(workItemRow?.state, "auto_review");
+  assert.equal(workItemRow?.substate, "waiting_ci");
+  assert.ok(workItemRow?.flags.includes("self_review_done"));
+});
+
 test("orchestrator reconcile does not duplicate an existing active linked run", async (t) => {
   const { db, cleanup, workItem, runStore } = await createAutoReviewFixture();
   t.after(cleanup);
@@ -234,6 +271,19 @@ test("orchestrator reconcile ignores unrelated active linked runs when auto-revi
   assert.equal(runRows.length, 2);
   assert.ok(runRows.some((run) => run.requestedBy === "manual:dashboard" && run.status === "queued"));
   assert.ok(runRows.some((run) => run.requestedBy === "work-item:auto-review" && run.status === "queued"));
+});
+
+test("orchestrator reconcile does not duplicate an existing active work-item:ci-fix run", async (t) => {
+  const { db, cleanup, workItem, runStore } = await createAutoReviewFixture("ci_failed");
+  t.after(cleanup);
+  const existing = await createActiveLinkedRun(runStore, workItem.id, workItem, "queued", "work-item:ci-fix");
+  const { reconcileWorkItem } = await import("../src/work-items/orchestrator.js");
+
+  await reconcileWorkItem(db, workItem.id, "github.ci_failed");
+
+  const runRows = await runStore.listRunsForWorkItem(workItem.id);
+  assert.equal(runRows.length, 1);
+  assert.equal(runRows[0]?.id, existing.id);
 });
 
 test("orchestrator reconcile claims auto-launch atomically under concurrent calls", async (t) => {

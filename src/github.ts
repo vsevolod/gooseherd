@@ -74,25 +74,38 @@ export interface CICheckAnnotation {
   annotation_level: string;
 }
 
+export interface FailedCIRun {
+  id: number;
+  name: string;
+  status: string;
+  conclusion: string | null;
+  detailsUrl?: string;
+  startedAt?: string;
+  completedAt?: string;
+}
+
+export interface FailedCIAnnotation {
+  checkRunName: string;
+  path: string;
+  line: number;
+  message: string;
+  level: string;
+}
+
+export interface CIFailureContext {
+  failedRuns: FailedCIRun[];
+  primaryFailedRun?: FailedCIRun;
+  failedAnnotations?: FailedCIAnnotation[];
+  failedLogTail?: string;
+}
+
 export interface PullRequestCiSnapshot {
   headSha?: string;
   conclusion: "success" | "failure" | "pending" | "no_ci";
-  failedRuns?: Array<{
-    id: number;
-    name: string;
-    status: string;
-    conclusion: string | null;
-    detailsUrl?: string;
-    startedAt?: string;
-    completedAt?: string;
-  }>;
-  failedAnnotations?: Array<{
-    checkRunName: string;
-    path: string;
-    line: number;
-    message: string;
-    level: string;
-  }>;
+  failedRuns?: FailedCIRun[];
+  primaryFailedRun?: FailedCIRun;
+  failedAnnotations?: FailedCIAnnotation[];
+  failedLogTail?: string;
 }
 
 export interface AccessibleRepository {
@@ -411,33 +424,10 @@ export class GitHubService {
     );
 
     if (failedRuns.length > 0) {
-      const failedAnnotations: PullRequestCiSnapshot["failedAnnotations"] = [];
-      for (const run of failedRuns) {
-        const annotations = await this.getCheckAnnotations(owner, repo, run.id, signal);
-        for (const annotation of annotations) {
-          failedAnnotations.push({
-            checkRunName: run.name,
-            path: annotation.path,
-            line: annotation.start_line,
-            message: annotation.message,
-            level: annotation.annotation_level
-          });
-        }
-      }
-
       return {
         headSha,
         conclusion: "failure",
-        failedRuns: failedRuns.map(run => ({
-          id: run.id,
-          name: run.name,
-          status: run.status,
-          conclusion: run.conclusion,
-          detailsUrl: run.detailsUrl,
-          startedAt: run.startedAt,
-          completedAt: run.completedAt
-        })),
-        failedAnnotations
+        ...(await this.collectCiFailureContext(owner, repo, checkRuns, signal)),
       };
     }
 
@@ -446,6 +436,50 @@ export class GitHubService {
     }
 
     return { headSha, conclusion: "success" };
+  }
+
+  async collectCiFailureContext(
+    owner: string,
+    repo: string,
+    checkRuns: CICheckRun[],
+    signal?: AbortSignal,
+  ): Promise<CIFailureContext> {
+    const failedRuns = checkRuns.filter(run => isFailedCheckRun(run));
+    const normalizedFailedRuns = failedRuns.map(normalizeFailedRun);
+    const annotationsByRun = new Map<number, CICheckAnnotation[]>();
+    const failedAnnotations: FailedCIAnnotation[] = [];
+
+    for (const run of failedRuns) {
+      const annotations = await this.getCheckAnnotations(owner, repo, run.id, signal);
+      annotationsByRun.set(run.id, annotations);
+      for (const annotation of annotations) {
+        failedAnnotations.push({
+          checkRunName: run.name,
+          path: annotation.path,
+          line: annotation.start_line,
+          message: annotation.message,
+          level: annotation.annotation_level,
+        });
+      }
+    }
+
+    const primaryRun = selectPrimaryFailedRun(failedRuns, annotationsByRun);
+    let failedLogTail: string | undefined;
+    if (primaryRun) {
+      try {
+        const rawLog = await this.downloadJobLog(owner, repo, primaryRun.id);
+        failedLogTail = truncateCiLog(rawLog);
+      } catch {
+        failedLogTail = undefined;
+      }
+    }
+
+    return {
+      failedRuns: normalizedFailedRuns,
+      primaryFailedRun: primaryRun ? normalizeFailedRun(primaryRun) : undefined,
+      failedAnnotations,
+      failedLogTail,
+    };
   }
 
   async findOrCreatePullRequest(params: PullRequestParams): Promise<PullRequestResult> {
@@ -820,6 +854,158 @@ function sortByCreatedAt<T extends { createdAt?: string }>(left: T, right: T): n
 
 function isFailedCheckRun(run: CICheckRun): boolean {
   return run.conclusion === "failure" || run.conclusion === "timed_out";
+}
+
+function normalizeFailedRun(run: CICheckRun): FailedCIRun {
+  return {
+    id: run.id,
+    name: run.name,
+    status: run.status,
+    conclusion: run.conclusion,
+    detailsUrl: run.detailsUrl,
+    startedAt: run.startedAt,
+    completedAt: run.completedAt,
+  };
+}
+
+function selectPrimaryFailedRun(
+  failedRuns: CICheckRun[],
+  annotationsByRun: Map<number, CICheckAnnotation[]>,
+): CICheckRun | undefined {
+  if (failedRuns.length === 0) {
+    return undefined;
+  }
+
+  return [...failedRuns].sort((left, right) => {
+    const leftAnnotations = annotationsByRun.get(left.id) ?? [];
+    const rightAnnotations = annotationsByRun.get(right.id) ?? [];
+
+    const failureDelta =
+      countFailureAnnotations(rightAnnotations) - countFailureAnnotations(leftAnnotations);
+    if (failureDelta !== 0) {
+      return failureDelta;
+    }
+
+    const annotationDelta = rightAnnotations.length - leftAnnotations.length;
+    if (annotationDelta !== 0) {
+      return annotationDelta;
+    }
+
+    const completedDelta = compareIsoDatesDesc(left.completedAt, right.completedAt);
+    if (completedDelta !== 0) {
+      return completedDelta;
+    }
+
+    const startedDelta = compareIsoDatesDesc(left.startedAt, right.startedAt);
+    if (startedDelta !== 0) {
+      return startedDelta;
+    }
+
+    return right.id - left.id;
+  })[0];
+}
+
+function countFailureAnnotations(annotations: CICheckAnnotation[]): number {
+  return annotations.filter((annotation) => annotation.annotation_level === "failure").length;
+}
+
+function compareIsoDatesDesc(left?: string, right?: string): number {
+  const leftValue = left ?? "";
+  const rightValue = right ?? "";
+  if (leftValue === rightValue) {
+    return 0;
+  }
+  return leftValue < rightValue ? 1 : -1;
+}
+
+function truncateCiLog(log: string, maxChars = 3000): string {
+  const failureSnippet = extractFailureSnippet(log, maxChars);
+  if (failureSnippet) {
+    return failureSnippet;
+  }
+
+  return truncateCleanLog(log, maxChars);
+}
+
+function extractFailureSnippet(log: string, maxChars: number, maxLines = 200): string | undefined {
+  const normalizedLog = log.replace(/\r\n?/g, "\n");
+  const lines = normalizedLog.split("\n");
+  const cleanupIndex = lines.findIndex(line => stripGitHubActionsTimestamp(line) === "Post job cleanup.");
+  const searchEnd = cleanupIndex >= 0 ? cleanupIndex - 1 : lines.length - 1;
+
+  let errorIndex = -1;
+  for (let index = searchEnd; index >= 0; index -= 1) {
+    if (stripGitHubActionsTimestamp(lines[index]).startsWith("##[error]")) {
+      errorIndex = index;
+      break;
+    }
+  }
+
+  if (errorIndex < 0) {
+    return undefined;
+  }
+
+  let groupIndex = -1;
+  for (let index = errorIndex; index >= 0; index -= 1) {
+    if (stripGitHubActionsTimestamp(lines[index]).startsWith("##[group]")) {
+      groupIndex = index;
+      break;
+    }
+  }
+
+  const snippetLines = groupIndex >= 0
+    ? lines.slice(groupIndex, errorIndex + 1)
+    : lines.slice(Math.max(0, errorIndex - maxLines + 1), errorIndex + 1);
+  const cleanedLines = snippetLines.map(line => stripAnsiCodes(stripGitHubActionsTimestamp(line)));
+
+  const limitedLines = groupIndex >= 0 && cleanedLines.length > maxLines
+    ? [cleanedLines[0], "...(truncated)...", ...cleanedLines.slice(-maxLines)]
+    : cleanedLines.length > maxLines
+      ? ["...(truncated)...", ...cleanedLines.slice(-maxLines)]
+      : cleanedLines;
+
+  const snippet = limitedLines.join("\n").trim();
+  return truncatePreservingSnippetContext(snippet, maxChars);
+}
+
+function truncatePreservingSnippetContext(snippet: string, maxChars: number): string {
+  if (snippet.length <= maxChars) {
+    return snippet;
+  }
+
+  const headLength = Math.min(400, Math.max(120, Math.floor(maxChars * 0.25)));
+  const separator = "\n...(truncated within failing step)...\n";
+  const tailLength = maxChars - headLength - separator.length;
+  if (tailLength <= 0) {
+    return snippet.slice(0, maxChars);
+  }
+
+  return `${snippet.slice(0, headLength)}${separator}${snippet.slice(-tailLength)}`;
+}
+
+function truncateCleanLog(log: string, maxChars: number): string {
+  const cleanedLog = cleanGitHubActionsLog(log);
+  if (cleanedLog.length <= maxChars) {
+    return cleanedLog;
+  }
+  return "...(truncated)\n" + cleanedLog.slice(-maxChars);
+}
+
+function cleanGitHubActionsLog(log: string): string {
+  return log
+    .replace(/\r\n?/g, "\n")
+    .split("\n")
+    .map(line => stripAnsiCodes(stripGitHubActionsTimestamp(line)))
+    .join("\n")
+    .trim();
+}
+
+function stripGitHubActionsTimestamp(line: string): string {
+  return line.replace(/^\d{4}-\d{2}-\d{2}T\S+Z\s+/, "");
+}
+
+function stripAnsiCodes(line: string): string {
+  return line.replace(/\u001b\[[0-9;]*[A-Za-z]/g, "");
 }
 
 function collectReviewThreadComments(

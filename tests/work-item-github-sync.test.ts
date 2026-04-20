@@ -14,7 +14,30 @@ import {
   parseJiraIssueKey,
 } from "../src/work-items/github-sync.js";
 
-async function createGitHubSyncFixture() {
+async function createGitHubSyncFixture(options: {
+  githubService?: {
+    getPullRequestCiSnapshot?: (repoSlug: string, headSha: string) => Promise<{
+      headSha: string;
+      conclusion: "success" | "failure" | "pending" | "no_ci";
+      failedRuns?: Array<{ id: number; name: string; status: string; conclusion: string | null }>;
+      failedAnnotations?: Array<{
+        checkRunName: string;
+        path: string;
+        line: number;
+        message: string;
+        level: string;
+      }>;
+    }>;
+    getPullRequest?: (repoSlug: string, prNumber: number) => Promise<{
+      number: number;
+      url: string;
+      title: string;
+      body: string;
+      state: string;
+      headSha?: string;
+    }>;
+  };
+} = {}) {
   const testDb = await createTestDb();
   const pmUserId = randomUUID();
   const ownerTeamId = randomUUID();
@@ -51,7 +74,8 @@ async function createGitHubSyncFixture() {
       reconcileWorkItem: async (workItemId, reason) => {
         reconcileCalls.push({ workItemId, reason });
       },
-    }),
+      ...(options.githubService ? ({ githubService: options.githubService } as never) : {}),
+    } as never),
   };
 }
 
@@ -232,6 +256,25 @@ test("parseGitHubWorkItemWebhookPayload extracts author login from PR payload", 
   assert.equal(parsed?.headBranch, "feature/pr-author-login");
 });
 
+test("parseGitHubWorkItemWebhookPayload extracts head sha from check_suite payload", () => {
+  const parsed = parseGitHubWorkItemWebhookPayload(
+    { "x-github-event": "check_suite" },
+    {
+      action: "completed",
+      repository: { full_name: "hubstaff/gooseherd" },
+      check_suite: {
+        conclusion: "failure",
+        status: "completed",
+        head_sha: "deadbeef",
+        pull_requests: [{ number: 82 }],
+      },
+    },
+  );
+
+  assert.equal(parsed?.headSha, "deadbeef");
+  assert.deepEqual(parsed?.pullRequestNumbers, [82]);
+});
+
 test("parseGitHubWorkItemWebhookPayload includes top-level label for labeled pull_request events", () => {
   const parsed = parseGitHubWorkItemWebhookPayload(
     { "x-github-event": "pull_request" },
@@ -293,6 +336,7 @@ test("github sync adopts labeled PR into delivery work item", async (t) => {
     labels: ["ai:assist"],
     baseBranch: "main",
     headBranch: "feature/hbl-404",
+    headSha: "abc12345",
   });
 
   assert.ok(adopted);
@@ -303,6 +347,7 @@ test("github sync adopts labeled PR into delivery work item", async (t) => {
   assert.equal(adopted?.githubPrNumber, 77);
   assert.equal(adopted?.githubPrBaseBranch, "main");
   assert.equal(adopted?.githubPrHeadBranch, "feature/hbl-404");
+  assert.equal(adopted?.githubPrHeadSha, "abc12345");
   assert.ok(adopted?.flags.includes("pr_opened"));
 
   const events = await db.select().from(workItemEvents).where(eq(workItemEvents.workItemId, adopted!.id));
@@ -454,6 +499,7 @@ test("github sync links labeled PR to existing delivery item with same jira key"
     labels: ["ai:assist"],
     baseBranch: "main",
     headBranch: "feature/hbl-499",
+    headSha: "feedface",
   });
 
   assert.equal(adopted?.id, existing.id);
@@ -462,6 +508,7 @@ test("github sync links labeled PR to existing delivery item with same jira key"
   assert.equal(adopted?.githubPrNumber, 78);
   assert.equal(adopted?.githubPrBaseBranch, "main");
   assert.equal(adopted?.githubPrHeadBranch, "feature/hbl-499");
+  assert.equal(adopted?.githubPrHeadSha, "feedface");
   assert.ok(adopted?.flags.includes("pr_opened"));
   assert.deepEqual(reconcileCalls, [{ workItemId: existing.id, reason: "github.pr_adopted" }]);
 });
@@ -764,7 +811,64 @@ test("github sync advances auto review item to engineering review after green CI
   assert.ok(events.some((event) => event.eventType === "github.ci_updated"));
 });
 
-test("github sync returns auto_review items to applying_review_feedback and reconciles on failed CI", async (t) => {
+test("github sync adopts a labeled PR with already failed current CI into ci_failed", async (t) => {
+  const { cleanup, sync, reconcileCalls } = await createGitHubSyncFixture({
+    githubService: {
+      getPullRequestCiSnapshot: async () => ({
+        headSha: "deadbeef",
+        conclusion: "failure",
+        failedRuns: [{ id: 1, name: "unit-tests", status: "completed", conclusion: "failure" }],
+        failedAnnotations: [],
+      }),
+    },
+  });
+  t.after(cleanup);
+
+  const adopted = await sync.handleWebhookPayload({
+    eventType: "pull_request",
+    action: "labeled",
+    repo: "hubstaff/gooseherd",
+    prNumber: 77,
+    prTitle: "Adopt from labeled webhook",
+    prBody: "Fixes HBL-404",
+    prUrl: "https://github.com/hubstaff/gooseherd/pull/77",
+    baseBranch: "main",
+    headBranch: "feature/hbl-404",
+    headSha: "deadbeef",
+    labels: ["ai:assist"],
+  } as never);
+
+  assert.equal(adopted?.state, "auto_review");
+  assert.equal(adopted?.substate, "ci_failed");
+  assert.deepEqual(reconcileCalls, [{ workItemId: adopted!.id, reason: "github.pr_adopted" }]);
+});
+
+test("github sync adopts a labeled PR with pending current CI into pr_adopted", async (t) => {
+  const { cleanup, sync } = await createGitHubSyncFixture({
+    githubService: {
+      getPullRequestCiSnapshot: async () => ({ headSha: "cafebabe", conclusion: "pending" }),
+    },
+  });
+  t.after(cleanup);
+
+  const adopted = await sync.handleWebhookPayload({
+    eventType: "pull_request",
+    action: "labeled",
+    repo: "hubstaff/gooseherd",
+    prNumber: 78,
+    prTitle: "Adopt from labeled webhook",
+    prBody: "Fixes HBL-405",
+    prUrl: "https://github.com/hubstaff/gooseherd/pull/78",
+    baseBranch: "main",
+    headBranch: "feature/hbl-405",
+    headSha: "cafebabe",
+    labels: ["ai:assist"],
+  } as never);
+
+  assert.equal(adopted?.substate, "pr_adopted");
+});
+
+test("github sync returns auto_review items to ci_failed and reconciles on failed CI", async (t) => {
   const { cleanup, service, sync, ownerTeamId, pmUserId, reconcileCalls } = await createGitHubSyncFixture();
   t.after(cleanup);
 
@@ -795,8 +899,104 @@ test("github sync returns auto_review items to applying_review_feedback and reco
 
   assert.equal(updated?.id, delivery.id);
   assert.equal(updated?.state, "auto_review");
-  assert.equal(updated?.substate, "applying_review_feedback");
+  assert.equal(updated?.substate, "ci_failed");
   assert.ok(!updated?.flags.includes("ci_green"));
+  assert.deepEqual(reconcileCalls, [{ workItemId: delivery.id, reason: "github.ci_failed" }]);
+});
+
+test("github sync ignores stale failed CI for an older head sha", async (t) => {
+  const { cleanup, service, sync, ownerTeamId, pmUserId, reconcileCalls } = await createGitHubSyncFixture({
+    githubService: {
+      getPullRequest: async () => ({
+        number: 89,
+        url: "https://github.com/hubstaff/gooseherd/pull/89",
+        title: "Auto-review CI failed",
+        body: "Fresh auto-review run is required",
+        state: "open",
+        headSha: "new-head-sha",
+      }),
+    },
+  });
+  t.after(cleanup);
+
+  const delivery = await service.createDeliveryFromJira({
+    title: "Auto-review CI failed",
+    summary: "Fresh auto-review run is required",
+    ownerTeamId,
+    homeChannelId: "C_GROWTH",
+    homeThreadTs: "1740000000.601",
+    jiraIssueKey: "HBL-405A",
+    createdByUserId: pmUserId,
+    repo: "hubstaff/gooseherd",
+    githubPrNumber: 89,
+    githubPrUrl: "https://github.com/hubstaff/gooseherd/pull/89",
+    githubPrHeadSha: "new-head-sha",
+    initialState: "auto_review",
+    initialSubstate: "waiting_ci",
+    flags: ["pr_opened", "ci_green", "self_review_done"],
+  });
+
+  const updated = await sync.handleWebhookPayload({
+    eventType: "check_suite",
+    action: "completed",
+    repo: "hubstaff/gooseherd",
+    conclusion: "failure",
+    status: "completed",
+    headSha: "old-head-sha",
+    pullRequestNumbers: [89],
+  });
+
+  assert.equal(updated?.id, delivery.id);
+  assert.equal(updated?.state, "auto_review");
+  assert.equal(updated?.substate, "waiting_ci");
+  assert.ok(updated?.flags.includes("ci_green"));
+  assert.deepEqual(reconcileCalls, []);
+});
+
+test("github sync handles check_suite using stored head sha without fetching the pull request", async (t) => {
+  let getPullRequestCalls = 0;
+  const { cleanup, service, sync, ownerTeamId, pmUserId, reconcileCalls } = await createGitHubSyncFixture({
+    githubService: {
+      getPullRequest: async () => {
+        getPullRequestCalls += 1;
+        throw new Error("check_suite should not fetch pull request details");
+      },
+    },
+  });
+  t.after(cleanup);
+
+  const delivery = await service.createDeliveryFromJira({
+    title: "Stored head SHA is sufficient",
+    summary: "Avoid network calls in the webhook callback path",
+    ownerTeamId,
+    homeChannelId: "C_GROWTH",
+    homeThreadTs: "1740000000.601",
+    jiraIssueKey: "HBL-405C",
+    createdByUserId: pmUserId,
+    repo: "hubstaff/gooseherd",
+    githubPrNumber: 91,
+    githubPrUrl: "https://github.com/hubstaff/gooseherd/pull/91",
+    githubPrHeadSha: "current-head-sha",
+    initialState: "auto_review",
+    initialSubstate: "waiting_ci",
+    flags: ["pr_opened", "ci_green", "self_review_done"],
+  });
+
+  const updated = await sync.handleWebhookPayload({
+    eventType: "check_suite",
+    action: "completed",
+    repo: "hubstaff/gooseherd",
+    conclusion: "failure",
+    status: "completed",
+    headSha: "current-head-sha",
+    pullRequestNumbers: [91],
+  });
+
+  assert.equal(updated?.id, delivery.id);
+  assert.equal(updated?.state, "auto_review");
+  assert.equal(updated?.substate, "ci_failed");
+  assert.ok(!updated?.flags.includes("ci_green"));
+  assert.equal(getPullRequestCalls, 0);
   assert.deepEqual(reconcileCalls, [{ workItemId: delivery.id, reason: "github.ci_failed" }]);
 });
 

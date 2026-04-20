@@ -172,6 +172,14 @@ test("buildCIFixPrompt: includes fix instructions", () => {
   const prompt = buildCIFixPrompt([], "", []);
   assert.ok(prompt.includes("Fix only the CI failures"));
   assert.ok(prompt.includes("Do not refactor unrelated code"));
+  assert.match(prompt, /existing PR branch/i);
+  assert.match(prompt, /do not create .* new branch/i);
+  assert.match(prompt, /do not create .* new PR/i);
+});
+
+test("buildCIFixPrompt: includes current run id when provided", () => {
+  const prompt = buildCIFixPrompt([], "", [], [], "445ad8a6-33c3-45c6-badf-429ec98c4a51");
+  assert.match(prompt, /Current Gooseherd run id: `445ad8a6-33c3-45c6-badf-429ec98c4a51`/);
 });
 
 // ── shouldAbortFixLoop ──

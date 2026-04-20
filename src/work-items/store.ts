@@ -26,6 +26,7 @@ function rowToRecord(row: WorkItemRow): WorkItemRecord {
     githubPrUrl: row.githubPrUrl ?? undefined,
     githubPrBaseBranch: row.githubPrBaseBranch ?? undefined,
     githubPrHeadBranch: row.githubPrHeadBranch ?? undefined,
+    githubPrHeadSha: row.githubPrHeadSha ?? undefined,
     sourceWorkItemId: row.sourceWorkItemId ?? undefined,
     repo: row.repo ?? undefined,
     createdByUserId: row.createdByUserId,
@@ -62,6 +63,7 @@ export class WorkItemStore {
       githubPrUrl: input.githubPrUrl,
       githubPrBaseBranch: input.githubPrBaseBranch,
       githubPrHeadBranch: input.githubPrHeadBranch,
+      githubPrHeadSha: input.githubPrHeadSha,
       sourceWorkItemId: input.sourceWorkItemId,
       repo: input.repo,
       createdByUserId: input.createdByUserId,
@@ -256,7 +258,14 @@ export class WorkItemStore {
 
   async linkPullRequest(
     id: string,
-    input: { repo?: string; githubPrNumber: number; githubPrUrl?: string; githubPrBaseBranch?: string; githubPrHeadBranch?: string }
+    input: {
+      repo?: string;
+      githubPrNumber: number;
+      githubPrUrl?: string;
+      githubPrBaseBranch?: string;
+      githubPrHeadBranch?: string;
+      githubPrHeadSha?: string;
+    }
   ): Promise<WorkItemRecord> {
     await this.db
       .update(workItems)
@@ -266,6 +275,7 @@ export class WorkItemStore {
         githubPrUrl: input.githubPrUrl ?? null,
         githubPrBaseBranch: input.githubPrBaseBranch ?? null,
         githubPrHeadBranch: input.githubPrHeadBranch ?? null,
+        githubPrHeadSha: input.githubPrHeadSha ?? null,
         updatedAt: new Date(),
       })
       .where(eq(workItems.id, id));

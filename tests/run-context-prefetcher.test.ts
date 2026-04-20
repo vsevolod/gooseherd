@@ -261,6 +261,15 @@ test("RunContextPrefetcher normalizes GitHub and Jira bundles into a prefetched 
               completedAt: "2026-04-17T11:25:00.000Z",
             },
           ],
+          primaryFailedRun: {
+            id: 99,
+            name: "test-suite",
+            status: "completed",
+            conclusion: "failure",
+            detailsUrl: "https://github.com/owner/repo/actions/runs/99",
+            startedAt: "2026-04-17T11:20:00.000Z",
+            completedAt: "2026-04-17T11:25:00.000Z",
+          },
           failedAnnotations: Array.from({ length: 55 }, (_, index) => ({
             checkRunName: "test-suite",
             path: "src/app.ts",
@@ -268,6 +277,7 @@ test("RunContextPrefetcher normalizes GitHub and Jira bundles into a prefetched 
             message: `Expected boolean result ${index + 1}`,
             level: "failure",
           })),
+          failedLogTail: "bundle exec rspec\nExpected boolean result 55\n",
         };
       },
     },
@@ -318,10 +328,12 @@ test("RunContextPrefetcher normalizes GitHub and Jira bundles into a prefetched 
   assert.equal(result.github?.reviewComments[0]?.threadResolved, false);
   assert.equal(result.github?.ci.conclusion, "failure");
   assert.equal(result.github?.ci.failedRuns?.[0]?.name, "test-suite");
+  assert.equal(result.github?.ci.primaryFailedRun?.id, 99);
   assert.equal(result.github?.ci.failedAnnotationsTotalCount, 55);
   assert.equal(result.github?.ci.failedAnnotations?.length, 50);
   assert.equal(result.github?.ci.failedAnnotations?.[0]?.line, 6);
   assert.equal(result.github?.ci.failedAnnotations?.[49]?.line, 55);
+  assert.equal(result.github?.ci.failedLogTail, "bundle exec rspec\nExpected boolean result 55\n");
   assert.equal(result.jira?.issue.key, "HBL-17");
   assert.equal(result.jira?.issue.description, "Jira description");
   assert.equal(result.jira?.commentsTotalCount, 16);

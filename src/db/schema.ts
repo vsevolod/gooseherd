@@ -410,6 +410,7 @@ export const workItems = pgTable(
     githubPrUrl: text("github_pr_url"),
     githubPrBaseBranch: text("github_pr_base_branch"),
     githubPrHeadBranch: text("github_pr_head_branch"),
+    githubPrHeadSha: text("github_pr_head_sha"),
     sourceWorkItemId: uuid("source_work_item_id"),
     createdByUserId: uuid("created_by_user_id").notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),

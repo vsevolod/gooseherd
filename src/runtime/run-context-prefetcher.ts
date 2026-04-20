@@ -243,6 +243,18 @@ function normalizeCiSnapshot(ci: PullRequestCiSnapshot): NonNullable<RunPrefetch
       startedAt: run.startedAt,
       completedAt: run.completedAt,
     })),
+    primaryFailedRun: ci.primaryFailedRun
+      ? {
+          id: ci.primaryFailedRun.id,
+          name: ci.primaryFailedRun.name,
+          status: ci.primaryFailedRun.status,
+          conclusion: ci.primaryFailedRun.conclusion,
+          detailsUrl: ci.primaryFailedRun.detailsUrl,
+          startedAt: ci.primaryFailedRun.startedAt,
+          completedAt: ci.primaryFailedRun.completedAt,
+        }
+      : undefined,
+    failedLogTail: ci.failedLogTail ? trimBody(ci.failedLogTail, 3000) : undefined,
   };
 
   if (failedAnnotations && failedAnnotations.length > 0) {

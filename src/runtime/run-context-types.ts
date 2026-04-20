@@ -67,6 +67,15 @@ export interface RunPrefetchContext {
         startedAt?: string;
         completedAt?: string;
       }>;
+      primaryFailedRun?: {
+        id: number;
+        name: string;
+        status: string;
+        conclusion: string | null;
+        detailsUrl?: string;
+        startedAt?: string;
+        completedAt?: string;
+      };
       failedAnnotations?: Array<{
         checkRunName: string;
         path: string;
@@ -75,6 +84,7 @@ export interface RunPrefetchContext {
         level: string;
       }>;
       failedAnnotationsTotalCount?: number;
+      failedLogTail?: string;
     };
   };
   jira?: {

@@ -2,11 +2,11 @@ import { writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { NodeConfig, NodeResult, NodeDeps } from "../types.js";
 import type { ContextBag } from "../context-bag.js";
-import { runShell, runShellCapture, appendLog } from "../shell.js";
+import { runShell, runShellCapture, appendLog, shellEscape } from "../shell.js";
 import { buildAgentCommand } from "../agent-command.js";
 import { commitCaptureAndPush } from "../git-ops.js";
 import { buildCIFixPrompt, type CIAnnotation } from "./ci-monitor.js";
-import { mergeInternalArtifacts } from "../internal-generated-files.js";
+import { buildGitAddPathspecs, mergeInternalArtifacts } from "../internal-generated-files.js";
 
 /**
  * CI Fix node: "fat" agent node that fixes CI failures, commits, and pushes.
@@ -32,14 +32,23 @@ export async function fixCiNode(
   await appendLog(logFile, `\n[ci:fix] starting CI fix attempt ${String(attempt)}\n`);
 
   // Build fix prompt from CI failure context
-  const annotations = ctx.get<CIAnnotation[]>("ciAnnotations") ?? [];
-  const logTail = ctx.get<string>("ciLogTail") ?? "";
+  const prefetchCi = deps.run.prefetchContext?.github?.ci;
+  const annotations = ctx.has("ciAnnotations")
+    ? (ctx.get<CIAnnotation[]>("ciAnnotations") ?? [])
+    : (prefetchCi?.failedAnnotations?.map((annotation) => ({
+        file: annotation.path,
+        line: annotation.line,
+        message: annotation.message,
+        level: annotation.level,
+      })) ?? []);
+  const failedRunNames = ctx.get<string[]>("ciFailedRunNames")
+    ?? prefetchCi?.failedRuns?.map((failedRun) => failedRun.name).filter(Boolean)
+    ?? [];
+  const logTail = ctx.get<string>("ciLogTail") ?? prefetchCi?.failedLogTail ?? "";
   const changedFiles = ctx.get<string[]>("changedFiles") ?? [];
   const existingInternalArtifacts = ctx.get<string[]>("internalArtifacts");
 
-  const fixPrompt = (annotations.length > 0 || logTail)
-    ? buildCIFixPrompt(annotations, logTail, changedFiles)
-    : "CI failed. Fix the issues and ensure tests pass.";
+  const fixPrompt = buildCIFixPrompt(annotations, logTail, changedFiles, failedRunNames, run.id);
 
   // Write fix prompt to disk for the agent
   const runDir = ctx.getRequired<string>("runDir");
@@ -56,15 +65,19 @@ export async function fixCiNode(
     timeoutMs: config.agentTimeoutSeconds * 1000
   });
 
-  // Check if agent made any changes (including untracked files)
-  const diffCheck = await runShellCapture("git status --porcelain", { cwd: repoDir, logFile });
+  // Check if agent made any user-committable changes, ignoring internal artifacts like AGENTS.md.
+  const pathspecArgs = buildGitAddPathspecs().map(shellEscape).join(" ");
+  const diffCheck = await runShellCapture(
+    `git status --porcelain --untracked-files=all -- ${pathspecArgs}`,
+    { cwd: repoDir, logFile },
+  );
   if (diffCheck.code === 0 && diffCheck.stdout.trim() === "") {
-    await appendLog(logFile, "\n[ci:fix] agent made no changes\n");
-    return { outcome: "success" };
+    await appendLog(logFile, "\n[ci:fix] agent made no user-committable changes\n");
+    return { outcome: "failure", error: "CI fix agent made no changes" };
   }
 
   // Commit, capture SHA + changed files, and push
-  const commitMsg = `${config.appSlug}: fix CI (attempt ${String(attempt)})`;
+  const commitMsg = `${config.appSlug}: fix CI (run ${run.id})`;
   const { commitSha: newSha, changedFiles: newChangedFiles, internalArtifacts } = await commitCaptureAndPush(
     repoDir, commitMsg, logFile, run.branchName
   );

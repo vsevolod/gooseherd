@@ -6,8 +6,6 @@ import { appendGateReport } from "../quality-gates/gate-report.js";
 import {
   aggregateConclusions,
   filterCheckRuns,
-  mapAnnotations,
-  truncateLog,
   type CIAnnotation
 } from "./ci-monitor.js";
 
@@ -150,28 +148,25 @@ async function evaluateConclusion(
   let logTail = "";
 
   if (deps.githubService) {
-    // Fetch annotations from failed runs
-    for (const run of failedRuns) {
-      const ghAnnotations = await deps.githubService.getCheckAnnotations(owner, repo, run.id);
-      const mapped = mapAnnotations(ghAnnotations);
-      allAnnotations.push(...mapped);
+    const failureContext = await deps.githubService.collectCiFailureContext(owner, repo, checkRuns);
+    for (const annotation of failureContext.failedAnnotations ?? []) {
+      allAnnotations.push({
+        file: annotation.path,
+        line: annotation.line,
+        message: annotation.message,
+        level: annotation.level,
+      });
     }
-
-    // Try to get job logs for the first failed run
-    if (failedRuns.length > 0) {
-      try {
-        const rawLog = await deps.githubService.downloadJobLog(owner, repo, failedRuns[0]!.id);
-        logTail = truncateLog(rawLog);
-      } catch {
-        // Log download may fail (permissions, expired)
-        await appendLog(logFile, "[ci:wait] could not download job log\n");
-      }
+    logTail = failureContext.failedLogTail ?? "";
+    if (!logTail && failureContext.primaryFailedRun) {
+      await appendLog(logFile, "[ci:wait] could not download job log\n");
     }
   }
 
   const failedCheckCount = failedRuns.length;
   ctx.set("ciConclusion", "failure");
   ctx.set("ciAnnotations", allAnnotations);
+  ctx.set("ciFailedRunNames", failedRuns.map((run) => run.name));
   ctx.set("ciLogTail", logTail);
   ctx.set("ciFailedCheckCount", failedCheckCount);
 

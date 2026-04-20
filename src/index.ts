@@ -358,6 +358,7 @@ async function createWorkItemServices(
 
     workItemGitHubSync = new workItemGitHubSyncMod.GitHubWorkItemSync(db, {
       adoptionLabels: config.workItemGithubAdoptionLabels,
+      githubService,
       resetEngineeringReviewOnNewCommits: config.featureDeliveryResetEngineeringReviewOnNewCommits,
       resetQaReviewOnNewCommits: config.featureDeliveryResetQaReviewOnNewCommits,
       reconcileWorkItem: async (workItemId, reason) => {

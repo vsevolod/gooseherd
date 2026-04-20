@@ -394,6 +394,11 @@ test("GitHubService: CI snapshot keeps only failed runs and annotations", async 
             ]
           : []
       })
+    },
+    actions: {
+      downloadJobLogsForWorkflowRun: async ({ job_id }: { job_id: number }) => ({
+        data: `job-log-${job_id}`
+      })
     }
   };
 
@@ -413,6 +418,15 @@ test("GitHubService: CI snapshot keeps only failed runs and annotations", async 
         completedAt: undefined
       }
     ],
+    primaryFailedRun: {
+      id: 11,
+      name: "tests",
+      status: "completed",
+      conclusion: "failure",
+      detailsUrl: undefined,
+      startedAt: undefined,
+      completedAt: undefined
+    },
     failedAnnotations: [
       {
         checkRunName: "tests",
@@ -421,7 +435,8 @@ test("GitHubService: CI snapshot keeps only failed runs and annotations", async 
         message: "Expected true but got false",
         level: "failure"
       }
-    ]
+    ],
+    failedLogTail: "job-log-11"
   });
 });
 
@@ -820,6 +835,12 @@ test("GitHubService: CI snapshot paginates failed runs and failed annotations", 
           ]
         };
       }
+    },
+    actions: {
+      downloadJobLogsForWorkflowRun: async ({ job_id }: { job_id: number }) => {
+        calls.push({ kind: "job-log", check_run_id: job_id });
+        return { data: "job-log-101" };
+      }
     }
   };
 
@@ -829,7 +850,8 @@ test("GitHubService: CI snapshot paginates failed runs and failed annotations", 
     { kind: "check-runs", page: 1 },
     { kind: "check-runs", page: 2 },
     { kind: "annotations", check_run_id: 101, page: 1 },
-    { kind: "annotations", check_run_id: 101, page: 2 }
+    { kind: "annotations", check_run_id: 101, page: 2 },
+    { kind: "job-log", check_run_id: 101 }
   ]);
   assert.equal(snapshot.conclusion, "failure");
   assert.deepEqual(snapshot.failedRuns, [
@@ -843,6 +865,15 @@ test("GitHubService: CI snapshot paginates failed runs and failed annotations", 
       completedAt: "2026-04-17T12:05:00Z"
     }
   ]);
+  assert.deepEqual(snapshot.primaryFailedRun, {
+    id: 101,
+    name: "test-suite",
+    status: "completed",
+    conclusion: "failure",
+    detailsUrl: "https://github.com/org/repo/actions/runs/101",
+    startedAt: "2026-04-17T12:00:00Z",
+    completedAt: "2026-04-17T12:05:00Z"
+  });
   assert.equal(snapshot.failedAnnotations?.length, 101);
   assert.deepEqual(snapshot.failedAnnotations?.[0], {
     checkRunName: "test-suite",
@@ -858,6 +889,220 @@ test("GitHubService: CI snapshot paginates failed runs and failed annotations", 
     message: "annotation-101",
     level: "failure"
   });
+  assert.equal(snapshot.failedLogTail, "job-log-101");
+});
+
+test("GitHubService: CI snapshot chooses one primary failed run for log collection", async () => {
+  const logCalls: number[] = [];
+  const service = Object.create(GitHubService.prototype) as GitHubService & { octokit: any };
+  service.octokit = {
+    checks: {
+      listForRef: async () => ({
+        data: {
+          check_runs: [
+            {
+              id: 21,
+              name: "lint",
+              status: "completed",
+              conclusion: "failure",
+              completed_at: "2026-04-17T12:01:00Z"
+            },
+            {
+              id: 22,
+              name: "rspec",
+              status: "completed",
+              conclusion: "failure",
+              completed_at: "2026-04-17T12:02:00Z"
+            }
+          ]
+        }
+      }),
+      listAnnotations: async ({ check_run_id }: { check_run_id: number }) => ({
+        data: check_run_id === 21
+          ? [
+              {
+                path: "src/a.ts",
+                start_line: 1,
+                message: "warning",
+                annotation_level: "warning"
+              }
+            ]
+          : [
+              {
+                path: "src/b.ts",
+                start_line: 7,
+                message: "failure-1",
+                annotation_level: "failure"
+              },
+              {
+                path: "src/b.ts",
+                start_line: 9,
+                message: "failure-2",
+                annotation_level: "failure"
+              }
+            ]
+      })
+    },
+    actions: {
+      downloadJobLogsForWorkflowRun: async ({ job_id }: { job_id: number }) => {
+        logCalls.push(job_id);
+        return { data: `log-${job_id}` };
+      }
+    }
+  };
+
+  const snapshot = await service.getPullRequestCiSnapshot("org/repo", "abc123");
+
+  assert.deepEqual(logCalls, [22]);
+  assert.deepEqual(snapshot.primaryFailedRun, {
+    id: 22,
+    name: "rspec",
+    status: "completed",
+    conclusion: "failure",
+    detailsUrl: undefined,
+    startedAt: undefined,
+    completedAt: "2026-04-17T12:02:00Z"
+  });
+  assert.equal(snapshot.failedLogTail, "log-22");
+});
+
+test("GitHubService: CI snapshot extracts failing step snippet from GitHub job logs", async () => {
+  const service = Object.create(GitHubService.prototype) as GitHubService & { octokit: any };
+  service.octokit = {
+    checks: {
+      listForRef: async () => ({
+        data: {
+          check_runs: [
+            {
+              id: 31,
+              name: "backend",
+              status: "completed",
+              conclusion: "failure",
+              completed_at: "2026-04-20T15:17:08Z"
+            }
+          ]
+        }
+      }),
+      listAnnotations: async () => ({
+        data: [
+          {
+            path: ".github/workflows/ci.yml",
+            start_line: 37,
+            message: "Process completed with exit code 1.",
+            annotation_level: "failure"
+          }
+        ]
+      })
+    },
+    actions: {
+      downloadJobLogsForWorkflowRun: async () => ({
+        data: [
+          "2026-04-20T15:16:54.0939559Z ##[group]Run bundle exec rubocop",
+          "2026-04-20T15:16:54.0940027Z \u001b[36;1mbundle exec rubocop\u001b[0m",
+          "2026-04-20T15:17:08.2983777Z spec/interfaces/telegram/events/image_spec.rb:158:33: C: [Correctable] Layout/MultilineMethodCallIndentation: Align .and with .with on line 157.",
+          "2026-04-20T15:17:08.3090580Z ##[error]Process completed with exit code 1.",
+          "2026-04-20T15:17:08.3197647Z Post job cleanup.",
+          "2026-04-20T15:17:08.3202326Z ##[command]/usr/bin/docker exec postgres",
+        ].join("\n")
+      })
+    }
+  };
+
+  const snapshot = await service.getPullRequestCiSnapshot("org/repo", "abc123");
+
+  assert.equal(
+    snapshot.failedLogTail,
+    [
+      "##[group]Run bundle exec rubocop",
+      "bundle exec rubocop",
+      "spec/interfaces/telegram/events/image_spec.rb:158:33: C: [Correctable] Layout/MultilineMethodCallIndentation: Align .and with .with on line 157.",
+      "##[error]Process completed with exit code 1."
+    ].join("\n")
+  );
+});
+
+test("GitHubService: CI snapshot anchors to the nearest preceding GitHub Actions group", async () => {
+  const service = Object.create(GitHubService.prototype) as GitHubService & { octokit: any };
+  service.octokit = {
+    checks: {
+      listForRef: async () => ({
+        data: {
+          check_runs: [
+            {
+              id: 32,
+              name: "backend",
+              status: "completed",
+              conclusion: "failure",
+              completed_at: "2026-04-20T15:17:08Z"
+            }
+          ]
+        }
+      }),
+      listAnnotations: async () => ({ data: [] })
+    },
+    actions: {
+      downloadJobLogsForWorkflowRun: async () => ({
+        data: [
+          "2026-04-20T15:16:54.0939559Z ##[group]Initialize containers",
+          "2026-04-20T15:16:55.0000000Z containers ready",
+          "2026-04-20T15:16:56.0000000Z ##[group]Print service container logs",
+          "2026-04-20T15:16:57.0000000Z postgres failed to start cleanly",
+          "2026-04-20T15:16:58.0000000Z ##[error]Process completed with exit code 1.",
+        ].join("\n")
+      })
+    }
+  };
+
+  const snapshot = await service.getPullRequestCiSnapshot("org/repo", "abc123");
+
+  assert.equal(
+    snapshot.failedLogTail,
+    [
+      "##[group]Print service container logs",
+      "postgres failed to start cleanly",
+      "##[error]Process completed with exit code 1."
+    ].join("\n")
+  );
+});
+
+test("GitHubService: CI snapshot caps failure snippets by line count while preserving the group title", async () => {
+  const service = Object.create(GitHubService.prototype) as GitHubService & { octokit: any };
+  service.octokit = {
+    checks: {
+      listForRef: async () => ({
+        data: {
+          check_runs: [
+            {
+              id: 33,
+              name: "backend",
+              status: "completed",
+              conclusion: "failure",
+              completed_at: "2026-04-20T15:17:08Z"
+            }
+          ]
+        }
+      }),
+      listAnnotations: async () => ({ data: [] })
+    },
+    actions: {
+      downloadJobLogsForWorkflowRun: async () => ({
+        data: [
+          "2026-04-20T15:16:54.0939559Z ##[group]Run bundle exec rubocop",
+          ...Array.from({ length: 250 }, (_, index) => `2026-04-20T15:16:54.1000000Z offense-${index + 1}`),
+          "2026-04-20T15:17:08.3090580Z ##[error]Process completed with exit code 1.",
+        ].join("\n")
+      })
+    }
+  };
+
+  const snapshot = await service.getPullRequestCiSnapshot("org/repo", "abc123");
+  const lines = snapshot.failedLogTail?.split("\n") ?? [];
+
+  assert.equal(lines[0], "##[group]Run bundle exec rubocop");
+  assert.equal(lines[1], "...(truncated)...");
+  assert.equal(lines.length, 202);
+  assert.equal(lines.at(-1), "##[error]Process completed with exit code 1.");
+  assert.equal(lines[2], "offense-52");
 });
 
 test("JiraClient: comments paginate across pages", async () => {

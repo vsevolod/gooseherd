@@ -35,3 +35,29 @@ test("auto review task renderer includes repo, PR metadata, Jira key, and title"
   assert.match(rendered, /if there are no issues, both arrays should be empty/i);
   assert.match(rendered, /do not use .* selectedFindings .* changelog|do not use .* ignoredFindings .* changelog/i);
 });
+
+test("ci fix task renderer includes repo, PR metadata, Jira key, and branch reuse constraints", async () => {
+  const { buildCiFixTask } = await import("../src/work-items/auto-review-task.js");
+  const prNumber = 4078;
+  const prUrl = `https://github.com/hubstaff/gooseherd/pull/${prNumber}`;
+
+  const rendered = buildCiFixTask({
+    repo: "hubstaff/gooseherd",
+    prNumber,
+    prUrl,
+    jiraIssueKey: "HBL-405",
+    title: "Fix CI for adopted PR",
+    summary: "CI is already red on the current PR head",
+  });
+
+  assert.ok(rendered.includes("hubstaff/gooseherd"));
+  assert.ok(rendered.includes(prUrl));
+  assert.match(rendered.replace(prUrl, ""), new RegExp(`\\b${prNumber}\\b`));
+  assert.ok(rendered.includes("HBL-405"));
+  assert.ok(rendered.includes("Fix CI for adopted PR"));
+  assert.match(rendered, /fix the currently failing ci/i);
+  assert.match(rendered, /reuse the current PR branch/i);
+  assert.match(rendered, /do not create .* new branch/i);
+  assert.match(rendered, /do not create .* new PR/i);
+  assert.match(rendered, /do not merge the PR/i);
+});

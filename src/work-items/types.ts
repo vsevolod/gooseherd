@@ -22,6 +22,18 @@ export type FeatureDeliveryState =
 
 export type WorkItemState = ProductDiscoveryState | FeatureDeliveryState;
 
+export const FEATURE_DELIVERY_AUTO_REVIEW_SUBSTATES = [
+  "pr_adopted",
+  "collecting_context",
+  "waiting_ci",
+  "applying_review_feedback",
+  "ci_failed",
+  "revalidating_after_rebase",
+] as const;
+
+export type FeatureDeliveryAutoReviewSubstate =
+  typeof FEATURE_DELIVERY_AUTO_REVIEW_SUBSTATES[number];
+
 export type ReviewRequestType = "review" | "approval";
 export type ReviewRequestTargetType = "user" | "team" | "team_role" | "org_role";
 export type ReviewRequestStatus = "pending" | "completed" | "cancelled" | "superseded";
@@ -47,6 +59,7 @@ export interface WorkItemRecord {
   githubPrUrl?: string;
   githubPrBaseBranch?: string;
   githubPrHeadBranch?: string;
+  githubPrHeadSha?: string;
   sourceWorkItemId?: string;
   repo?: string;
   createdByUserId: string;
@@ -83,6 +96,7 @@ export interface CreateWorkItemInput {
   githubPrUrl?: string;
   githubPrBaseBranch?: string;
   githubPrHeadBranch?: string;
+  githubPrHeadSha?: string;
   sourceWorkItemId?: string;
   repo?: string;
   createdByUserId: string;

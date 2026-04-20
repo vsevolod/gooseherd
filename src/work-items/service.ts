@@ -376,6 +376,7 @@ export class WorkItemService {
     githubPrUrl?: string;
     githubPrBaseBranch?: string;
     githubPrHeadBranch?: string;
+    githubPrHeadSha?: string;
     initialState?: Extract<WorkItemRecord["state"], "backlog" | "auto_review">;
     initialSubstate?: string;
     flags?: string[];
@@ -395,6 +396,7 @@ export class WorkItemService {
       githubPrUrl: input.githubPrUrl,
       githubPrBaseBranch: input.githubPrBaseBranch,
       githubPrHeadBranch: input.githubPrHeadBranch,
+      githubPrHeadSha: input.githubPrHeadSha,
       initialState: input.initialState,
       initialSubstate: input.initialSubstate,
       flags: input.flags,
@@ -415,6 +417,7 @@ export class WorkItemService {
     githubPrUrl?: string;
     githubPrBaseBranch?: string;
     githubPrHeadBranch?: string;
+    githubPrHeadSha?: string;
     initialState?: Extract<WorkItemRecord["state"], "backlog" | "auto_review">;
     initialSubstate?: string;
     flags?: string[];
@@ -433,6 +436,7 @@ export class WorkItemService {
       githubPrUrl: input.githubPrUrl,
       githubPrBaseBranch: input.githubPrBaseBranch,
       githubPrHeadBranch: input.githubPrHeadBranch,
+      githubPrHeadSha: input.githubPrHeadSha,
       initialState: input.initialState,
       initialSubstate: input.initialSubstate,
       flags: input.flags,
@@ -454,6 +458,7 @@ export class WorkItemService {
     githubPrUrl?: string;
     githubPrBaseBranch?: string;
     githubPrHeadBranch?: string;
+    githubPrHeadSha?: string;
     initialState?: Extract<WorkItemRecord["state"], "backlog" | "auto_review">;
     initialSubstate?: string;
     flags?: string[];
@@ -475,6 +480,7 @@ export class WorkItemService {
       githubPrUrl: input.githubPrUrl,
       githubPrBaseBranch: input.githubPrBaseBranch,
       githubPrHeadBranch: input.githubPrHeadBranch,
+      githubPrHeadSha: input.githubPrHeadSha,
       createdByUserId: input.createdByUserId,
       flags: input.flags ?? [],
     });

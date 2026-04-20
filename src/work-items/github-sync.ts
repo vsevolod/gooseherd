@@ -1,4 +1,5 @@
 import type { Database } from "../db/index.js";
+import type { GitHubService } from "../github.js";
 import {
   nextFeatureDeliveryStateAfterAutoReview,
   nextFeatureDeliveryStateAfterEngineeringReview,
@@ -26,6 +27,7 @@ export interface GitHubWorkItemWebhookPayload {
   authorLogin?: string;
   baseBranch?: string;
   headBranch?: string;
+  headSha?: string;
   labels?: string[];
   reviewer?: string;
   state?: string;
@@ -50,6 +52,7 @@ export interface DeliveryContextResolverResult {
 
 export interface GitHubWorkItemSyncOptions {
   adoptionLabels?: string[];
+  githubService?: Pick<GitHubService, "getPullRequestCiSnapshot">;
   resetEngineeringReviewOnNewCommits?: boolean;
   resetQaReviewOnNewCommits?: boolean;
   reconcileWorkItem?: (workItemId: string, reason: string) => Promise<void> | void;
@@ -103,6 +106,7 @@ export function parseGitHubWorkItemWebhookPayload(
       authorLogin: (pullRequest["user"] as Record<string, unknown> | undefined)?.["login"] as string | undefined,
       baseBranch: (pullRequest["base"] as Record<string, unknown> | undefined)?.["ref"] as string | undefined,
       headBranch: (pullRequest["head"] as Record<string, unknown> | undefined)?.["ref"] as string | undefined,
+      headSha: (pullRequest["head"] as Record<string, unknown> | undefined)?.["sha"] as string | undefined,
       labels,
       merged: pullRequest["merged"] as boolean | undefined,
     };
@@ -136,6 +140,7 @@ export function parseGitHubWorkItemWebhookPayload(
       repo,
       conclusion: checkSuite["conclusion"] as string | undefined,
       status: checkSuite["status"] as string | undefined,
+      headSha: checkSuite["head_sha"] as string | undefined,
       pullRequestNumbers: pullRequests
         .map((pullRequest) => pullRequest["number"])
         .filter((number): number is number => typeof number === "number"),
@@ -150,6 +155,7 @@ export class GitHubWorkItemSync {
   private readonly workItemService: WorkItemService;
   private readonly events: WorkItemEventsStore;
   private readonly adoptionLabels: string[];
+  private readonly githubService?: Pick<GitHubService, "getPullRequestCiSnapshot">;
   private readonly resolveDeliveryContext: GitHubWorkItemSyncOptions["resolveDeliveryContext"];
   private readonly resetEngineeringReviewOnNewCommits?: boolean;
   private readonly resetQaReviewOnNewCommits?: boolean;
@@ -160,6 +166,7 @@ export class GitHubWorkItemSync {
     this.workItemService = new WorkItemService(db);
     this.events = new WorkItemEventsStore(db);
     this.adoptionLabels = (options.adoptionLabels ?? ["ai:assist"]).map((label) => label.trim().toLowerCase()).filter(Boolean);
+    this.githubService = options.githubService;
     this.resolveDeliveryContext = options.resolveDeliveryContext;
     this.resetEngineeringReviewOnNewCommits = options.resetEngineeringReviewOnNewCommits;
     this.resetQaReviewOnNewCommits = options.resetQaReviewOnNewCommits;
@@ -187,10 +194,17 @@ export class GitHubWorkItemSync {
 
     const existing = await this.findExistingWorkItemForPullRequest(payload.repo, prNumber, payload.prUrl);
     if (existing) {
+      const current = await this.syncStoredPullRequestContext(existing, {
+        repo: payload.repo,
+        githubPrUrl: payload.prUrl,
+        githubPrBaseBranch: payload.baseBranch,
+        githubPrHeadBranch: payload.headBranch,
+        githubPrHeadSha: payload.headSha,
+      });
       await this.events.append({
-        workItemId: existing.id,
+        workItemId: current.id,
         eventType: "github.label_observed",
-        actorUserId: existing.createdByUserId,
+        actorUserId: current.createdByUserId,
         payload: {
           action: payload.action,
           prNumber,
@@ -199,14 +213,14 @@ export class GitHubWorkItemSync {
         },
       });
       if (payload.action === "closed" && payload.merged) {
-        return this.markPullRequestMerged(existing, payload);
+        return this.markPullRequestMerged(current, payload);
       }
 
       if (payload.action === "synchronize") {
-        return this.handlePullRequestSynchronize(existing, payload);
+        return this.handlePullRequestSynchronize(current, payload);
       }
 
-      return existing;
+      return current;
     }
 
     if (!this.hasAdoptionLabel(payload.labels)) {
@@ -214,6 +228,7 @@ export class GitHubWorkItemSync {
     }
 
     const jiraIssueKey = parseJiraIssueKey(payload.prBody);
+    const initialAutoReviewSubstate = await this.resolveInitialAutoReviewSubstate(payload);
     if (jiraIssueKey) {
       const adoptionCandidates = await this.workItems.listFeatureDeliveryAdoptionCandidatesByJiraIssueKey(jiraIssueKey);
       if (adoptionCandidates.length === 1) {
@@ -234,10 +249,11 @@ export class GitHubWorkItemSync {
           githubPrUrl: payload.prUrl,
           githubPrBaseBranch: payload.baseBranch,
           githubPrHeadBranch: payload.headBranch,
+          githubPrHeadSha: payload.headSha,
         });
         const updated = await this.workItems.updateState(existingByJira.id, {
           state: "auto_review",
-          substate: "pr_adopted",
+          substate: initialAutoReviewSubstate,
           flagsToAdd: ["pr_opened"],
         });
         await this.events.append({
@@ -304,8 +320,9 @@ export class GitHubWorkItemSync {
           githubPrUrl: payload.prUrl,
           githubPrBaseBranch: payload.baseBranch,
           githubPrHeadBranch: payload.headBranch,
+          githubPrHeadSha: payload.headSha,
           initialState: "auto_review",
-          initialSubstate: "pr_adopted",
+          initialSubstate: initialAutoReviewSubstate,
           flags: ["pr_opened"],
         })
       : await this.workItemService.createDeliveryFromPullRequest({
@@ -322,8 +339,9 @@ export class GitHubWorkItemSync {
           githubPrUrl: payload.prUrl,
           githubPrBaseBranch: payload.baseBranch,
           githubPrHeadBranch: payload.headBranch,
+          githubPrHeadSha: payload.headSha,
           initialState: "auto_review",
-          initialSubstate: "pr_adopted",
+          initialSubstate: initialAutoReviewSubstate,
           flags: ["pr_opened"],
         });
 
@@ -368,9 +386,14 @@ export class GitHubWorkItemSync {
         action: payload.action,
         status: payload.status,
         conclusion: payload.conclusion,
+        headSha: payload.headSha,
         pullRequestNumbers: payload.pullRequestNumbers ?? [],
       },
     });
+
+    if (payload.headSha && workItem.githubPrHeadSha && payload.headSha !== workItem.githubPrHeadSha) {
+      return workItem;
+    }
 
     const conclusion = payload.conclusion?.toLowerCase();
     if (conclusion === "success") {
@@ -414,7 +437,7 @@ export class GitHubWorkItemSync {
         substate: workItem.state === "ready_for_merge"
           ? "revalidating_after_rebase"
           : workItem.state === "auto_review"
-            ? "applying_review_feedback"
+            ? "ci_failed"
             : "waiting_ci",
         flagsToRemove: ["ci_green"],
       });
@@ -432,6 +455,27 @@ export class GitHubWorkItemSync {
     }
 
     return undefined;
+  }
+
+  private async resolveInitialAutoReviewSubstate(
+    payload: GitHubWorkItemWebhookPayload,
+  ): Promise<"pr_adopted" | "ci_failed"> {
+    if (!payload.repo || !payload.headSha || !this.githubService?.getPullRequestCiSnapshot) {
+      return "pr_adopted";
+    }
+
+    try {
+      const snapshot = await this.githubService.getPullRequestCiSnapshot(payload.repo, payload.headSha);
+      // getPullRequestCiSnapshot() normalizes failed check suites, including timed_out, to "failure".
+      return snapshot.conclusion === "failure" ? "ci_failed" : "pr_adopted";
+    } catch (error) {
+      logError("Failed to resolve PR adoption CI snapshot", {
+        repo: payload.repo,
+        headSha: payload.headSha,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return "pr_adopted";
+    }
   }
 
   private async handlePullRequestReview(payload: GitHubWorkItemWebhookPayload): Promise<WorkItemRecord | undefined> {
@@ -636,6 +680,47 @@ export class GitHubWorkItemSync {
       githubPrUrl: prUrl ?? legacy.githubPrUrl,
       githubPrBaseBranch: legacy.githubPrBaseBranch,
       githubPrHeadBranch: legacy.githubPrHeadBranch,
+      githubPrHeadSha: legacy.githubPrHeadSha,
+    });
+  }
+
+  private async syncStoredPullRequestContext(
+    workItem: WorkItemRecord,
+    input: {
+      repo?: string;
+      githubPrUrl?: string;
+      githubPrBaseBranch?: string;
+      githubPrHeadBranch?: string;
+      githubPrHeadSha?: string;
+    }
+  ): Promise<WorkItemRecord> {
+    if (!workItem.githubPrNumber) {
+      return workItem;
+    }
+
+    const nextRepo = input.repo ?? workItem.repo;
+    const nextUrl = input.githubPrUrl ?? workItem.githubPrUrl;
+    const nextBaseBranch = input.githubPrBaseBranch ?? workItem.githubPrBaseBranch;
+    const nextHeadBranch = input.githubPrHeadBranch ?? workItem.githubPrHeadBranch;
+    const nextHeadSha = input.githubPrHeadSha ?? workItem.githubPrHeadSha;
+
+    if (
+      nextRepo === workItem.repo &&
+      nextUrl === workItem.githubPrUrl &&
+      nextBaseBranch === workItem.githubPrBaseBranch &&
+      nextHeadBranch === workItem.githubPrHeadBranch &&
+      nextHeadSha === workItem.githubPrHeadSha
+    ) {
+      return workItem;
+    }
+
+    return this.workItems.linkPullRequest(workItem.id, {
+      repo: nextRepo,
+      githubPrNumber: workItem.githubPrNumber,
+      githubPrUrl: nextUrl,
+      githubPrBaseBranch: nextBaseBranch,
+      githubPrHeadBranch: nextHeadBranch,
+      githubPrHeadSha: nextHeadSha,
     });
   }
 

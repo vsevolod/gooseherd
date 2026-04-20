@@ -38,3 +38,28 @@ export function buildAutoReviewTask(input: AutoReviewTaskInput): string {
 
   return lines.join("\n");
 }
+
+export function buildCiFixTask(input: AutoReviewTaskInput): string {
+  const lines = [
+    `Investigate and fix the currently failing CI for pull request #${String(input.prNumber)} in ${input.repo}.`,
+    `PR URL: ${input.prUrl}`,
+    `Work item title: ${input.title}`,
+  ];
+
+  if (input.jiraIssueKey) {
+    lines.push(`Jira issue: ${input.jiraIssueKey}`);
+  }
+
+  if (input.summary?.trim()) {
+    lines.push(`Context: ${input.summary.trim()}`);
+  }
+
+  lines.push("");
+  lines.push("Required workflow:");
+  lines.push("1. Reuse the current PR branch. Do not create a new branch or a new PR.");
+  lines.push("2. Focus on the failing CI signal for the current PR head and apply only the minimal code changes needed to make CI pass.");
+  lines.push("3. Validate your fix before finishing.");
+  lines.push("4. Do not merge the PR.");
+
+  return lines.join("\n");
+}

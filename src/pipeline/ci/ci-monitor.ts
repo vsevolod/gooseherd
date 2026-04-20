@@ -138,13 +138,27 @@ export function truncateLog(log: string, maxChars: number = 3000): string {
 export function buildCIFixPrompt(
   annotations: CIAnnotation[],
   logTail: string,
-  changedFiles: string[]
+  changedFiles: string[],
+  failedRunNames: string[] = [],
+  runId?: string,
 ): string {
   const sanitizedChangedFiles = filterInternalGeneratedFiles(changedFiles);
   const lines: string[] = [
     "CI has failed on your PR. Fix the following failures only.",
     ""
   ];
+
+  if (runId?.trim()) {
+    lines.push(`Current Gooseherd run id: \`${runId}\``, "");
+  }
+
+  if (failedRunNames.length > 0) {
+    lines.push("## Failed Check Runs", "");
+    for (const name of failedRunNames) {
+      lines.push(`- ${name}`);
+    }
+    lines.push("");
+  }
 
   if (annotations.length > 0) {
     lines.push("## Check Run Annotations", "");
@@ -170,9 +184,13 @@ export function buildCIFixPrompt(
   lines.push(
     "## Instructions",
     "",
+    "- You are already on the existing PR branch",
     "- Fix only the CI failures shown above",
     "- Do not refactor unrelated code",
-    "- Do not change test expectations unless the test is wrong"
+    "- Do not change test expectations unless the test is wrong",
+    "- Do not create or switch to a new branch",
+    "- Do not create a new PR or merge the existing one",
+    "- The runner will commit and push user changes after you finish"
   );
 
   return lines.join("\n");
